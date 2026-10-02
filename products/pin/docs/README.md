@@ -81,6 +81,17 @@ What it can't show: the greeter's own behaviour, SELinux (a container doesn't en
 
 What was typed is held in `Secret` (`properpin-core`), which is wiped when dropped and can be neither printed nor cloned. The module copies it out of libpam once and drops it as soon as the check is done; libxcrypt's NUL-terminated input copy and its 32 KB work area are wiped after every hash, and a check compares the computed hash where libxcrypt wrote it, without copying it out. The CLI wraps both entries of `properpin set` and reads stdin into a buffer that can't grow. This is best effort: libpam's own copy (`PAM_AUTHTOK`, which `pam_unix` reads next and libpam wipes itself), the lock screen's copies and the terminal's are out of reach. `docs/pin-pam-copy.md` at the repo root holds the open question about libpam's copy.
 
+## CI
+
+GitHub Actions runs `.github/workflows/ci.yml` on every push to any branch and on pull requests. It has four jobs, and any of them failing fails the run:
+
+- **Tests (Fedora 44):** `cargo test --workspace --locked` in a `fedora:44` container with Fedora's own Rust, as an unprivileged user, because the module refuses to run as root.
+- **System test (podman):** the two commands behind `just properpin podman`, on an Ubuntu runner, with rootful podman (`sudo`): in the runner's rootless podman, setuid `unix_chkpwd` can't read `/etc/shadow`, so the real password never unlocks.
+- **Dependency audit:** `cargo-deny` and `cargo-audit`. Only known security advisories (and crates flagged unsound) fail it; licences, bans, duplicates and sources, configured in `deny.toml` at the repo root, only add a warning to the run for now.
+- **Rust 1.98 (Ubuntu):** the same tests with exactly the declared `rust-version`, against Ubuntu's libpam and libxcrypt.
+
+clippy and fmt are not in CI: run `just properpin lint` before pushing. Results are in the repository's Actions tab, or through `gh run list` and `gh run view --log-failed`. Dependabot proposes weekly bumps for the pinned actions and for `Cargo.lock`, once the configuration is on `main`.
+
 ## Three things learned building it
 
 - **The module must never be unloaded.** libpam `dlclose`s modules at every `pam_end`, but Rust's standard library registers thread-local destructors that glibc runs at thread exit. Once the module is unmapped, that segfaults the host process: here the lock screen (rust-lang/rust#91979). It reproduces on Fedora 44. The module is linked with `-z nodelete` (see `crates/pam/build.rs`), and the load/unload test in `tests/stack.rs` crashes without it.
