@@ -77,6 +77,10 @@ The scenarios: the rollout (refused after boot, armed by the password, three fai
 
 What it can't show: the greeter's own behaviour, SELinux (a container doesn't enforce the host's policy for its files), logind and the journal. The test was checked by breaking things on purpose: with the middle PAM line set to `default=ignore`, three scenarios fail and the log shows `unix_chkpwd` rejecting the password and the module arming the PIN anyway; with the readable-by-others check removed, its scenario fails.
 
+## Secrets in memory
+
+What was typed is held in `Secret` (`properpin-core`), which is wiped when dropped and can be neither printed nor cloned. The module copies it out of libpam once and drops it as soon as the check is done; libxcrypt's NUL-terminated input copy and its 32 KB work area are wiped after every hash, and a check compares the computed hash where libxcrypt wrote it, without copying it out. The CLI wraps both entries of `properpin set` and reads stdin into a buffer that can't grow. This is best effort: libpam's own copy (`PAM_AUTHTOK`, which `pam_unix` reads next and libpam wipes itself), the lock screen's copies and the terminal's are out of reach. `docs/pin-pam-copy.md` at the repo root holds the open question about libpam's copy.
+
 ## Three things learned building it
 
 - **The module must never be unloaded.** libpam `dlclose`s modules at every `pam_end`, but Rust's standard library registers thread-local destructors that glibc runs at thread exit. Once the module is unmapped, that segfaults the host process: here the lock screen (rust-lang/rust#91979). It reproduces on Fedora 44. The module is linked with `-z nodelete` (see `crates/pam/build.rs`), and the load/unload test in `tests/stack.rs` crashes without it.
@@ -85,4 +89,4 @@ What it can't show: the greeter's own behaviour, SELinux (a container doesn't en
 
 ## Not done yet
 
-SELinux labels verified on a real system (install.sh sets and checks them, but only a real machine or a VM enforces them), the real greeter, the repeated-access fix from poc-py's security analysis, wiping secrets from memory, duress, a TPM-backed counter and a verifying daemon. `docs/chaotic/` at the repo root has the research behind each of these.
+SELinux labels verified on a real system (install.sh sets and checks them, but only a real machine or a VM enforces them), the real greeter, the repeated-access fix from poc-py's security analysis, duress, a TPM-backed counter and a verifying daemon. `docs/chaotic/` at the repo root has the research behind each of these.

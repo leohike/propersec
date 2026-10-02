@@ -15,13 +15,13 @@
 
 #![forbid(unsafe_code)]
 
-use std::io::{BufRead, IsTerminal, stdin};
+use std::io::{BufRead, IsTerminal, Read, stdin};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
-use properpin_core::{Clock, Store, arm, check, describe_seconds, usable_input};
+use properpin_core::{Clock, MAX_PIN_BYTES, Secret, Store, arm, check, describe_seconds, usable_input};
 use properpin_sys::{Account, BootClock, UserFiles, Yescrypt, current_euid, current_uid, private_group};
 
 /// Manage the PIN that unlocks the KDE lock screen.
@@ -120,12 +120,13 @@ fn set(cli: &Cli, account: &Account) -> Result<()> {
     let files = files(cli, account)?;
     let settings = files.settings()?;
     let pin = ask_pin_twice()?;
-    let problems = settings.pin_problems(&pin);
+    let pin = std::str::from_utf8(pin.as_bytes()).context("the PIN is not valid UTF-8")?;
+    let problems = settings.pin_problems(pin);
     if !problems.is_empty() {
         bail!("the PIN needs {}", problems.join(", "));
     }
     // Only the hash changes. Per-user settings already in the file are kept.
-    files.save_pin_hash(&Yescrypt.hash(&pin, settings.hash_cost)?, group)?;
+    files.save_pin_hash(&Yescrypt.hash(pin, settings.hash_cost)?, group)?;
     println!("PIN set for {}. It works after the next password unlock at the lock screen.", account.name);
     Ok(())
 }
@@ -178,10 +179,9 @@ fn status(files: &UserFiles) -> Result<()> {
 }
 
 fn dev_check(files: &UserFiles) -> Result<bool> {
-    let mut typed = String::new();
-    stdin().lock().read_line(&mut typed)?;
-    let typed = typed.strip_suffix('\n').unwrap_or(&typed);
+    let typed = read_secret_line(&mut stdin().lock())?;
     let verdict = check(files, &Yescrypt, &BootClock, usable_input(typed.as_bytes()))?;
+    drop(typed);
     println!("{verdict}");
     Ok(verdict.unlocks())
 }
@@ -194,16 +194,53 @@ fn require_owner(owner: u32) -> Result<()> {
     }
 }
 
-fn ask_pin_twice() -> Result<String> {
+/// The new PIN, typed twice. Both entries are wiped when dropped. rpassword's own buffers, and
+/// the terminal's, are beyond reach; each String it returns is taken over without a copy.
+fn ask_pin_twice() -> Result<Secret> {
     let (first, second) = if stdin().is_terminal() {
-        (rpassword::prompt_password("New PIN: ")?, rpassword::prompt_password("Same again: ")?)
+        let prompt = |text| rpassword::prompt_password(text).map(|typed| Secret::new(typed.into_bytes()));
+        (prompt("New PIN: ")?, prompt("Same again: ")?)
     } else {
-        let mut lines = stdin().lock().lines();
-        let mut next = || lines.next().transpose().map(Option::unwrap_or_default);
-        (next()?, next()?)
+        let mut input = stdin().lock();
+        (read_secret_line(&mut input)?, read_secret_line(&mut input)?)
     };
-    if first != second {
+    if first.as_bytes() != second.as_bytes() {
         bail!("the two entries differ; nothing was changed");
     }
     Ok(first)
+}
+
+/// One line of `input`, without its newline. The buffer is sized once and the read is capped to
+/// fit it, so it never grows (growing would leave an unwiped copy behind). A line longer than
+/// any PIN comes back too long to be one, and its rest stays unread.
+fn read_secret_line(input: &mut impl BufRead) -> Result<Secret> {
+    let limit = MAX_PIN_BYTES + 2;
+    let mut line = Vec::with_capacity(limit);
+    input.take(limit as u64).read_until(b'\n', &mut line)?;
+    if line.last() == Some(&b'\n') {
+        line.pop();
+    }
+    Ok(Secret::new(line))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reads_one_line_at_a_time_without_the_newline() {
+        let mut input = &b"4859\n1234\nlast"[..];
+        assert_eq!(read_secret_line(&mut input).unwrap().as_bytes(), b"4859");
+        assert_eq!(read_secret_line(&mut input).unwrap().as_bytes(), b"1234");
+        assert_eq!(read_secret_line(&mut input).unwrap().as_bytes(), b"last");
+        assert_eq!(read_secret_line(&mut input).unwrap().as_bytes(), b"");
+    }
+
+    #[test]
+    fn a_long_line_is_capped_too_long_to_be_a_pin() {
+        let long = vec![b'1'; MAX_PIN_BYTES * 3];
+        let typed = read_secret_line(&mut &long[..]).unwrap();
+        assert_eq!(typed.as_bytes().len(), MAX_PIN_BYTES + 2);
+        assert_eq!(usable_input(typed.as_bytes()), None);
+    }
 }
