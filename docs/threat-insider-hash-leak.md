@@ -1,6 +1,8 @@
 # Threat: an insider who leaks the PIN hash and comes back in person
 
-A worked threat scenario, written on 2026-10-02, in which properpin gives clearly less security than typing the full passphrase every time. Every step has a rough estimate, so the weak link is easy to see and the fixes can be judged by what they change.
+A worked threat scenario, written on 2026-10-02, in which properpin gives clearly less security than typing the full passphrase every time.
+
+**Status, later on 2026-10-02:** the dedicated account and its helper are built (`products/pin/docs/README.md`, The helper section), which closes the copy at an unlocked desk and every other read-only leak that runs as the victim. Mixing the passphrase into the hash is not built; it is in `docs/plan.md`. The rest of this document describes the design as it was before the helper. Every step has a rough estimate, so the weak link is easy to see and the fixes can be judged by what they change.
 
 **Short version.** An insider with physical access copies the PIN hash once, in seconds and without leaving a trace. They crack a two-word PIN offline in a few days for tens of dollars, then unlock the machine in person whenever they like, on the first try. With the passphrase alone, the same insider gets nothing, because the copied hash would be useless. properpin turns a single brief read of one file into lasting, silent access. Against this attacker, the PIN is only as safe as that file is private, and today any program running as the user can read it.
 

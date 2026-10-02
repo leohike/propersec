@@ -1,0 +1,22 @@
+[package]
+name = "properpin-helper"
+description = "properpin-helper: the setuid program that holds the PIN hashes and counts, and answers yes or no."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "properpin-helper"
+path = "src/main.rs"
+
+[dependencies]
+libc.workspace = true
+properpin-core.workspace = true
+properpin-sys.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

@@ -8,8 +8,8 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use properpin_core::{Error, Log, Secret};
 use properpin_sys::FileLog;
 
-use crate::Args;
 use crate::run::{Transaction, run};
+use crate::{Args, Mode};
 
 const PAM_SUCCESS: c_int = 0;
 const PAM_IGNORE: c_int = 25;
@@ -71,9 +71,14 @@ pub unsafe extern "C" fn pam_sm_setcred(_pamh: *mut PamHandle, _flags: c_int, _a
     PAM_IGNORE
 }
 
+/// The helper logs every answer itself; the module logs only what went wrong on its side.
 fn run_and_log(pam: &Pam, args: &Args, log: &impl Log) -> bool {
-    run(pam, args, log).unwrap_or_else(|error| {
-        log.log(&format!("PIN refused: {error}"));
+    run(pam, args).unwrap_or_else(|error| {
+        let what = match args.mode {
+            Mode::Check => "PIN refused",
+            Mode::Arm => "PIN not armed",
+        };
+        log.log(&format!("{what}: {error}"));
         false
     })
 }
@@ -86,6 +91,34 @@ unsafe fn arguments(argc: c_int, argv: *const *const c_char) -> Vec<String> {
         // SAFETY: within the `argc` entries libpam passed.
         .map(|i| unsafe { CStr::from_ptr(*argv.add(i)) }.to_string_lossy().into_owned())
         .collect()
+}
+
+/// SIGCHLD set to its default action for as long as this lives, and then put back as it was. Like
+/// pam_unix around `unix_chkpwd`: a host that ignores SIGCHLD would have the helper's exit status
+/// discarded by the kernel, and the module couldn't read the answer. The setting is process-wide,
+/// so a host that changes it from another thread at the same moment could race with this, as it
+/// could with pam_unix.
+pub(crate) struct DefaultSigchld(libc::sigaction);
+
+impl DefaultSigchld {
+    pub(crate) fn set() -> Self {
+        // SAFETY: sigaction with a zeroed, default-action struct and a valid place for the old one.
+        unsafe {
+            let mut default: libc::sigaction = std::mem::zeroed();
+            default.sa_sigaction = libc::SIG_DFL;
+            libc::sigemptyset(&mut default.sa_mask);
+            let mut old: libc::sigaction = std::mem::zeroed();
+            libc::sigaction(libc::SIGCHLD, &default, &mut old);
+            Self(old)
+        }
+    }
+}
+
+impl Drop for DefaultSigchld {
+    fn drop(&mut self) {
+        // SAFETY: puts back exactly what `set` found.
+        unsafe { libc::sigaction(libc::SIGCHLD, &self.0, std::ptr::null_mut()) };
+    }
 }
 
 /// One PAM transaction, as the module sees it. Only built inside the entry points above.

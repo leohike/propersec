@@ -9,7 +9,8 @@
 //!
 //! This crate decides and does nothing else: no files, no clock, no hashing, no PAM. Those come
 //! in through the [`Store`], [`Clock`], [`Hasher`] and [`Log`] traits, which `properpin-sys`
-//! implements for the real machine and the tests implement in memory.
+//! implements for the real machine and the tests implement in memory. It also holds what the
+//! setuid helper and its callers must agree on: the [`exit`] codes and [`MAX_INPUT_BYTES`].
 
 #![forbid(unsafe_code)]
 
@@ -40,3 +41,19 @@ pub const HASH_PREFIX: &str = "$y$";
 
 /// The setting that holds the PIN hash. Only a user's own file may have it.
 pub const HASH_KEY: &str = "hash";
+
+/// The setuid helper's exit codes, which are all it answers: the PAM module and the CLI read them.
+pub mod exit {
+    /// `check`: the PIN unlocks. `arm`: the PIN is armed. `status`: printed.
+    pub const YES: u8 = 0;
+    /// `check`: not unlocked. `arm`: not armed. A clean "no", logged by the helper.
+    pub const NO: u8 = 1;
+    /// Bad arguments, or a refused environment: run as root, a terminal on stdin, `--dev-*` options
+    /// under setuid.
+    pub const USAGE: u8 = 2;
+    /// Something is broken: a file, the clock, libxcrypt, `unix_chkpwd`. Logged by the helper.
+    pub const BROKEN: u8 = 3;
+}
+
+/// The most the helper reads from stdin: libpam passes at most `PAM_MAX_RESP_SIZE` (512) bytes.
+pub const MAX_INPUT_BYTES: usize = 512;

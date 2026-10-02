@@ -2,6 +2,8 @@
 
 An open question, written down when the module started wiping its own copies of secrets (2026-10-02).
 
+**Later the same day, the PIN check moved into a setuid helper.** The module still copies what was typed out of libpam, but now writes it into a pipe to `properpin-helper` and drops its copy when the helper answers; the helper reads it into a buffer of fixed size and wipes it on exit, and `arm` passes the password on to `unix_chkpwd` through another pipe. That adds a short-lived copy in a second process, owned by the `properpin` account. The reasoning below still holds for both copies: each lives shorter than libpam's.
+
 ## The question
 
 The module copies what was typed out of libpam (`pam_get_authtok`) into a buffer of its own, which wipes itself when the check is done. Is libpam ever expected to wipe its copy as soon as possible, ahead of the end of the attempt, in a way our copy would defeat? Put differently: does our copy ever make the secret live longer, or in more places, than it would without properpin?

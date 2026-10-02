@@ -7,11 +7,13 @@
 #
 #   line 1  the PIN: a match ends the stack with success; anything else is ignored
 #   line 2  the password: a wrong one stops the stack with failure, here, so...
-#   line 3  ...arming the PIN only ever happens after a correct password
+#   line 3  ...arming the PIN only ever happens after a correct password (and the helper checks the
+#           password once more through unix_chkpwd before it arms, since anything the user runs
+#           could ask it to)
 #
 # The stock "auth substack password-auth" that follows then checks the same password again and
 # passes; it stays untouched. A substack can't take a control clause, and a failed one doesn't
 # stop the stack, which is why line 2 calls pam_unix directly.
-auth  [success=done default=ignore]  /usr/local/lib64/security/pam_properpin.so check etc=/etc/properpin run_base=/run/user
+auth  [success=done default=ignore]  /usr/local/lib64/security/pam_properpin.so check helper=/usr/local/libexec/properpin/properpin-helper
 auth  [success=ok default=die]       pam_unix.so use_first_pass
-auth  optional                       /usr/local/lib64/security/pam_properpin.so arm etc=/etc/properpin run_base=/run/user
+auth  optional                       /usr/local/lib64/security/pam_properpin.so arm helper=/usr/local/libexec/properpin/properpin-helper

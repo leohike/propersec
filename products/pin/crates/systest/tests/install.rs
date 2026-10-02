@@ -57,7 +57,7 @@ impl FakeRoot {
             .arg(command)
             .arg("--root")
             .arg(self.dir.path())
-            .args(["--owner", &whoami()])
+            .args(["--owner", &whoami(), "--account", &whoami()])
             .arg("--from")
             .arg(built())
             .output()
@@ -99,10 +99,11 @@ fn built() -> &'static Path {
     BUILT.get_or_init(|| {
         let manifest = concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml");
         let status = Command::new(env!("CARGO"))
-            .args(["build", "--quiet", "--package", "pam_properpin", "--package", "properpin-cli", "--manifest-path", manifest])
+            .args(["build", "--quiet", "--package", "pam_properpin", "--package", "properpin-helper", "--package", "properpin-cli"])
+            .args(["--manifest-path", manifest])
             .status()
             .unwrap();
-        assert!(status.success(), "building the module and the command failed");
+        assert!(status.success(), "building the module, the helper and the command failed");
         std::env::current_exe().unwrap().parent().and_then(Path::parent).unwrap().to_path_buf()
     })
 }
@@ -118,7 +119,7 @@ fn install_enable_disable_uninstall_leaves_pam_as_it_was() {
     let enabled = fs::read_to_string(root.kde()).unwrap();
     let lines: Vec<&str> = enabled.lines().collect();
     assert!(lines[0].starts_with("# properpin begin"), "{enabled}");
-    assert!(lines[1].contains("pam_properpin.so check etc=/etc/properpin run_base=/run/user"));
+    assert!(lines[1].contains("pam_properpin.so check helper=/usr/local/libexec/properpin/properpin-helper"));
     assert!(lines[2].contains("pam_unix.so use_first_pass"));
     assert!(lines[3].contains("pam_properpin.so arm"));
     assert_eq!(lines[4], "# properpin end");
@@ -132,7 +133,14 @@ fn install_enable_disable_uninstall_leaves_pam_as_it_was() {
     assert!(root.ok("disable").contains("nothing to do"));
 
     root.ok("uninstall");
-    for gone in ["usr/local/lib64/security/pam_properpin.so", "usr/local/libexec/properpin", "usr/local/bin/properpin"] {
+    for gone in [
+        "usr/local/lib64/security/pam_properpin.so",
+        "usr/local/libexec/properpin",
+        "usr/local/bin/properpin",
+        "etc/sysusers.d/properpin.conf",
+        "etc/tmpfiles.d/properpin.conf",
+        "run/properpin",
+    ] {
         assert!(!root.path(gone).exists(), "{gone} is still there");
     }
     assert!(root.path("etc/properpin/users").is_dir(), "PINs are kept");
@@ -146,7 +154,20 @@ fn install_puts_everything_in_place_and_twice_is_harmless() {
     let check = root.ok("check");
     assert!(check.contains("all properpin files in place"), "{check}");
     let command = fs::read_to_string(root.path("usr/local/bin/properpin")).unwrap();
-    assert!(command.contains("exec /usr/local/libexec/properpin/properpin --etc /etc/properpin --run-base /run/user \"$@\""), "{command}");
+    assert!(
+        command.contains(
+            "exec /usr/local/libexec/properpin/properpin --etc /etc/properpin --helper /usr/local/libexec/properpin/properpin-helper \"$@\""
+        ),
+        "{command}"
+    );
+    let mode = |path: &str| fs::metadata(root.path(path)).unwrap().permissions().mode() & 0o7777;
+    assert_eq!(mode("usr/local/libexec/properpin/properpin-helper"), 0o6755, "the helper is setuid and setgid");
+    assert_eq!(mode("etc/properpin/users"), 0o750);
+    assert_eq!(mode("run/properpin"), 0o700);
+    let sysusers = fs::read_to_string(root.path("etc/sysusers.d/properpin.conf")).unwrap();
+    assert!(sysusers.contains(&format!("u {} - ", whoami())), "{sysusers}");
+    let tmpfiles = fs::read_to_string(root.path("etc/tmpfiles.d/properpin.conf")).unwrap();
+    assert!(tmpfiles.contains(&format!("d /run/properpin 0700 {0} {0} -", whoami())), "{tmpfiles}");
     assert_eq!(
         fs::read(root.path("usr/local/lib64/security/pam_properpin.so")).unwrap(),
         fs::read(built().join("libpam_properpin.so")).unwrap()
@@ -171,6 +192,31 @@ fn check_finds_what_is_wrong() {
     fs::set_permissions(&user_file, Permissions::from_mode(0o644)).unwrap();
     let problems = root.refused("check");
     assert!(problems.contains(&format!("users/{}: is 644", group())), "{problems}");
+
+    root.ok("install");
+    fs::set_permissions(&user_file, Permissions::from_mode(0o640)).unwrap();
+    fs::set_permissions(root.path("usr/local/libexec/properpin/properpin-helper"), Permissions::from_mode(0o755)).unwrap();
+    fs::set_permissions(root.path("run/properpin"), Permissions::from_mode(0o755)).unwrap();
+    fs::write(root.path("etc/tmpfiles.d/properpin.conf"), "d /run/properpin 0777 root root -\n").unwrap();
+    let problems = root.refused("check");
+    assert!(problems.contains("properpin-helper: is 755"), "{problems}");
+    assert!(problems.contains("/run/properpin: is 755"), "{problems}");
+    assert!(problems.contains("tmpfiles.d/properpin.conf: not what install.sh writes"), "{problems}");
+}
+
+#[test]
+fn check_wants_the_account() {
+    let root = FakeRoot::new();
+    root.ok("install");
+    let output = Command::new("bash")
+        .arg(INSTALL_SH)
+        .args(["check", "--root"])
+        .arg(root.dir.path())
+        .args(["--owner", &whoami(), "--account", "no-such-account-properpin"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(says(&output).contains("no account named no-such-account-properpin"), "{}", says(&output));
 }
 
 #[test]

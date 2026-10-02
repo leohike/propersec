@@ -4,9 +4,8 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Args {
     pub mode: Mode,
-    pub etc: PathBuf,
-    pub run_base: PathBuf,
-    pub owner: u32,
+    /// The setuid helper that holds the hashes and the counts.
+    pub helper: PathBuf,
     pub log: Option<PathBuf>,
     pub test_panic: bool,
 }
@@ -19,31 +18,33 @@ pub enum Mode {
     Arm,
 }
 
+impl Mode {
+    /// The helper request for this mode.
+    pub fn request(self) -> &'static str {
+        match self {
+            Self::Check => "check",
+            Self::Arm => "arm",
+        }
+    }
+}
+
 impl Args {
     /// Parse a PAM line's arguments. Anything unknown is an error, never ignored: a typo in the
     /// PAM line must not quietly change what the module does.
     pub fn parse<'a>(words: impl IntoIterator<Item = &'a str>) -> Result<Self, String> {
-        let (mut mode, mut etc, mut run_base, mut owner, mut log, mut test_panic) = (None, None, None, 0, None, false);
+        let (mut mode, mut helper, mut log, mut test_panic) = (None, None, None, false);
         for word in words {
             match word.split_once('=') {
                 None if word == "check" => mode = Some(Mode::Check),
                 None if word == "arm" => mode = Some(Mode::Arm),
                 None if word == "test_panic" => test_panic = true,
-                Some(("etc", dir)) => etc = Some(PathBuf::from(dir)),
-                Some(("run_base", dir)) => run_base = Some(PathBuf::from(dir)),
-                Some(("owner", uid)) => owner = uid.parse().map_err(|_| format!("owner={uid} is not a uid"))?,
+                Some(("helper", path)) if path.starts_with('/') => helper = Some(PathBuf::from(path)),
+                Some(("helper", path)) => return Err(format!("helper={path} is not an absolute path")),
                 Some(("log", file)) => log = Some(PathBuf::from(file)),
                 _ => return Err(format!("unknown argument {word:?}")),
             }
         }
-        Ok(Self {
-            mode: mode.ok_or("no mode: expected check or arm")?,
-            etc: etc.ok_or("etc= is required")?,
-            run_base: run_base.ok_or("run_base= is required")?,
-            owner,
-            log,
-            test_panic,
-        })
+        Ok(Self { mode: mode.ok_or("no mode: expected check or arm")?, helper: helper.ok_or("helper= is required")?, log, test_panic })
     }
 }
 
@@ -53,22 +54,16 @@ mod tests {
 
     #[test]
     fn parses_a_shipped_line() {
-        let args = Args::parse("check etc=/etc/properpin run_base=/run/user".split(' ')).unwrap();
+        let args = Args::parse("check helper=/usr/local/libexec/properpin/properpin-helper".split(' ')).unwrap();
         assert_eq!(
             args,
-            Args { mode: Mode::Check, etc: "/etc/properpin".into(), run_base: "/run/user".into(), owner: 0, log: None, test_panic: false }
+            Args { mode: Mode::Check, helper: "/usr/local/libexec/properpin/properpin-helper".into(), log: None, test_panic: false }
         );
     }
 
     #[test]
     fn refuses_anything_unclear() {
-        for line in [
-            "etc=/e run_base=/r",
-            "check run_base=/r",
-            "check etc=/e",
-            "check etc=/e run_base=/r owner=root",
-            "check etc=/e run_base=/r debug",
-        ] {
+        for line in ["helper=/h", "check", "check helper=h", "check helper=/h etc=/etc/properpin", "check helper=/h debug"] {
             assert!(Args::parse(line.split(' ')).is_err(), "{line}");
         }
     }

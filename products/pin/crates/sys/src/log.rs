@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use properpin_core::Log;
 
-/// Appends one line per event to a file. Used by tests and the CLI's dev commands; the PAM module
+/// Appends one line per event to a file. Used by tests and the helper's `--dev-log`; the PAM module
 /// logs through `pam_syslog` instead.
 #[derive(Debug, Clone)]
 pub struct FileLog(pub PathBuf);

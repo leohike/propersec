@@ -2,10 +2,13 @@
 //!
 //! The PAM files come from a temporary directory (`pam_start_confdir`). The stack is the shipped
 //! `pam/kde-auth.pam` with only three things swapped: the module path points at the freshly built
-//! `.so`, the files point into the sandbox, and `pam_unix` becomes `pam_permit` (the password was
-//! right) or `pam_deny` (it was wrong). The control columns are the shipped ones.
+//! `.so`, the helper path at a script that runs the freshly built `properpin-helper` against the
+//! sandbox (through its `--dev-*` options, which it accepts here because it isn't setuid), and
+//! `pam_unix` becomes `pam_permit` (the password was right) or `pam_deny` (it was wrong). The
+//! control columns are the shipped ones.
 //!
-//! What this can't show: how the real pam_unix and the real greeter behave.
+//! What this can't show: how the real pam_unix, the real setuid helper and the real greeter
+//! behave. The container test covers the first two.
 
 use std::fs::{self, Permissions};
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
@@ -31,13 +34,13 @@ struct Sandbox {
 }
 
 impl Sandbox {
-    /// A sandboxed `/etc/properpin` with a PIN set for the current user, an empty runtime dir, and
-    /// a PAM config dir.
+    /// A sandboxed `/etc/properpin` with a PIN set for the current user, an empty runtime dir, a
+    /// helper that uses them, a stand-in for `unix_chkpwd`, and a PAM config dir.
     fn new() -> Self {
         let dir = tempfile::tempdir().unwrap();
         let user = Account::by_uid(current_uid()).unwrap().name;
         let sandbox = Self { dir, user };
-        fs::DirBuilder::new().recursive(true).mode(0o700).create(sandbox.run_dir()).unwrap();
+        fs::DirBuilder::new().mode(0o700).create(sandbox.run_dir()).unwrap();
         fs::set_permissions(sandbox.run_dir(), Permissions::from_mode(0o700)).unwrap();
         fs::create_dir_all(sandbox.path("etc/users")).unwrap();
         fs::create_dir_all(sandbox.path("pam.d")).unwrap();
@@ -46,6 +49,18 @@ impl Sandbox {
         let user_file = sandbox.path("etc/users").join(&sandbox.user);
         fs::write(&user_file, format!("hash = {}\n", Yescrypt.hash(PIN, 4).unwrap())).unwrap();
         fs::set_permissions(&user_file, Permissions::from_mode(0o640)).unwrap();
+        // unix_chkpwd's protocol: the password on stdin, ending in a NUL; exit 0 for a match.
+        let chkpwd = format!("#!/bin/bash\nIFS= read -r -d '' password\n[[ $1 == \"$(id -un)\" && $password == '{PASSWORD}' ]]\n");
+        sandbox.script("unix_chkpwd", &chkpwd);
+        let helper = format!(
+            "#!/bin/sh\nexec {} \"$@\" --dev-etc {} --dev-run {} --dev-chkpwd {} --dev-log {}\n",
+            built().join("properpin-helper").display(),
+            sandbox.path("etc").display(),
+            sandbox.run_dir().display(),
+            sandbox.path("unix_chkpwd").display(),
+            sandbox.path("log").display()
+        );
+        sandbox.script("helper", &helper);
         sandbox
     }
 
@@ -53,8 +68,13 @@ impl Sandbox {
         self.dir.path().join(relative)
     }
 
+    fn script(&self, name: &str, text: &str) {
+        fs::write(self.path(name), text).unwrap();
+        fs::set_permissions(self.path(name), Permissions::from_mode(0o755)).unwrap();
+    }
+
     fn run_dir(&self) -> PathBuf {
-        self.path("run").join(current_uid().to_string())
+        self.path("run")
     }
 
     fn log(&self) -> String {
@@ -63,14 +83,8 @@ impl Sandbox {
 
     /// Write the `kde` service: the shipped lines, sandboxed, with `extra` added to the check line.
     fn stack(&self, password: Password, extra: &str) {
-        let module = format!("{} {extra}", built_module().display());
-        let files = format!(
-            "etc={} run_base={} owner={} log={}",
-            self.path("etc").display(),
-            self.path("run").display(),
-            current_uid(),
-            self.path("log").display()
-        );
+        let module = format!("{} {extra}", built().join("libpam_properpin.so").display());
+        let helper = format!("helper={} log={}", self.path("helper").display(), self.path("log").display());
         let unix = match password {
             Password::Right => "pam_permit.so",
             Password::Wrong => "pam_deny.so",
@@ -78,7 +92,7 @@ impl Sandbox {
         let mut text = SHIPPED.to_owned();
         for (old, new) in [
             ("/usr/local/lib64/security/pam_properpin.so", module.as_str()),
-            ("etc=/etc/properpin run_base=/run/user", files.as_str()),
+            ("helper=/usr/local/libexec/properpin/properpin-helper", helper.as_str()),
             ("pam_unix.so use_first_pass", unix),
         ] {
             // Fail loudly if the shipped file changes shape, rather than test something else.
@@ -102,11 +116,12 @@ impl Sandbox {
     }
 }
 
-/// The freshly built `pam_properpin.so`. `cargo test` rebuilds this crate's rlib for the tests but
-/// not its cdylib, so build it here, once per test run, or the tests would load a stale module.
-fn built_module() -> PathBuf {
-    static MODULE: OnceLock<PathBuf> = OnceLock::new();
-    MODULE
+/// The directory with a fresh `pam_properpin.so` and `properpin-helper`. `cargo test` rebuilds this
+/// crate's rlib for the tests but not its cdylib, so build both here, once per test run, or the
+/// tests would load a stale module.
+fn built() -> PathBuf {
+    static BUILT: OnceLock<PathBuf> = OnceLock::new();
+    BUILT
         .get_or_init(|| {
             let profile_dir = std::env::current_exe().unwrap().parent().and_then(Path::parent).unwrap().to_path_buf();
             let mut cargo = std::process::Command::new(env!("CARGO"));
@@ -115,14 +130,16 @@ fn built_module() -> PathBuf {
                 "--quiet",
                 "--package",
                 "pam_properpin",
+                "--package",
+                "properpin-helper",
                 "--manifest-path",
                 concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"),
             ]);
             if profile_dir.ends_with("release") {
                 cargo.arg("--release");
             }
-            assert!(cargo.status().unwrap().success(), "building pam_properpin failed");
-            profile_dir.join("libpam_properpin.so")
+            assert!(cargo.status().unwrap().success(), "building pam_properpin and properpin-helper failed");
+            profile_dir
         })
         .clone()
 }
@@ -149,7 +166,7 @@ fn the_password_arms_the_pin_and_the_pin_unlocks() {
 fn a_wrong_password_never_arms_the_pin() {
     let sandbox = Sandbox::new();
     assert!(!sandbox.attempt(Password::Wrong, "a wrong password, long enough").unlocked());
-    assert!(!sandbox.run_dir().join("properpin.state").exists());
+    assert!(!sandbox.run_dir().join(format!("{}.state", current_uid())).exists());
     assert!(!sandbox.attempt(Password::Wrong, PIN).unlocked());
 }
 
@@ -211,4 +228,30 @@ fn survives_many_loads_and_unloads_across_threads() {
             });
         }
     });
+}
+
+/// Whatever goes wrong with the helper, the PIN is refused and the password still works.
+#[test]
+fn a_broken_helper_fails_closed() {
+    for (name, helper) in [
+        ("missing", None),
+        ("exits with an odd code", Some("#!/bin/sh\nexit 3\n")),
+        ("killed by a signal", Some("#!/bin/sh\nkill -9 $$\n")),
+        ("quits without reading", Some("#!/bin/sh\nexit 0\n")),
+    ] {
+        let sandbox = Sandbox::new();
+        sandbox.unlock_with_password();
+        match helper {
+            None => fs::remove_file(sandbox.path("helper")).unwrap(),
+            Some(text) => sandbox.script("helper", text),
+        }
+        // "quits without reading" exits 0, a yes: the module trusts the helper's answer, so that
+        // one unlocks. The point there is that writing to it raises no SIGPIPE in the host.
+        let unlocked = sandbox.attempt(Password::Wrong, PIN).unlocked();
+        assert_eq!(unlocked, name == "quits without reading", "{name}: {}", sandbox.log());
+        if name != "quits without reading" {
+            assert!(sandbox.log().contains("PIN refused:"), "{name}: {}", sandbox.log());
+        }
+        assert!(sandbox.attempt(Password::Right, PASSWORD).unlocked(), "{name}: the password must still work");
+    }
 }

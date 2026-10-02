@@ -6,9 +6,9 @@
 # Recipes run at the workspace root, where Cargo.toml and target/ are.
 set working-directory := "../.."
 
-# Build the properpin command and pam_properpin.so
+# Build the properpin command, the setuid helper and pam_properpin.so
 build:
-    cargo build -p properpin-cli -p pam_properpin
+    cargo build -p properpin-cli -p properpin-helper -p pam_properpin
 
 # Every test: the rules, files and hashing, the CLI, and the PAM stack through the system's libpam
 test *args:
@@ -27,23 +27,29 @@ lint:
 fmt:
     cargo fmt --all
 
-# The whole lifecycle in a temporary directory: set, refused, armed, unlocked, three failures, refused
+# The whole lifecycle in a temporary directory, through the real helper binary (not setuid, so its --dev options work): set, refused, armed, unlocked, three failures, refused
 demo:
     #!/usr/bin/env bash
     set -euo pipefail
-    cargo build -q -p properpin-cli
-    bin="$PWD/target/debug/properpin"
+    cargo build -q -p properpin-cli -p properpin-helper
+    bin="$PWD/target/debug"
     root=$(mktemp -d)
     trap 'rm -rf "$root"' EXIT
-    uid=$(id -u)
-    mkdir -p "$root/run/$uid" && chmod 700 "$root/run/$uid"
-    properpin() { "$bin" --etc "$root/etc" --run-base "$root/run" --owner "$uid" "$@"; }
+    mkdir -m 700 "$root/run"
+    # Stands in for unix_chkpwd: accepts the password "correct horse battery staple".
+    printf '#!/bin/bash\nIFS= read -r -d "" p\n[[ $p == "correct horse battery staple" ]]\n' >"$root/unix_chkpwd"
+    printf '#!/bin/sh\nexec %s "$@" --dev-etc %s --dev-run %s --dev-chkpwd %s --dev-log %s\n' \
+        "$bin/properpin-helper" "$root/etc" "$root/run" "$root/unix_chkpwd" "$root/log" >"$root/helper"
+    chmod +x "$root/unix_chkpwd" "$root/helper"
+    properpin() { "$bin/properpin" --etc "$root/etc" --helper "$root/helper" --owner "$(id -u)" --group "$(id -g)" "$@"; }
     step() { printf '\n\033[1m%s\033[0m\n' "$*"; }
-    lock_screen() { step "lock screen: $1"; echo "$1" | properpin dev check || true; }
+    said() { tail -n 1 "$root/log"; }
+    lock_screen() { step "lock screen: $1"; echo -n "$1" | "$root/helper" check || true; said; }
     step "properpin set (4859, typed twice)"; printf '4859\n4859\n' | properpin set
     step "properpin status"; properpin status
     lock_screen 4859
-    step "lock screen: the correct password"; properpin dev arm
+    step "lock screen: the correct password, so the arm line runs"
+    echo -n "correct horse battery staple" | "$root/helper" arm; said
     lock_screen 4859
     for wrong in 1111 2222 3333; do lock_screen "$wrong"; done
     lock_screen 4859

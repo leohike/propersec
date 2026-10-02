@@ -18,37 +18,51 @@ const LOCK_TIMEOUT: Duration = Duration::from_secs(1);
 /// One user's properpin files, and the rules for trusting each of them:
 ///
 /// ```text
-/// <etc>/config                           global settings, optional       owner-only writable
-/// <etc>/users/<user>                     the user's settings and hash    owner:<user's group> 0640
-/// <run_base>/<uid>/properpin.state       a PinState                      the user's own, on tmpfs
-/// <run_base>/<uid>/properpin.lock        serialises concurrent attempts  the user's own
+/// <etc>/config               global settings, optional            owner-only writable
+/// <etc>/users/<user>         the user's settings and hash         owner:<helper group> 0640
+/// <run_dir>/<uid>.state      a PinState                           the helper account's, on tmpfs
+/// <run_dir>/<uid>.lock       serialises concurrent attempts       the helper account's
 /// ```
 ///
-/// The settings and the hash must belong to `owner`, so the user can't change them: root once
-/// installed, the test's own uid in tests. The state lives in the user's runtime directory.
+/// The settings and the hash must belong to `etc_owner`, so nobody else can change them: root once
+/// installed, the test's own uid in tests. The state lives in one directory for all users, owned by
+/// `run_owner`, the account the setuid helper runs as, so a user can neither read nor reset their
+/// counts. `properpin set` and `remove` need only the `etc` side; [`UserFiles::with_runtime`] adds
+/// the state, which only the helper uses.
 #[derive(Debug, Clone)]
 pub struct UserFiles {
     etc: PathBuf,
-    run_base: PathBuf,
-    owner: u32,
+    etc_owner: u32,
+    runtime: Option<Runtime>,
     user: String,
     uid: u32,
 }
 
+#[derive(Debug, Clone)]
+struct Runtime {
+    dir: PathBuf,
+    owner: u32,
+}
+
 impl UserFiles {
-    pub fn new(etc: impl Into<PathBuf>, run_base: impl Into<PathBuf>, owner: u32, user: &str, uid: u32) -> Result<Self, Error> {
+    pub fn new(etc: impl Into<PathBuf>, etc_owner: u32, user: &str, uid: u32) -> Result<Self, Error> {
         if user.is_empty() || user.contains('/') || user == "." || user == ".." {
             return Err(Error::System(format!("{user:?} is not a usable user name")));
         }
-        Ok(Self { etc: etc.into(), run_base: run_base.into(), owner, user: user.into(), uid })
+        Ok(Self { etc: etc.into(), etc_owner, runtime: None, user: user.into(), uid })
+    }
+
+    /// The same files, plus the per-boot state in `dir`, which must belong to `owner`.
+    pub fn with_runtime(self, dir: impl Into<PathBuf>, owner: u32) -> Self {
+        Self { runtime: Some(Runtime { dir: dir.into(), owner }), ..self }
     }
 
     pub fn user(&self) -> &str {
         &self.user
     }
 
-    pub fn owner(&self) -> u32 {
-        self.owner
+    pub fn etc_owner(&self) -> u32 {
+        self.etc_owner
     }
 
     pub fn config(&self) -> PathBuf {
@@ -59,16 +73,16 @@ impl UserFiles {
         self.etc.join("users").join(&self.user)
     }
 
-    pub fn run_dir(&self) -> PathBuf {
-        self.run_base.join(self.uid.to_string())
+    fn runtime(&self) -> Result<&Runtime, Error> {
+        self.runtime.as_ref().ok_or_else(|| Error::System("no runtime directory: only the helper keeps state".into()))
     }
 
-    pub fn state_file(&self) -> PathBuf {
-        self.run_dir().join("properpin.state")
+    pub fn state_file(&self) -> Option<PathBuf> {
+        Some(self.runtime.as_ref()?.dir.join(format!("{}.state", self.uid)))
     }
 
-    pub fn lock_file(&self) -> PathBuf {
-        self.run_dir().join("properpin.lock")
+    pub fn lock_file(&self) -> Option<PathBuf> {
+        Some(self.runtime.as_ref()?.dir.join(format!("{}.lock", self.uid)))
     }
 
     // --- the owner's side: settings and hash
@@ -82,8 +96,8 @@ impl UserFiles {
             result => result.map_err(|error| system(path.display(), error))?,
         };
         let refuse = |why: String| Err(Error::System(format!("{}: {why}", path.display())));
-        if info.uid() != self.owner {
-            return refuse(format!("owned by uid {}, not {}", info.uid(), self.owner));
+        if info.uid() != self.etc_owner {
+            return refuse(format!("owned by uid {}, not {}", info.uid(), self.etc_owner));
         }
         if info.mode() & 0o022 != 0 {
             return refuse("writable by its group or by others".into());
@@ -99,8 +113,8 @@ impl UserFiles {
         kv::parse(&text, &path.display().to_string())
     }
 
-    /// Atomically write a new hash into the user's file: owned by the owner, readable by `group`,
-    /// mode 0640. The user's other settings in the file are kept as they are.
+    /// Atomically write a new hash into the user's file: owned by the owner, readable by `group`
+    /// (the helper's), mode 0640. The user's other settings in the file are kept as they are.
     pub fn save_pin_hash(&self, hash: &str, group: u32) -> Result<(), Error> {
         let path = self.user_file();
         let pairs = kv::with(self.read_pairs(&path, true)?, HASH_KEY, hash);
@@ -108,7 +122,7 @@ impl UserFiles {
         fs::DirBuilder::new().recursive(true).mode(0o755).create(dir).map_err(|error| system(dir.display(), error))?;
         let write = || -> std::io::Result<()> {
             let mut file = tempfile::Builder::new().prefix(&format!(".{}.", self.user)).tempfile_in(dir)?;
-            fchown(file.as_file(), Some(self.owner), Some(group))?;
+            fchown(file.as_file(), Some(self.etc_owner), Some(group))?;
             file.as_file().set_permissions(Permissions::from_mode(0o640))?;
             file.write_all(kv::format(&pairs).as_bytes())?;
             file.as_file().sync_all()?;
@@ -128,16 +142,16 @@ impl UserFiles {
         }
     }
 
-    // --- the user's side: per-boot state
+    // --- the helper's side: per-boot state
 
-    /// Refuse a runtime directory that isn't the user's own private one.
-    fn require_private_run_dir(&self) -> Result<(), Error> {
-        let dir = self.run_dir();
-        let info = fs::symlink_metadata(&dir).map_err(|error| system(dir.display(), error))?;
-        if !info.is_dir() || info.uid() != self.uid || info.mode() & 0o077 != 0 {
-            return Err(Error::System(format!("{} is not a private directory owned by uid {}", dir.display(), self.uid)));
+    /// Refuse a runtime directory that isn't the helper account's own private one.
+    fn private_run_dir(&self) -> Result<&Path, Error> {
+        let runtime = self.runtime()?;
+        let info = fs::symlink_metadata(&runtime.dir).map_err(|error| system(runtime.dir.display(), error))?;
+        if !info.is_dir() || info.uid() != runtime.owner || info.mode() & 0o077 != 0 {
+            return Err(Error::System(format!("{} is not a private directory owned by uid {}", runtime.dir.display(), runtime.owner)));
         }
-        Ok(())
+        Ok(&runtime.dir)
     }
 }
 
@@ -153,8 +167,7 @@ impl Store for UserFiles {
     }
 
     fn lock(&self) -> Result<Flock<File>, Error> {
-        self.require_private_run_dir()?;
-        let path = self.lock_file();
+        let path = self.private_run_dir()?.join(format!("{}.lock", self.uid));
         let open = OpenOptions::new().read(true).write(true).create(true).mode(0o600).custom_flags(O_NOFOLLOW).open(&path);
         let mut file = open.map_err(|error| system(path.display(), error))?;
         let deadline = Instant::now() + LOCK_TIMEOUT;
@@ -169,14 +182,15 @@ impl Store for UserFiles {
     }
 
     fn load_state(&self) -> Option<PinState> {
-        let (_, text) = read_regular_file(&self.state_file()).ok()?;
+        let (_, text) = read_regular_file(&self.state_file()?).ok()?;
         PinState::parse(&text)
     }
 
     fn save_state(&self, state: &PinState) -> Result<(), Error> {
-        let path = self.state_file();
+        let dir = self.private_run_dir()?;
+        let path = dir.join(format!("{}.state", self.uid));
         let write = || -> std::io::Result<()> {
-            let mut file = tempfile::Builder::new().prefix(".properpin.").tempfile_in(self.run_dir())?;
+            let mut file = tempfile::Builder::new().prefix(&format!(".{}.", self.uid)).tempfile_in(dir)?;
             file.write_all(state.format().as_bytes())?;
             file.persist(&path)?;
             Ok(())
@@ -217,10 +231,10 @@ mod tests {
     fn scratch() -> Scratch {
         let dir = tempfile::tempdir().unwrap();
         let uid = current_uid();
-        let run_dir = dir.path().join("run").join(uid.to_string());
-        fs::DirBuilder::new().recursive(true).mode(0o700).create(&run_dir).unwrap();
+        let run_dir = dir.path().join("run");
+        fs::DirBuilder::new().mode(0o700).create(&run_dir).unwrap();
         fs::set_permissions(&run_dir, Permissions::from_mode(0o700)).unwrap();
-        let files = UserFiles::new(dir.path().join("etc"), dir.path().join("run"), uid, "tester", uid).unwrap();
+        let files = UserFiles::new(dir.path().join("etc"), uid, "tester", uid).unwrap().with_runtime(run_dir, uid);
         Scratch { _dir: dir, files }
     }
 
@@ -247,7 +261,7 @@ mod tests {
             let error = files.settings().unwrap_err().to_string();
             assert!(error.contains(why), "{error}");
         }
-        let other_owner = UserFiles::new(files.etc.clone(), files.run_base.clone(), files.owner + 1, "tester", files.uid).unwrap();
+        let other_owner = UserFiles::new(files.etc.clone(), files.etc_owner + 1, "tester", files.uid).unwrap();
         write(&files.user_file(), "hash = $y$x\n", 0o640);
         assert!(other_owner.settings().unwrap_err().to_string().contains("owned by uid"));
     }
@@ -285,8 +299,36 @@ mod tests {
     #[test]
     fn a_shared_run_dir_is_refused() {
         let Scratch { files, .. } = &scratch();
-        fs::set_permissions(files.run_dir(), Permissions::from_mode(0o755)).unwrap();
+        fs::set_permissions(files.state_file().unwrap().parent().unwrap(), Permissions::from_mode(0o755)).unwrap();
         assert!(files.lock().unwrap_err().to_string().contains("not a private directory"));
+    }
+
+    #[test]
+    fn a_run_dir_owned_by_someone_else_is_refused() {
+        let Scratch { files, .. } = &scratch();
+        let runtime = files.runtime.clone().unwrap();
+        let theirs = files.clone().with_runtime(runtime.dir, runtime.owner + 1);
+        assert!(theirs.lock().unwrap_err().to_string().contains("not a private directory owned by uid"));
+    }
+
+    #[test]
+    fn without_a_runtime_there_is_no_state() {
+        let Scratch { files, .. } = &scratch();
+        let etc_only = UserFiles::new(files.etc.clone(), files.etc_owner, "tester", files.uid).unwrap();
+        assert!(etc_only.lock().is_err());
+        assert_eq!(etc_only.load_state(), None);
+    }
+
+    #[test]
+    fn each_user_has_their_own_state() {
+        let Scratch { files, .. } = &scratch();
+        let runtime = files.runtime.clone().unwrap();
+        let other =
+            UserFiles::new(files.etc.clone(), files.etc_owner, "other", files.uid + 1).unwrap().with_runtime(runtime.dir, runtime.owner);
+        let state = PinState { boot_id: "b".into(), armed_at: 7, failures: 1 };
+        files.save_state(&state).unwrap();
+        assert_eq!(other.load_state(), None);
+        assert_ne!(files.state_file(), other.state_file());
     }
 
     #[test]

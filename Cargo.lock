@@ -287,6 +287,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 name = "pam_properpin"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "pamharness",
  "properpin-core",
  "properpin-sys",
@@ -365,6 +366,16 @@ dependencies = [
  "proptest",
  "thiserror",
  "zeroize",
+]
+
+[[package]]
+name = "properpin-helper"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "properpin-core",
+ "properpin-sys",
+ "tempfile",
 ]
 
 [[package]]

@@ -1,4 +1,4 @@
-use nix::unistd::{Gid, Group, Uid, User, geteuid, getuid};
+use nix::unistd::{Group, Uid, User, geteuid, getuid};
 use properpin_core::Error;
 
 use crate::system;
@@ -37,46 +37,13 @@ pub fn current_euid() -> u32 {
     geteuid().as_raw()
 }
 
-/// The account's own group, which may read its hash file. A group anyone else belongs to is refused:
-/// its members could read the hash and crack the PIN offline.
-pub fn private_group(account: &Account) -> Result<u32, Error> {
-    let gid = account.gid;
-    let group = Group::from_gid(Gid::from_raw(gid)).map_err(|error| system(format!("gid {gid}"), error))?;
-    let group = group.ok_or_else(|| Error::System(format!("no group with gid {gid}")))?;
-    let others = other_users_with_primary_group(gid, &account.name);
-    if group.name != account.name || !group.mem.is_empty() || !others.is_empty() {
-        return Err(Error::System(format!(
-            "{}'s primary group {:?} is not private to them, so it can't guard the hash",
-            account.name, group.name
-        )));
+/// The gid of the group named `name`, or of `name` itself when it is a number.
+pub fn group_by_name(name: &str) -> Result<u32, Error> {
+    if !name.is_empty() && name.bytes().all(|byte| byte.is_ascii_digit()) {
+        return name.parse().map_err(|error| system(format!("group {name:?}"), error));
     }
-    Ok(gid)
-}
-
-/// Every account except `except` whose primary group is `gid`. Walks the passwd database, which
-/// nix has no safe wrapper for. Not thread-safe; only the CLI calls it.
-#[allow(unsafe_code)]
-fn other_users_with_primary_group(gid: u32, except: &str) -> Vec<String> {
-    let mut names = Vec::new();
-    // SAFETY: setpwent/getpwent/endpwent walk the passwd database. Each entry is read before the
-    // next call, and its name is copied out. Nothing else in this process walks it concurrently.
-    unsafe {
-        nix::libc::setpwent();
-        loop {
-            let entry = nix::libc::getpwent();
-            if entry.is_null() {
-                break;
-            }
-            if (*entry).pw_gid == gid {
-                let name = std::ffi::CStr::from_ptr((*entry).pw_name).to_string_lossy().into_owned();
-                if name != except {
-                    names.push(name);
-                }
-            }
-        }
-        nix::libc::endpwent();
-    }
-    names
+    let group = Group::from_name(name).map_err(|error| system(format!("group {name:?}"), error))?;
+    group.map(|group| group.gid.as_raw()).ok_or_else(|| Error::System(format!("no group named {name:?}")))
 }
 
 #[cfg(test)]
@@ -91,8 +58,9 @@ mod tests {
     }
 
     #[test]
-    fn root_group_is_not_private_to_a_user() {
-        let fake = Account { name: "someone".into(), uid: 4242, gid: 0 };
-        assert!(private_group(&fake).is_err());
+    fn finds_groups_by_name_or_number() {
+        assert_eq!(group_by_name("root").unwrap(), 0);
+        assert_eq!(group_by_name("4242").unwrap(), 4242);
+        assert!(group_by_name("no-such-group-properpin").is_err());
     }
 }

@@ -3,26 +3,27 @@
 //! ```text
 //! sudo properpin set      choose a new PIN, typed twice
 //! sudo properpin remove   delete it; the lock screen takes the password only
-//! properpin status        what is set, which rules apply, and whether the PIN is armed now
-//! properpin dev check     do what the lock screen's check line does, with the PIN from stdin
-//! properpin dev arm       do what the lock screen does after a correct password
+//! properpin status        your PIN: what is set, which rules apply, and whether it is armed now
 //! ```
 //!
 //! `set` and `remove` change files only root may change, so they run under sudo or pkexec, and
 //! getting there takes the password. That's the point: someone at an unlocked desk must not be able
 //! to plant a PIN they know. The PIN is read from the terminal, or from stdin when it isn't one,
 //! never from the command line, where other users could see it in the process list.
+//!
+//! The hash file is written readable by the helper's group only, so the user can't read it either:
+//! `status` asks the setuid helper, which is the only program that reads hashes and counts.
 
 #![forbid(unsafe_code)]
 
 use std::io::{BufRead, IsTerminal, Read, stdin};
 use std::path::PathBuf;
-use std::process::ExitCode;
+use std::process::{Command, ExitCode, Stdio};
 
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
-use properpin_core::{Clock, MAX_PIN_BYTES, Secret, Store, arm, check, describe_seconds, usable_input};
-use properpin_sys::{Account, BootClock, UserFiles, Yescrypt, current_euid, current_uid, private_group};
+use properpin_core::{MAX_PIN_BYTES, Secret, Store, exit};
+use properpin_sys::{Account, UserFiles, Yescrypt, current_euid, current_uid, group_by_name};
 
 /// Manage the PIN that unlocks the KDE lock screen.
 #[derive(Debug, Parser)]
@@ -31,27 +32,27 @@ struct Cli {
     /// Where config and users/ live; /etc/properpin once installed
     #[arg(long, value_name = "DIR")]
     etc: PathBuf,
-    /// Parent of the per-uid runtime dirs; /run/user once installed
-    #[arg(long, value_name = "DIR")]
-    run_base: PathBuf,
+    /// The setuid helper, which status asks; /usr/local/libexec/properpin/properpin-helper once installed
+    #[arg(long, value_name = "PATH")]
+    helper: PathBuf,
     /// Who must own the files under --etc
     #[arg(long, value_name = "UID", default_value_t = 0)]
     owner: u32,
+    /// The helper's group, the only one that may read hash files
+    #[arg(long, value_name = "GROUP", default_value = "properpin")]
+    group: String,
     #[command(subcommand)]
-    command: Command,
+    command: Action,
 }
 
 #[derive(Debug, Subcommand)]
-enum Command {
+enum Action {
     /// Choose a new PIN, typed twice
     Set(Target),
     /// Delete the PIN; the lock screen takes the password only
     Remove(Target),
-    /// Show what is set and whether the PIN is armed right now
-    Status(Target),
-    /// Simulate the lock screen, for demos and tests
-    #[command(subcommand)]
-    Dev(Dev),
+    /// Show your PIN: what is set and whether it is armed right now
+    Status,
 }
 
 #[derive(Debug, Args)]
@@ -59,14 +60,6 @@ struct Target {
     /// Whose PIN; default: the sudo or pkexec caller, or you
     #[arg(long)]
     user: Option<String>,
-}
-
-#[derive(Debug, Subcommand)]
-enum Dev {
-    /// Do what the lock screen's check line does, with the typed input from stdin; exit 0 unlocks
-    Check,
-    /// Do what the lock screen does after a correct password: arm the PIN
-    Arm,
 }
 
 fn main() -> ExitCode {
@@ -81,23 +74,18 @@ fn main() -> ExitCode {
     }
 }
 
-/// `Ok(false)` is a clean "no": a refused `dev check`.
+/// `Ok(false)` is a clean "no".
 fn run(cli: &Cli) -> Result<bool> {
     match &cli.command {
-        Command::Set(target) => set(cli, &target_account(target)?)?,
-        Command::Remove(target) => remove(cli, &target_account(target)?)?,
-        Command::Status(target) => status(&files(cli, &target_account(target)?)?)?,
-        Command::Dev(Dev::Check) => return dev_check(&files(cli, &Account::by_uid(current_uid())?)?),
-        Command::Dev(Dev::Arm) => {
-            arm(&files(cli, &Account::by_uid(current_uid())?)?, &BootClock)?;
-            println!("password accepted, PIN armed");
-        }
+        Action::Set(target) => set(cli, &target_account(target)?)?,
+        Action::Remove(target) => remove(cli, &target_account(target)?)?,
+        Action::Status => return status(cli),
     }
     Ok(true)
 }
 
 fn files(cli: &Cli, account: &Account) -> Result<UserFiles> {
-    Ok(UserFiles::new(&cli.etc, &cli.run_base, cli.owner, &account.name, account.uid)?)
+    Ok(UserFiles::new(&cli.etc, cli.owner, &account.name, account.uid)?)
 }
 
 /// Whose PIN: the one named, else whoever called sudo or pkexec, else whoever runs this.
@@ -116,7 +104,7 @@ fn target_account(target: &Target) -> Result<Account> {
 
 fn set(cli: &Cli, account: &Account) -> Result<()> {
     require_owner(cli.owner)?;
-    let group = private_group(account)?;
+    let group = group_by_name(&cli.group)?;
     let files = files(cli, account)?;
     let settings = files.settings()?;
     let pin = ask_pin_twice()?;
@@ -140,50 +128,21 @@ fn remove(cli: &Cli, account: &Account) -> Result<()> {
     Ok(())
 }
 
-fn status(files: &UserFiles) -> Result<()> {
-    println!("user       {}", files.user());
-    let settings = match files.settings() {
-        Ok(settings) if settings.pin_hash.is_empty() => {
-            println!("PIN        none set");
-            return Ok(());
-        }
-        Ok(settings) => settings,
-        Err(error) => {
-            println!("PIN        unusable: {error}");
-            return Ok(());
-        }
-    };
-    println!("PIN        set, in {}", files.user_file().display());
-    println!("policy     armed for {}h after a password unlock, until {} failures in a row", settings.expiry_hours, settings.max_failures);
-    let mut rules = format!("{} to {} characters", settings.min_pin_length, settings.max_pin_length);
-    if settings.min_letters > 0 {
-        rules += &format!(", {} English letters", settings.min_letters);
+/// The helper prints the status: only it can read the hash file and the counts.
+fn status(cli: &Cli) -> Result<bool> {
+    if current_uid() == 0 {
+        bail!("status shows your own PIN; run it as yourself, without sudo");
     }
-    println!("set rules  {rules}, yescrypt cost {}", settings.hash_cost);
-    let state = files.load_state();
-    let now = BootClock.now()?;
-    match (settings.refusal(state.as_ref(), &BootClock.boot_id()?, now), state) {
-        (Some(refusal), _) => println!("right now  password required: {refusal}"),
-        (None, Some(state)) => {
-            let left = settings.expiry_seconds() as u64 - (now - state.armed_at);
-            println!(
-                "right now  PIN armed for another {}, {} of {} failures so far",
-                describe_seconds(left),
-                state.failures,
-                settings.max_failures
-            );
-        }
-        (None, None) => unreachable!("no state is always a refusal"),
+    let output = Command::new(&cli.helper)
+        .arg("status")
+        .stdin(Stdio::null())
+        .output()
+        .with_context(|| format!("running {}", cli.helper.display()))?;
+    print!("{}", String::from_utf8_lossy(&output.stdout));
+    match output.status.code().and_then(|code| u8::try_from(code).ok()) {
+        Some(exit::YES) => Ok(true),
+        _ => bail!("{} failed ({}); the system log says why", cli.helper.display(), output.status),
     }
-    Ok(())
-}
-
-fn dev_check(files: &UserFiles) -> Result<bool> {
-    let typed = read_secret_line(&mut stdin().lock())?;
-    let verdict = check(files, &Yescrypt, &BootClock, usable_input(typed.as_bytes()))?;
-    drop(typed);
-    println!("{verdict}");
-    Ok(verdict.unlocks())
 }
 
 fn require_owner(owner: u32) -> Result<()> {
@@ -241,6 +200,6 @@ mod tests {
         let long = vec![b'1'; MAX_PIN_BYTES * 3];
         let typed = read_secret_line(&mut &long[..]).unwrap();
         assert_eq!(typed.as_bytes().len(), MAX_PIN_BYTES + 2);
-        assert_eq!(usable_input(typed.as_bytes()), None);
+        assert_eq!(properpin_core::usable_input(typed.as_bytes()), None);
     }
 }

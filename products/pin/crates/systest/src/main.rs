@@ -1,5 +1,5 @@
-//! properpin's system test: the installed module in a stock Fedora, through the real `/etc/pam.d`,
-//! the real `pam_unix` and its setuid helper `unix_chkpwd`.
+//! properpin's system test: the installed module and its setuid helper in a stock Fedora, through
+//! the real `/etc/pam.d`, the real `pam_unix` and its own setuid helper `unix_chkpwd`.
 //!
 //! It runs as root inside the container built from `testing/podman/Containerfile` (run it with
 //! `just properpin podman`), never on a real machine: it installs properpin, enables it in
@@ -29,8 +29,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use pamharness::PamClient;
-use properpin_core::PinState;
-use properpin_sys::Account;
+use properpin_core::{PinState, exit};
+use properpin_sys::{Account, Yescrypt};
 
 /// Where the Containerfile puts the build, `packaging/` and `pam/`.
 const PRODUCT: &str = "/opt/properpin";
@@ -38,6 +38,10 @@ const USER: &str = "alice";
 const PASSWORD: &str = "correct horse battery staple";
 const PIN: &str = "4859";
 const KDE: &str = "/etc/pam.d/kde";
+const HELPER: &str = "/usr/local/libexec/properpin/properpin-helper";
+const RUN_DIR: &str = "/run/properpin";
+/// Where scenarios that play the attacker keep their files; emptied between scenarios.
+const SCRATCH: &str = "/tmp/properpin-scratch";
 const SYSLOG: &str = "/dev/log";
 /// Longer than any attempt takes, failure delays included; a hung attempt is killed after this.
 const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(60);
@@ -95,6 +99,14 @@ fn run() -> ExitCode {
         ("a corrupt config is refused", a_corrupt_config),
         ("a hash in the global config is refused", a_hash_in_the_global_config),
         ("a shared runtime directory is refused", a_shared_runtime_directory),
+        ("the user can't read their hash or touch their counts", the_user_cannot_reach_the_files),
+        ("another user can't use or spend someone's PIN", another_user_gets_nothing),
+        ("--dev options are refused under setuid", dev_options_are_refused_under_setuid),
+        ("a poisoned start changes nothing", a_poisoned_start_changes_nothing),
+        ("arming checks the password itself", arming_checks_the_password_itself),
+        ("a missing helper fails closed", a_missing_helper_fails_closed),
+        ("status shows your own PIN only", status_shows_your_own_pin),
+        ("install refuses user files from an older layout", install_refuses_an_old_layout),
         ("a corrupt state means not armed", a_corrupt_state),
         ("state from an earlier boot is refused", state_from_an_earlier_boot),
         ("an arming time in the future is refused", an_arming_time_in_the_future),
@@ -151,6 +163,7 @@ fn the_pin_works_at_the_lock_screen_only(world: &World) -> Outcome {
         let pin = world.attempt(service, PIN)?;
         expect(!pin.unlocked, &format!("the PIN unlocked {service}"), &pin)?;
         expect(!pin.log.contains("pam_properpin"), &format!("{service} loaded pam_properpin"), &pin)?;
+        expect(!pin.log.contains("properpin-helper"), &format!("{service} ran the helper"), &pin)?;
     }
     for service in ["sudo", "su", "login"] {
         let password = world.attempt(service, PASSWORD)?;
@@ -194,8 +207,168 @@ fn a_hash_in_the_global_config(world: &World) -> Outcome {
 
 fn a_shared_runtime_directory(world: &World) -> Outcome {
     world.arm()?;
-    fs::set_permissions(world.run_dir(), Permissions::from_mode(0o755)).map_err(message)?;
+    fs::set_permissions(RUN_DIR, Permissions::from_mode(0o755)).map_err(message)?;
     world.fails_closed("not a private directory")
+}
+
+/// The point of the helper: nothing the user runs can read the hash, or reset the counts.
+fn the_user_cannot_reach_the_files(world: &World) -> Outcome {
+    world.arm()?;
+    for wrong in ["1111", "2222", "3333"] {
+        world.pin_refused(wrong, "not the PIN")?;
+    }
+    let state = world.state_file().display().to_string();
+    let user_file = world.user_file().display().to_string();
+    for (what, script) in [
+        ("read the hash", format!("cat {user_file}")),
+        ("list the PIN files", "ls /etc/properpin/users".to_owned()),
+        ("list the counts", format!("ls {RUN_DIR}")),
+        ("read the counts", format!("cat {state}")),
+        ("delete the counts", format!("rm -f {state}")),
+        ("replace the counts", format!("echo garbage > {state}")),
+    ] {
+        let output = world.as_user(USER, &["sh", "-c", &script], b"")?;
+        if output.status.success() {
+            return Err(format!("{USER} could {what}: {}", String::from_utf8_lossy(&output.stdout)));
+        }
+    }
+    world.pin_refused(PIN, "3 failures in a row")
+}
+
+/// bob has no PIN. Whatever he sends, he gets nothing about alice's, and spends none of her tries.
+fn another_user_gets_nothing(world: &World) -> Outcome {
+    world.arm()?;
+    for args in [&["check"][..], &["check", USER], &["status", USER]] {
+        let output = world.as_user("bob", &[HELPER].iter().chain(args).copied().collect::<Vec<_>>(), PIN.as_bytes())?;
+        if output.status.code() == Some(exit::YES.into()) && args[0] == "check" {
+            return Err(format!("bob's {args:?} said yes"));
+        }
+    }
+    let bob = world.as_user("bob", &[HELPER, "check"], b"1111")?;
+    expect_code(&bob, exit::NO, "bob's wrong PIN")?;
+    let log = world.syslog.take();
+    if !log.contains("bob: no PIN is set, refused") {
+        return Err(format!("the helper didn't answer for bob:\n{log}"));
+    }
+    world.pin_unlocks()
+}
+
+/// The attack the --dev options would allow: point the helper at files the caller made, holding a
+/// hash of a PIN they chose. Under setuid it must refuse before reading anything.
+fn dev_options_are_refused_under_setuid(world: &World) -> Outcome {
+    let user = &world.user;
+    let fake = Path::new(SCRATCH);
+    fs::create_dir_all(fake.join("etc/users")).map_err(message)?;
+    fs::create_dir_all(fake.join("run")).map_err(message)?;
+    write_file(
+        &fake.join("etc/users").join(USER),
+        &format!("hash = {}\n", Yescrypt.hash("0000", 4).map_err(message)?),
+        user.uid,
+        user.gid,
+        0o640,
+    )?;
+    for dir in [fake.to_path_buf(), fake.join("etc"), fake.join("etc/users"), fake.join("run")] {
+        chown(&dir, Some(user.uid), Some(user.gid)).map_err(message)?;
+        fs::set_permissions(&dir, Permissions::from_mode(0o700)).map_err(message)?;
+    }
+    let dev = [
+        "--dev-etc",
+        &format!("{SCRATCH}/etc"),
+        "--dev-run",
+        &format!("{SCRATCH}/run"),
+        "--dev-owner",
+        &user.uid.to_string(),
+        "--dev-chkpwd",
+        "/usr/bin/true",
+    ];
+    let arm = world.as_user(USER, &[&[HELPER, "arm"][..], &dev].concat(), b"anything")?;
+    expect_code(&arm, exit::USAGE, "arm with --dev options under setuid")?;
+    let check = world.as_user(USER, &[&[HELPER, "check"][..], &dev].concat(), b"0000")?;
+    expect_code(&check, exit::USAGE, "check with --dev options under setuid")?;
+    let log = world.syslog.take();
+    if !log.contains("refused: --dev options while running with elevated rights") {
+        return Err(format!("the refusal wasn't logged:\n{log}"));
+    }
+    Ok(())
+}
+
+/// Closed stdout and stderr, an extra open file, and a hostile environment, including a preloaded
+/// library that would hijack an ordinary program: the helper answers as always.
+fn a_poisoned_start_changes_nothing(world: &World) -> Outcome {
+    world.arm()?;
+    let script = format!(
+        "exec 7</etc/hostname; LD_PRELOAD={SCRATCH}/evil.so LD_LIBRARY_PATH={SCRATCH} RUST_BACKTRACE=full LANG=xx_XX TZ=../../etc/shadow exec {HELPER} check >&- 2>&-"
+    );
+    fs::create_dir_all(SCRATCH).map_err(message)?;
+    fs::write(format!("{SCRATCH}/evil.so"), "not a library").map_err(message)?;
+    let right = world.as_user(USER, &["sh", "-c", &script], PIN.as_bytes())?;
+    expect_code(&right, exit::YES, "the right PIN with a poisoned start")?;
+    let wrong = world.as_user(USER, &["sh", "-c", &script], b"1111")?;
+    expect_code(&wrong, exit::NO, "a wrong PIN with a poisoned start")?;
+    let log = world.syslog.take();
+    if !log.contains("not the PIN, failure 1 of 3") {
+        return Err(format!("the wrong PIN wasn't counted:\n{log}"));
+    }
+    Ok(())
+}
+
+/// Anything the user runs can ask the helper to arm; only the real password does it, checked by the
+/// real unix_chkpwd.
+fn arming_checks_the_password_itself(world: &World) -> Outcome {
+    for wrong in ["", "wrong", "correct horse battery stapl"] {
+        let arm = world.as_user(USER, &[HELPER, "arm"], wrong.as_bytes())?;
+        expect_code(&arm, exit::NO, &format!("arm with {wrong:?}"))?;
+    }
+    world.pin_refused(PIN, "no password unlock since boot")?;
+    let arm = world.as_user(USER, &[HELPER, "arm"], PASSWORD.as_bytes())?;
+    expect_code(&arm, exit::YES, "arm with the password")?;
+    world.pin_unlocks()
+}
+
+fn a_missing_helper_fails_closed(world: &World) -> Outcome {
+    world.arm()?;
+    fs::rename(HELPER, format!("{HELPER}.away")).map_err(message)?;
+    let pin = world.kde(PIN);
+    let password = world.kde(PASSWORD);
+    fs::rename(format!("{HELPER}.away"), HELPER).map_err(message)?;
+    let (pin, password) = (pin?, password?);
+    expect(!pin.unlocked && pin.log.contains("PIN refused:"), "the PIN worked without the helper", &pin)?;
+    expect(password.unlocked && password.log.contains("PIN not armed:"), "the password didn't unlock", &password)
+}
+
+fn status_shows_your_own_pin(world: &World) -> Outcome {
+    world.arm()?;
+    let mine = world.as_user(USER, &["/usr/local/bin/properpin", "status"], b"")?;
+    let text = String::from_utf8_lossy(&mine.stdout);
+    if !mine.status.success() || !text.contains("PIN        set") || !text.contains("PIN armed for another") {
+        return Err(format!("alice's status: {text}{}", String::from_utf8_lossy(&mine.stderr)));
+    }
+    let bob = world.as_user("bob", &["/usr/local/bin/properpin", "status"], b"")?;
+    if !String::from_utf8_lossy(&bob.stdout).contains("none set") {
+        return Err(format!("bob's status: {}", String::from_utf8_lossy(&bob.stdout)));
+    }
+    let root = Command::new("/usr/local/bin/properpin").arg("status").output().map_err(message)?;
+    if root.status.success() {
+        return Err("status ran as root".into());
+    }
+    // The helper itself refuses root too, whoever calls it.
+    let helper = Command::new(HELPER).arg("status").stdin(Stdio::null()).output().map_err(message)?;
+    expect_code(&helper, exit::USAGE, "the helper run by root")
+}
+
+/// A user file readable by the user's own group, as before the helper, is refused, not converted.
+fn install_refuses_an_old_layout(world: &World) -> Outcome {
+    let bob = Account::by_name("bob").map_err(message)?;
+    let old = Path::new("/etc/properpin/users/bob");
+    write_file(old, &String::from_utf8_lossy(&world.pin_file), 0, bob.gid, 0o640)?;
+    let refused = install_sh(&["install"]);
+    fs::remove_file(old).map_err(message)?;
+    match refused {
+        Err(said) if said.contains("is from an older properpin") => {}
+        other => return Err(format!("install accepted an old user file: {other:?}")),
+    }
+    install_sh(&["install"])?;
+    install_sh(&["check"]).map(drop)
 }
 
 fn a_corrupt_state(world: &World) -> Outcome {
@@ -221,7 +394,7 @@ fn an_arming_time_in_the_future(world: &World) -> Outcome {
 fn an_expired_pin(world: &World) -> Outcome {
     // 0.01 hours is 36 seconds; the PIN was armed a minute ago.
     let user_file = format!("{}expiry_hours = 0.01\n", String::from_utf8_lossy(&world.pin_file));
-    write_file(&world.user_file(), &user_file, 0, world.user.gid, 0o640)?;
+    write_file(&world.user_file(), &user_file, 0, world.helper.gid, 0o640)?;
     world.arm()?;
     world.edit_state(|state| state.armed_at = state.armed_at.saturating_sub(60))?;
     world.pin_refused(PIN, "the last password unlock was 0h01m ago")
@@ -257,7 +430,14 @@ fn disable_and_uninstall(world: &World) -> Outcome {
     expect(!pin.unlocked && !pin.log.contains("pam_properpin"), "the PIN still works after disable", &pin)?;
     world.password_unlocks()?;
     install_sh(&["uninstall"])?;
-    for gone in ["/usr/local/lib64/security/pam_properpin.so", "/usr/local/libexec/properpin", "/usr/local/bin/properpin"] {
+    for gone in [
+        "/usr/local/lib64/security/pam_properpin.so",
+        "/usr/local/libexec/properpin",
+        "/usr/local/bin/properpin",
+        "/etc/sysusers.d/properpin.conf",
+        "/etc/tmpfiles.d/properpin.conf",
+        RUN_DIR,
+    ] {
         if Path::new(gone).exists() {
             return Err(format!("{gone} is still there after uninstall"));
         }
@@ -265,13 +445,15 @@ fn disable_and_uninstall(world: &World) -> Outcome {
     if !world.user_file().exists() {
         return Err("uninstall deleted the user's PIN file".into());
     }
-    Ok(())
+    Account::by_name("properpin").map(drop).map_err(|_| "uninstall removed the account the kept PIN files belong to".into())
 }
 
 // --- the world the scenarios run in
 
 struct World {
     user: Account,
+    /// The account the helper runs as, created by install.sh.
+    helper: Account,
     syslog: Syslog,
     /// `/etc/pam.d/kde` before enable.
     stock_kde: String,
@@ -300,9 +482,7 @@ impl World {
 
         install_sh(&["install"])?;
         install_sh(&["enable", "--yes"])?;
-        let run_dir = PathBuf::from(format!("/run/user/{}", user.uid));
-        fs::create_dir_all(&run_dir).map_err(message)?;
-        chown(&run_dir, Some(user.uid), Some(user.gid)).map_err(message)?;
+        let helper = Account::by_name("properpin").map_err(message)?;
 
         let set = Command::new("/usr/local/bin/properpin")
             .args(["set", "--user", USER])
@@ -323,7 +503,7 @@ impl World {
             return Err(format!("install.sh check after set:\n{checked}"));
         }
         let pin_file = fs::read(format!("/etc/properpin/users/{USER}")).map_err(message)?;
-        Ok(Self { user, syslog, stock_kde, pin_file })
+        Ok(Self { user, helper, syslog, stock_kde, pin_file })
     }
 
     fn user_file(&self) -> PathBuf {
@@ -334,28 +514,46 @@ impl World {
         PathBuf::from("/etc/properpin/config")
     }
 
-    fn run_dir(&self) -> PathBuf {
-        PathBuf::from(format!("/run/user/{}", self.user.uid))
-    }
-
     fn state_file(&self) -> PathBuf {
-        self.run_dir().join("properpin.state")
+        PathBuf::from(format!("{RUN_DIR}/{}.state", self.user.uid))
     }
 
     /// Back to just after set-up: the PIN set, not armed, nothing tampered with.
     fn reset(&self) -> Outcome {
-        for path in [self.state_file(), self.run_dir().join("properpin.lock"), self.config(), self.user_file().with_extension("real")] {
+        let lock = PathBuf::from(format!("{RUN_DIR}/{}.lock", self.user.uid));
+        for path in [self.state_file(), lock, self.config(), self.user_file().with_extension("real")] {
             match fs::remove_file(&path) {
                 Err(error) if error.kind() != ErrorKind::NotFound => return Err(format!("{}: {error}", path.display())),
                 _ => {}
             }
         }
         let _ = fs::remove_file(self.user_file());
-        write_file(&self.user_file(), &String::from_utf8_lossy(&self.pin_file), 0, self.user.gid, 0o640)?;
-        chown(self.run_dir(), Some(self.user.uid), Some(self.user.gid)).map_err(message)?;
-        fs::set_permissions(self.run_dir(), Permissions::from_mode(0o700)).map_err(message)?;
+        write_file(&self.user_file(), &String::from_utf8_lossy(&self.pin_file), 0, self.helper.gid, 0o640)?;
+        chown(RUN_DIR, Some(self.helper.uid), Some(self.helper.gid)).map_err(message)?;
+        fs::set_permissions(RUN_DIR, Permissions::from_mode(0o700)).map_err(message)?;
+        let _ = fs::remove_dir_all(SCRATCH);
         self.syslog.take();
         Ok(())
+    }
+
+    /// Run `argv` as `user`, the way anything that user runs would: their uid and gid, a bare
+    /// environment, `typed` on stdin.
+    fn as_user(&self, user: &str, argv: &[&str], typed: &[u8]) -> Outcome<std::process::Output> {
+        let account = Account::by_name(user).map_err(message)?;
+        let mut child = Command::new(argv[0])
+            .args(&argv[1..])
+            .uid(account.uid)
+            .gid(account.gid)
+            .env_clear()
+            .env("PATH", "/usr/bin")
+            .current_dir("/")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(message)?;
+        let _ = child.stdin.take().expect("piped").write_all(typed);
+        child.wait_with_output().map_err(message)
     }
 
     /// Start one attempt as the test user, in their own process.
@@ -486,6 +684,18 @@ impl Syslog {
 
 fn expect(holds: bool, what: &str, attempt: &Attempt) -> Outcome {
     if holds { Ok(()) } else { Err(format!("{what}: {attempt:?}")) }
+}
+
+fn expect_code(output: &std::process::Output, code: u8, what: &str) -> Outcome {
+    if output.status.code() == Some(code.into()) {
+        return Ok(());
+    }
+    Err(format!(
+        "{what}: exit {:?}, not {code}\n{}{}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    ))
 }
 
 /// Run `packaging/install.sh` against the real root, from the container's build.

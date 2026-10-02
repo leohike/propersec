@@ -12,6 +12,7 @@ publish.workspace = true
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+libc.workspace = true
 properpin-core.workspace = true
 properpin-sys.workspace = true
 
