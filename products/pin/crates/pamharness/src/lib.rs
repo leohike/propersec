@@ -1,8 +1,10 @@
 //! A minimal PAM client, so tests can run `pam_authenticate` for real.
 //!
-//! `pam_start_confdir` (Linux-PAM 1.4+) reads the service's files from a directory of our choosing
-//! instead of `/etc/pam.d`. The real libpam and the real modules then run the exact control lines
-//! under test, and nothing on the system is read for configuration or changed.
+//! `PamClient::new` uses `pam_start_confdir` (Linux-PAM 1.4+), which reads the service's files from
+//! a directory of our choosing instead of `/etc/pam.d`. The real libpam and the real modules then
+//! run the exact control lines under test, and nothing on the system is read for configuration or
+//! changed. `PamClient::system` uses plain `pam_start`, as the lock screen does, for tests inside a
+//! container whose `/etc/pam.d` is the one under test.
 //!
 //! Test-only: no shipped crate depends on this one.
 
@@ -33,17 +35,23 @@ impl Attempt {
     }
 }
 
-/// Authenticates one user for one service, reading the service's files from `confdir`.
+/// Authenticates one user for one service, reading the service's files from `confdir`, or from
+/// the system's PAM directories when there is none.
 #[derive(Debug, Clone)]
 pub struct PamClient {
-    confdir: PathBuf,
+    confdir: Option<PathBuf>,
     service: String,
     user: String,
 }
 
 impl PamClient {
     pub fn new(confdir: impl AsRef<Path>, service: &str, user: &str) -> Self {
-        Self { confdir: confdir.as_ref().into(), service: service.into(), user: user.into() }
+        Self { confdir: Some(confdir.as_ref().into()), service: service.into(), user: user.into() }
+    }
+
+    /// The system's own PAM configuration, exactly as any PAM application gets it.
+    pub fn system(service: &str, user: &str) -> Self {
+        Self { confdir: None, service: service.into(), user: user.into() }
     }
 
     /// One unlock attempt: `typed` answers every prompt, the way a greeter's one field does.
@@ -53,7 +61,7 @@ impl PamClient {
             prompts: RefCell::default(),
             messages: RefCell::default(),
         };
-        let status = ffi::authenticate(&self.confdir, &self.service, &self.user, &conversation);
+        let status = ffi::authenticate(self.confdir.as_deref(), &self.service, &self.user, &conversation);
         Attempt { status, prompts: conversation.prompts.into_inner(), messages: conversation.messages.into_inner() }
     }
 }
@@ -96,20 +104,25 @@ mod ffi {
             confdir: *const c_char,
             pamh: *mut *mut c_void,
         ) -> c_int;
+        fn pam_start(service: *const c_char, user: *const c_char, conv: *const PamConv, pamh: *mut *mut c_void) -> c_int;
         fn pam_authenticate(pamh: *mut c_void, flags: c_int) -> c_int;
         fn pam_end(pamh: *mut c_void, status: c_int) -> c_int;
     }
 
-    pub(super) fn authenticate(confdir: &Path, service: &str, user: &str, conversation: &Conversation) -> c_int {
+    pub(super) fn authenticate(confdir: Option<&Path>, service: &str, user: &str, conversation: &Conversation) -> c_int {
         let c = |text: &str| CString::new(text).expect("no NUL in test strings");
-        let (service, user, confdir) = (c(service), c(user), c(confdir.to_str().expect("UTF-8 path")));
+        let (service, user) = (c(service), c(user));
+        let confdir = confdir.map(|dir| c(dir.to_str().expect("UTF-8 path")));
         let conv = PamConv { conv: converse, appdata_ptr: std::ptr::from_ref(conversation).cast_mut().cast() };
         let mut handle = std::ptr::null_mut();
         // SAFETY: all strings are NUL-terminated and outlive the transaction, as do `conv` and the
-        // conversation it points to; `handle` is only used between pam_start_confdir and pam_end.
+        // conversation it points to; `handle` is only used between pam_start(_confdir) and pam_end.
         unsafe {
-            let started = pam_start_confdir(service.as_ptr(), user.as_ptr(), &conv, confdir.as_ptr(), &mut handle);
-            assert_eq!(started, PAM_SUCCESS, "pam_start_confdir failed");
+            let started = match &confdir {
+                Some(confdir) => pam_start_confdir(service.as_ptr(), user.as_ptr(), &conv, confdir.as_ptr(), &mut handle),
+                None => pam_start(service.as_ptr(), user.as_ptr(), &conv, &mut handle),
+            };
+            assert_eq!(started, PAM_SUCCESS, "pam_start failed");
             let status = pam_authenticate(handle, 0);
             pam_end(handle, status);
             status

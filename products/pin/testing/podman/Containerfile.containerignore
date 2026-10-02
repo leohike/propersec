@@ -1,0 +1,6 @@
+# Only the workspace goes into the build context: no target/, no poc-py, no docs.
+*
+!Cargo.toml
+!Cargo.lock
+!rustfmt.toml
+!products

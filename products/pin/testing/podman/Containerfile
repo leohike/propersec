@@ -1,0 +1,32 @@
+# properpin's system test: a stock Fedora 44 with properpin installed by packaging/install.sh and
+# enabled in the real /etc/pam.d/kde, then exercised through the real pam_unix and unix_chkpwd by
+# crates/systest. Run it with `just properpin podman`; the build context is the repo root.
+
+# Build with Fedora's own toolchain and libraries, never the host's.
+FROM registry.fedoraproject.org/fedora:44 AS build
+RUN dnf -y install --setopt=install_weak_deps=False rust cargo gcc libxcrypt-devel && dnf clean all
+WORKDIR /src
+COPY Cargo.toml Cargo.lock rustfmt.toml ./
+COPY products products
+RUN --mount=type=cache,target=/root/.cargo/registry \
+    --mount=type=cache,target=/src/target \
+    cargo build --release --locked -p pam_properpin -p properpin-cli -p properpin-systest \
+    && mkdir -p /out/build \
+    && cp target/release/libpam_properpin.so target/release/properpin /out/build/ \
+    && cp target/release/properpin-systest /out/
+
+FROM registry.fedoraproject.org/fedora:44
+# util-linux brings su and login, each with its PAM service; install.sh needs diff and cmp.
+RUN dnf -y install --setopt=install_weak_deps=False sudo util-linux diffutils cpio && dnf clean all
+# The lock screen's /etc/pam.d/kde exactly as Fedora ships it, without the rest of plasma-workspace.
+RUN cd /tmp \
+    && dnf -y download plasma-workspace \
+    && rpm2cpio plasma-workspace-*.rpm | cpio -idm --quiet ./etc/pam.d/kde \
+    && install -m 0644 etc/pam.d/kde /etc/pam.d/kde \
+    && rm -rf /tmp/* && dnf clean all
+# alice has a PIN; bob is the other user on the machine.
+RUN useradd -m alice && echo 'alice:correct horse battery staple' | chpasswd && useradd -m bob
+COPY --from=build /out/ /opt/properpin/
+COPY products/pin/packaging /opt/properpin/packaging
+COPY products/pin/pam /opt/properpin/pam
+CMD ["/opt/properpin/properpin-systest", "run"]

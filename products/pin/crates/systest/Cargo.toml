@@ -1,0 +1,22 @@
+[package]
+name = "properpin-systest"
+description = "Test-only: install.sh against a fake root, and the whole system inside a container."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "properpin-systest"
+path = "src/main.rs"
+
+[dependencies]
+pamharness.workspace = true
+properpin-core.workspace = true
+properpin-sys.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

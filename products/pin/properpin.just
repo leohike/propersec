@@ -1,6 +1,7 @@
 # properpin -- a PIN for the KDE lock screen, within limits. The Rust workspace is at the repo root.
-# Nothing here installs anything or touches /etc or /run: every recipe works in target/ or a
-# temporary directory.
+# Nothing here installs anything on this machine or touches its /etc or /run: every recipe works in
+# target/, a temporary directory, or a podman container. packaging/install.sh is the installer,
+# and no recipe runs it outside a fake root or a container.
 
 # Recipes run at the workspace root, where Cargo.toml and target/ are.
 set working-directory := "../.."
@@ -47,3 +48,8 @@ demo:
     for wrong in 1111 2222 3333; do lock_screen "$wrong"; done
     lock_screen 4859
     step "properpin status"; properpin status
+
+# Everything for real in a stock Fedora 44 container: install.sh, the real /etc/pam.d, pam_unix and unix_chkpwd. Never touches this machine's PAM
+podman:
+    podman build --quiet --ignorefile products/pin/testing/podman/Containerfile.containerignore -f products/pin/testing/podman/Containerfile -t properpin-systest .
+    podman run --rm --network=none properpin-systest
