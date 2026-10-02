@@ -4,9 +4,12 @@ CLAUDE.machine.md
 _claude
 docs/gitignored/
 
-# Python (python-poc runs with -B, but tools and ad-hoc runs still write these)
+# Python (poc-py runs with -B, but tools and ad-hoc runs still write these)
 __pycache__/
 *.py[cod]
 .mypy_cache/
 .ruff_cache/
 .pytest_cache/
+
+# Rust
+/target/

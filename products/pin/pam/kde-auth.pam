@@ -1,0 +1,16 @@
+# properpin: three auth lines to insert ABOVE the stock "auth substack password-auth" line of
+# /etc/pam.d/kde. Nothing installs this yet.
+#
+# crates/pam/tests/stack.rs builds its PAM stack from this very file, swapping only paths and
+# pam_unix, so the control columns tested are the ones that would ship.
+#
+#   line 1  the PIN: a match ends the stack with success; anything else is ignored
+#   line 2  the password: a wrong one stops the stack with failure, here, so...
+#   line 3  ...arming the PIN only ever happens after a correct password
+#
+# The stock "auth substack password-auth" that follows then checks the same password again and
+# passes; it stays untouched. A substack can't take a control clause, and a failed one doesn't
+# stop the stack, which is why line 2 calls pam_unix directly.
+auth  [success=done default=ignore]  /usr/local/lib64/security/pam_properpin.so check etc=/etc/properpin run_base=/run/user
+auth  [success=ok default=die]       pam_unix.so use_first_pass
+auth  optional                       /usr/local/lib64/security/pam_properpin.so arm etc=/etc/properpin run_base=/run/user

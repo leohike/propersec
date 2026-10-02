@@ -1,0 +1,41 @@
+[workspace]
+resolver = "3"
+members = ["products/*/crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+publish = false
+
+[workspace.dependencies]
+properpin-core = { path = "products/pin/crates/core" }
+properpin-sys = { path = "products/pin/crates/sys" }
+pamharness = { path = "products/pin/crates/pamharness" }
+
+anyhow = "1.0.104"
+clap = { version = "4.6.7", features = ["derive"] }
+libc = "0.2"
+nix = { version = "0.31.3", features = ["fs", "time", "user"] }
+rpassword = "7.5.4"
+subtle = "2.6.1"
+tempfile = "3.27.0"
+thiserror = "2.0.21"
+
+assert_cmd = "2.2.2"
+proptest = "1.11.0"
+
+[workspace.lints.rust]
+# Denied everywhere; only the FFI modules in properpin-sys, pam_properpin and pamharness allow it.
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+
+# A PAM module catches panics at its edge (catch_unwind), which needs unwinding. This is the
+# default; it is spelled out so nobody switches it to "abort" for a smaller binary.
+[profile.dev]
+panic = "unwind"
+
+[profile.release]
+panic = "unwind"
