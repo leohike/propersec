@@ -1,6 +1,6 @@
 //! The module's work, in safe code. `pam.rs` turns the result into a PAM return code.
 
-use properpin_core::{Error, Log, arm, check, usable_input};
+use properpin_core::{Error, Log, Secret, arm, check, usable_input};
 use properpin_sys::{Account, BootClock, UserFiles, Yescrypt, current_euid, current_uid};
 
 use crate::{Args, Mode};
@@ -10,8 +10,10 @@ pub trait Transaction {
     /// The user PAM is authenticating.
     fn user(&self) -> Result<String, Error>;
     /// What the user typed, asking for it if no module has yet. Stored by libpam as `PAM_AUTHTOK`,
-    /// so pam_unix reuses it with `use_first_pass` instead of asking again.
-    fn typed(&self) -> Result<Vec<u8>, Error>;
+    /// so pam_unix reuses it with `use_first_pass` instead of asking again. This is a copy of its
+    /// own, wiped when dropped; libpam's stays for the rest of the stack and libpam wipes it itself
+    /// (docs/pin-pam-copy.md).
+    fn typed(&self) -> Result<Secret, Error>;
 }
 
 /// `Ok(true)` unlocks (for `check`) or armed the PIN (for `arm`). Everything else refuses.
@@ -23,8 +25,11 @@ pub fn run(transaction: &impl Transaction, args: &Args, log: &impl Log) -> Resul
     let files = UserFiles::new(&args.etc, &args.run_base, args.owner, &account.name, account.uid)?;
     match args.mode {
         Mode::Check => {
-            let typed = transaction.typed()?;
-            let verdict = check(&files, &Yescrypt, &BootClock, usable_input(&typed))?;
+            // The copy of what was typed is wiped as soon as the check is done, before logging.
+            let verdict = {
+                let typed = transaction.typed()?;
+                check(&files, &Yescrypt, &BootClock, usable_input(typed.as_bytes()))?
+            };
             log.log(&format!("{}: {verdict}", account.name));
             Ok(verdict.unlocks())
         }

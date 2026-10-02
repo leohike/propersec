@@ -2,6 +2,7 @@ use std::ffi::{CStr, CString, c_char, c_int, c_ulong, c_void};
 
 use properpin_core::{Error, HASH_PREFIX, Hasher, MAX_PIN_BYTES};
 use subtle::ConstantTimeEq;
+use zeroize::Zeroizing;
 
 /// `sizeof(struct crypt_data)` in libxcrypt.
 const CRYPT_DATA_SIZE: usize = 32768;
@@ -14,6 +15,9 @@ const GENSALT_OUTPUT_SIZE: usize = 192;
 /// A crypt(3) hash is one string, `$y$<cost>$<salt>$<hash>`, the format `/etc/shadow` uses.
 /// Handed back to libxcrypt as the *setting*, it hashes new input with the same algorithm, cost and
 /// salt, so the right PIN reproduces the stored string exactly.
+///
+/// Every copy of the PIN made here is wiped: the NUL-terminated copy libxcrypt needs, and its 32 KB
+/// work area, which holds the computed hash and yescrypt's working state.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Yescrypt;
 
@@ -21,7 +25,8 @@ impl Yescrypt {
     /// A fresh hash of `pin` at `cost`, salted from the kernel's random source.
     pub fn hash(&self, pin: &str, cost: u32) -> Result<String, Error> {
         let setting = make_setting(cost)?;
-        compute_hash(pin, &setting)
+        // A new hash is about to be written to a file, so it leaves the wiped work area as a copy.
+        with_hash(pin, &setting, |hash| String::from_utf8_lossy(hash).into_owned())
     }
 }
 
@@ -32,7 +37,8 @@ impl Hasher for Yescrypt {
             return Err(Error::NotYescrypt);
         }
         let setting = CString::new(stored).map_err(|_| Error::NotYescrypt)?;
-        Ok(compute_hash(pin, &setting)?.as_bytes().ct_eq(stored.as_bytes()).into())
+        // Compared where libxcrypt wrote it, so the hash of what was typed is never copied out.
+        with_hash(pin, &setting, |hash| hash.ct_eq(stored.as_bytes()).into())
     }
 }
 
@@ -76,25 +82,39 @@ fn make_setting(cost: u32) -> Result<CString, Error> {
     setting.ok_or_else(|| Error::System(format!("libxcrypt could not make a yescrypt salt with cost {cost}")))
 }
 
-/// The full hash string of `pin` with `setting`. libxcrypt's failures are errors, so a failure can
-/// never pass for a hash.
+/// Hash `pin` with `setting` and hand the full hash string to `inspect`, while it still sits in
+/// libxcrypt's work area. Both the work area and the NUL-terminated copy of `pin` are wiped when
+/// this returns, on every path. libxcrypt's failures are errors, so a failure can never pass for a
+/// hash.
 #[allow(unsafe_code)]
-fn compute_hash(pin: &str, setting: &CStr) -> Result<String, Error> {
+fn with_hash<T>(pin: &str, setting: &CStr, inspect: impl FnOnce(&[u8]) -> T) -> Result<T, Error> {
     // A C string ends at the first NUL, so "1234\0junk" would hash as "1234". Refuse it outright.
-    let phrase = CString::new(pin).map_err(|_| Error::System("the PIN contains a NUL byte".into()))?;
+    if pin.as_bytes().contains(&0) {
+        return Err(Error::System("the PIN contains a NUL byte".into()));
+    }
     if pin.len() > MAX_PIN_BYTES {
         return Err(Error::System(format!("the PIN is longer than {MAX_PIN_BYTES} bytes")));
     }
-    let mut data = vec![0u8; CRYPT_DATA_SIZE];
+    // Sized up front: a Vec that grows leaves its old allocation behind, unwiped.
+    let mut phrase = Zeroizing::new(Vec::with_capacity(pin.len() + 1));
+    phrase.extend_from_slice(pin.as_bytes());
+    phrase.push(0);
+    let mut data = Zeroizing::new(vec![0u8; CRYPT_DATA_SIZE]);
     // SAFETY: `phrase` and `setting` are NUL-terminated, and `data` is a zeroed, writable
-    // `struct crypt_data` of the size given. The result is null or points into `data`, which is
-    // still alive when it's copied out.
-    let hash = unsafe {
-        let result = ffi::crypt_rn(phrase.as_ptr(), setting.as_ptr(), data.as_mut_ptr().cast(), CRYPT_DATA_SIZE as c_int);
-        (!result.is_null()).then(|| CStr::from_ptr(result).to_string_lossy().into_owned())
-    };
+    // `struct crypt_data` of the size given. Only the address of the result is kept.
+    let result = unsafe { ffi::crypt_rn(phrase.as_ptr().cast(), setting.as_ptr(), data.as_mut_ptr().cast(), CRYPT_DATA_SIZE as c_int) };
+    // libxcrypt writes the hash into `data` and returns where it starts. Turn that address into an
+    // ordinary slice of `data`, so the compiler guarantees `data` outlives it, and so an address
+    // outside `data`, or a hash without its terminating NUL, is an error rather than a wild read.
+    let hash = (result as usize)
+        .checked_sub(data.as_ptr() as usize)
+        .and_then(|start| data.get(start..))
+        .and_then(|rest| rest.iter().position(|&byte| byte == 0).map(|end| &rest[..end]));
     // libxcrypt signals failure with null, or with a string starting with "*" in some modes.
-    hash.filter(|hash| !hash.starts_with('*')).ok_or_else(|| Error::System("libxcrypt could not hash the PIN".into()))
+    match hash {
+        Some(hash) if !hash.is_empty() && !hash.starts_with(b"*") => Ok(inspect(hash)),
+        _ => Err(Error::System("libxcrypt could not hash the PIN".into())),
+    }
 }
 
 #[cfg(test)]

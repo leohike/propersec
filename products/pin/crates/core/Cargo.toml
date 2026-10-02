@@ -8,6 +8,7 @@ publish.workspace = true
 
 [dependencies]
 thiserror.workspace = true
+zeroize.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true

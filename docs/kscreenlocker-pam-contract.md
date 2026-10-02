@@ -54,7 +54,7 @@ Ways out, to decide before 6.8 reaches the real machine:
   - several attempts on one handle, as both versions do;
   - `pam_setcred(PAM_REFRESH_CRED)` after a success;
   - check that every attempt process exited normally, not by a signal;
-  - a scenario that kills attempts at random points and then checks that the state still parses and the failure count never went down;
+  - a scenario that kills attempts at random points and then checks that the state still parses and the failure count never went down. Deferred; `docs/plan.md` has the reasoning. The counting order itself is already pinned down by unit tests in `crates/core/src/attempt.rs`;
   - time a correct PIN through the real stack, and fail the test below 50 ms once the padding exists.
 - **In properpin:** decide on the minimum duration, or the hash cost, before 6.8. It belongs in the plan next to the repeated-access fix.
 - **On the real lock screen** (a VM or the real machine): with 6.8, the worker logs "N ms elapsed during pam_authenticate call for service kde" at warning level, so the journal shows the real timings for the PIN, the password and a wrong PIN. Also check what happens when a PIN is typed during the failure delay.

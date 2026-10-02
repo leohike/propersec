@@ -289,6 +289,34 @@ mod tests {
         assert_eq!(store.failures(), Some(1));
     }
 
+    /// Checks like `PlainHasher`, and records the failure count the store holds at the moment it
+    /// is asked: what would be on disk if the attempt were killed right there.
+    struct WitnessHasher<'a> {
+        store: &'a MemoryStore,
+        seen: RefCell<Vec<Option<u32>>>,
+    }
+
+    impl Hasher for WitnessHasher<'_> {
+        fn verify(&self, pin: &str, hash: &str) -> Result<bool, Error> {
+            self.seen.borrow_mut().push(self.store.failures());
+            PlainHasher.verify(pin, hash)
+        }
+    }
+
+    /// No attempt is ever checked before it is counted, right or wrong: an attempt killed while
+    /// the hash is checked (Plasma 6.8 kills its PAM worker on cancel) still counts.
+    #[test]
+    fn every_check_happens_with_its_attempt_already_counted() {
+        let (store, clock) = armed();
+        let hasher = WitnessHasher { store: &store, seen: RefCell::default() };
+        for typed in ["1111", "2222", PIN, "3333"] {
+            check(&store, &hasher, &clock, Some(typed)).unwrap();
+        }
+        // Two wrong, then the right PIN seen as the third attempt and taken back, then one wrong.
+        assert_eq!(*hasher.seen.borrow(), [Some(1), Some(2), Some(3), Some(1)]);
+        assert_eq!(store.failures(), Some(1));
+    }
+
     #[test]
     fn log_lines_say_what_happened() {
         assert_eq!(Verdict::WrongPin { failures: 3, max: 3 }.to_string(), "not the PIN, failure 3 of 3, password required from now on");

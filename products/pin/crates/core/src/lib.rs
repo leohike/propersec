@@ -17,12 +17,14 @@ mod attempt;
 mod error;
 pub mod kv;
 mod refusal;
+mod secret;
 mod settings;
 mod state;
 
 pub use attempt::{Clock, Hasher, Log, Store, Verdict, arm, check, usable_input};
 pub use error::Error;
 pub use refusal::{Refusal, describe_seconds};
+pub use secret::Secret;
 pub use settings::Settings;
 pub use state::PinState;
 

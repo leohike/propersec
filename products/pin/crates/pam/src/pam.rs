@@ -5,7 +5,7 @@
 use std::ffi::{CStr, CString, c_char, c_int};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
-use properpin_core::{Error, Log};
+use properpin_core::{Error, Log, Secret};
 use properpin_sys::FileLog;
 
 use crate::Args;
@@ -103,15 +103,16 @@ impl Transaction for Pam {
         Ok(unsafe { CStr::from_ptr(user) }.to_string_lossy().into_owned())
     }
 
-    fn typed(&self) -> Result<Vec<u8>, Error> {
+    fn typed(&self) -> Result<Secret, Error> {
         let mut typed = std::ptr::null();
         // SAFETY: as above; a null prompt means libpam's default prompt.
         let status = unsafe { pam_get_authtok(self.0, PAM_AUTHTOK, &mut typed, std::ptr::null()) };
         if status != PAM_SUCCESS || typed.is_null() {
             return Err(Error::System(format!("pam_get_authtok failed with {status}")));
         }
-        // SAFETY: a non-null result is a NUL-terminated string owned by libpam.
-        Ok(unsafe { CStr::from_ptr(typed) }.to_bytes().to_vec())
+        // SAFETY: a non-null result is a NUL-terminated string owned by libpam. It is copied once,
+        // into a Vec of exactly its length that `Secret` then owns and wipes.
+        Ok(Secret::new(unsafe { CStr::from_ptr(typed) }.to_bytes().to_vec()))
     }
 }
 
