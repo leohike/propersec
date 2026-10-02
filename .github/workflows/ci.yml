@@ -55,11 +55,16 @@ jobs:
           persist-credentials: false
       - name: podman version
         run: podman version
-      # The two commands behind `just properpin podman`.
+      - name: Diagnose rootless storage (temporary)
+        run: |
+          podman info --format 'rootless driver={{.Store.GraphDriverName}} options={{.Store.GraphOptions}}'
+          podman run --rm registry.fedoraproject.org/fedora:44 sh -c "grep ' / / ' /proc/self/mountinfo"
+          sudo podman info --format 'rootful driver={{.Store.GraphDriverName}} options={{.Store.GraphOptions}}'
+      # The two commands behind `just properpin podman`, as root: see the comment above.
       - name: Build the test image
-        run: podman build --quiet --ignorefile products/pin/testing/podman/Containerfile.containerignore -f products/pin/testing/podman/Containerfile -t properpin-systest .
+        run: sudo podman build --quiet --ignorefile products/pin/testing/podman/Containerfile.containerignore -f products/pin/testing/podman/Containerfile -t properpin-systest .
       - name: Run the scenarios
-        run: podman run --rm --network=none properpin-systest
+        run: sudo podman run --rm --network=none properpin-systest
 
   audit:
     name: Dependency audit
