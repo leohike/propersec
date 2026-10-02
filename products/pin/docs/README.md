@@ -77,6 +77,17 @@ The scenarios: the rollout (refused after boot, armed by the password, three fai
 
 What it can't show: the greeter's own behaviour, SELinux (a container doesn't enforce the host's policy for its files), logind and the journal. The test was checked by breaking things on purpose: with the middle PAM line set to `default=ignore`, three scenarios fail and the log shows `unix_chkpwd` rejecting the password and the module arming the PIN anyway; with the readable-by-others check removed, its scenario fails.
 
+## CI
+
+GitHub Actions runs `.github/workflows/ci.yml` on every push to any branch and on pull requests. It has four jobs, and any of them failing fails the run:
+
+- **Tests (Fedora 44):** `cargo test --workspace --locked` in a `fedora:44` container with Fedora's own Rust, as an unprivileged user, because the module refuses to run as root.
+- **System test (podman):** the two commands behind `just properpin podman`, on an Ubuntu runner, with rootful podman (`sudo`): in the runner's rootless podman, setuid `unix_chkpwd` can't read `/etc/shadow`, so the real password never unlocks.
+- **Dependency audit:** `cargo-deny` and `cargo-audit`. Only known security advisories (and crates flagged unsound) fail it; licences, bans, duplicates and sources, configured in `deny.toml` at the repo root, only add a warning to the run for now.
+- **Rust 1.98 (Ubuntu):** the same tests with exactly the declared `rust-version`, against Ubuntu's libpam and libxcrypt.
+
+clippy and fmt are not in CI: run `just properpin lint` before pushing. Results are in the repository's Actions tab, or through `gh run list` and `gh run view --log-failed`. Dependabot proposes weekly bumps for the pinned actions and for `Cargo.lock`, once the configuration is on `main`.
+
 ## Three things learned building it
 
 - **The module must never be unloaded.** libpam `dlclose`s modules at every `pam_end`, but Rust's standard library registers thread-local destructors that glibc runs at thread exit. Once the module is unmapped, that segfaults the host process: here the lock screen (rust-lang/rust#91979). It reproduces on Fedora 44. The module is linked with `-z nodelete` (see `crates/pam/build.rs`), and the load/unload test in `tests/stack.rs` crashes without it.

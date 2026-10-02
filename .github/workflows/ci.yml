@@ -55,12 +55,10 @@ jobs:
           persist-credentials: false
       - name: podman version
         run: podman version
-      - name: Diagnose rootless storage (temporary)
-        run: |
-          podman info --format 'rootless driver={{.Store.GraphDriverName}} options={{.Store.GraphOptions}}'
-          podman run --rm registry.fedoraproject.org/fedora:44 sh -c "grep ' / / ' /proc/self/mountinfo"
-          sudo podman info --format 'rootful driver={{.Store.GraphDriverName}} options={{.Store.GraphOptions}}'
-      # The two commands behind `just properpin podman`, as root: see the comment above.
+      # The two commands behind `just properpin podman`, but with rootful podman. Rootless podman
+      # on this runner builds the image fine, but setuid unix_chkpwd can't read /etc/shadow inside
+      # it ("check pass; user unknown"), so the real password never unlocks. Storage is kernel
+      # overlay without nosuid there, so the cause is something else; not yet pinned down.
       - name: Build the test image
         run: sudo podman build --quiet --ignorefile products/pin/testing/podman/Containerfile.containerignore -f products/pin/testing/podman/Containerfile -t properpin-systest .
       - name: Run the scenarios
