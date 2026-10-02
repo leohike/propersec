@@ -1,0 +1,19 @@
+# lazypass: the three lines below are pam/kde-auth.pam; `just lazypass restore-pam` takes them out
+auth  [success=done default=ignore]  pam_exec.so quiet quiet_log expose_authtok /usr/local/libexec/lazypass/pam_hook.py check --etc /etc/lazypass --run-base /run/user
+auth  [success=ok default=die]       pam_unix.so use_first_pass
+auth  optional                       pam_exec.so quiet quiet_log /usr/local/libexec/lazypass/pam_hook.py start-short-password-window --etc /etc/lazypass --run-base /run/user
+auth        substack      password-auth
+auth        include       postlogin
+
+account     required      pam_nologin.so
+account     include       password-auth
+
+password    include       password-auth
+
+session     required      pam_selinux.so close
+session     required      pam_loginuid.so
+session     required      pam_selinux.so open
+session     optional      pam_keyinit.so force revoke
+session     required      pam_namespace.so
+session     include       password-auth
+session     include       postlogin

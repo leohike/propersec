@@ -1,0 +1,12 @@
+#!/usr/bin/python3 -ISB
+"""Stands in for pam_unix in the PAM tests.
+
+Run by pam_exec with expose_authtok, it accepts exactly the full_password stored in the file its
+argument names, the way pam_unix accepts exactly the one in /etc/shadow.
+"""
+
+import sys
+
+typed = sys.stdin.buffer.read().removesuffix(b"\0")
+with open(sys.argv[1], "rb") as handle:
+    sys.exit(0 if typed == handle.read() else 1)
