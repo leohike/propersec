@@ -1,0 +1,37 @@
+# cargo-deny, run by CI (.github/workflows/ci.yml). For now only known security advisories fail
+# the job. Licences, bans (duplicates included) and sources are warnings only: CI checks them in a
+# separate step that turns any error into a warning annotation. cargo-audit runs alongside and
+# also fails on vulnerabilities.
+
+[graph]
+all-features = true
+
+[advisories]
+# Vulnerabilities always fail. Unsound code fails too; unmaintained crates and yanked versions
+# are left to cargo-audit's warnings.
+unmaintained = "none"
+unsound = "all"
+yanked = "warn"
+
+[licenses]
+# The licences in use today. The workspace crates have publish = false and no licence field,
+# which private.ignore skips.
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-3-Clause",
+    "MIT",
+    "Unicode-3.0",
+]
+confidence-threshold = 0.9
+private = { ignore = true }
+
+[bans]
+multiple-versions = "warn"
+wildcards = "warn"
+# Path dependencies between the workspace crates have no version, which is fine here.
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "warn"
+unknown-git = "warn"

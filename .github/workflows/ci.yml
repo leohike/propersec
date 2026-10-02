@@ -1,0 +1,104 @@
+# CI for propersec: the tests in Fedora 44, the podman system test, a dependency audit, and the
+# tests again with exactly the declared rust-version. clippy and fmt stay local (`just properpin
+# lint`). Every third-party action is pinned to a commit; Dependabot bumps them.
+
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Tests (Fedora 44)
+    runs-on: ubuntu-24.04
+    container: registry.fedoraproject.org/fedora:44
+    timeout-minutes: 30
+    env:
+      CARGO_HOME: /cargo
+    steps:
+      - name: Install build dependencies
+        # install.sh, which the install tests run, needs diff and cmp; git, tar and zstd are for
+        # checkout and the cache.
+        run: dnf -y install --setopt=install_weak_deps=False rust cargo gcc libxcrypt-devel diffutils git-core tar zstd
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Add an unprivileged user
+        # pam_properpin refuses to run as root, as the lock screen never does, so the stack tests
+        # run as a plain user.
+        run: |
+          useradd --create-home tester
+          mkdir -p "$CARGO_HOME"
+          chown -R tester: "$CARGO_HOME" "$GITHUB_WORKSPACE"
+      - name: cargo test
+        run: runuser -u tester -- cargo test --workspace --locked
+
+  podman:
+    name: System test (podman)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: podman version
+        run: podman version
+      # The two commands behind `just properpin podman`.
+      - name: Build the test image
+        run: podman build --quiet --ignorefile products/pin/testing/podman/Containerfile.containerignore -f products/pin/testing/podman/Containerfile -t properpin-systest .
+      - name: Run the scenarios
+        run: podman run --rm --network=none properpin-systest
+
+  audit:
+    name: Dependency audit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install cargo-deny and cargo-audit
+        uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
+        with:
+          tool: cargo-deny@0.20.2,cargo-audit@0.22.2
+          fallback: none
+      - name: cargo deny (advisories)
+        run: cargo deny --locked check advisories
+      - name: cargo audit
+        run: cargo audit
+      - name: cargo deny (licences, bans, sources; warnings only)
+        # See deny.toml: these don't fail the job yet, but any error shows up as a warning.
+        run: cargo deny --locked check licenses bans sources || echo "::warning title=cargo-deny::licences, bans or sources need a look; see the log of this step"
+
+  rust-version:
+    name: Rust 1.98 (Ubuntu)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      RUSTUP_TOOLCHAIN: "1.98"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust 1.98 and libxcrypt's development files
+        run: |
+          rustup toolchain install 1.98 --profile minimal
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libcrypt-dev
+          rustc --version
+          dpkg-query -W libpam0g libcrypt-dev
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: cargo test
+        run: cargo test --workspace --locked
