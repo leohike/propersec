@@ -124,7 +124,7 @@ Each variant runs attempts through the real libpam with properpin's lines, and c
 - no zombie helper left behind;
 - the host's SIGCHLD setting exactly as it was before;
 - the host's own children still reapable by the host;
-- the time a correct PIN takes through the real stack, which the minimum-duration row will turn into an assertion (at least 50 ms, aiming for about 100).
+- the time a correct PIN takes through the real stack, now an assertion that it is at least `min_milliseconds_before_pin_unlock`, 75 ms by default.
 
 ## What it is likely to find, and the fix
 

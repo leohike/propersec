@@ -119,7 +119,7 @@ fn install_enable_disable_uninstall_leaves_pam_as_it_was() {
     let enabled = fs::read_to_string(root.kde()).unwrap();
     let lines: Vec<&str> = enabled.lines().collect();
     assert!(lines[0].starts_with("# properpin begin"), "{enabled}");
-    assert!(lines[1].contains("pam_properpin.so check helper=/usr/local/libexec/properpin/properpin-helper"));
+    assert!(lines[1].contains("pam_properpin.so check helper=/usr/local/libexec/properpin/properpin-helper config=/etc/properpin/config"));
     assert!(lines[2].contains("pam_unix.so use_first_pass"));
     assert!(lines[3].contains("pam_properpin.so arm"));
     assert_eq!(lines[4], "# properpin end");

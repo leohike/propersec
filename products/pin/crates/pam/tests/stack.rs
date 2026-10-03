@@ -113,6 +113,7 @@ impl Sandbox {
     fn stack_as(&self, service: &str, password: Password, extra: &str) {
         let module = format!("{} {extra}", built().join("libpam_properpin.so").display());
         let helper = format!("helper={} log={}", self.path("helper").display(), self.path("log").display());
+        let config = format!("config={}", self.path("etc/config").display());
         let unix = match password {
             Password::Right => "pam_permit.so",
             Password::Wrong => "pam_deny.so",
@@ -121,6 +122,7 @@ impl Sandbox {
         for (old, new) in [
             ("/usr/local/lib64/security/pam_properpin.so", module.as_str()),
             ("helper=/usr/local/libexec/properpin/properpin-helper", helper.as_str()),
+            ("config=/etc/properpin/config", config.as_str()),
             ("pam_unix.so use_first_pass", unix),
         ] {
             // Fail loudly if the shipped file changes shape, rather than test something else.
@@ -311,6 +313,30 @@ fn one_session_serves_many_attempts() {
     // The PIN on the session whose password would pass: the check line ends the stack first.
     assert!(password.authenticate(PIN).unlocked());
     assert!(sandbox.log().contains("unlocked with the PIN"));
+}
+
+/// A correct PIN never unlocks sooner than the config's minimum, counted from when the module is
+/// called, 75 ms by default; a wrong PIN and the password go on at once. The stand-ins for
+/// pam_unix and its failure delay take no time, so whatever waits here is the module.
+#[test]
+fn only_a_correct_pin_waits_out_the_minimum() {
+    let sandbox = Sandbox::new();
+    sandbox.unlock_with_password();
+    let timed = |password, typed| {
+        let started = Instant::now();
+        let unlocked = sandbox.attempt(password, typed).unlocked();
+        (unlocked, started.elapsed())
+    };
+    let (unlocked, took) = timed(Password::Wrong, PIN);
+    assert!(unlocked && took >= Duration::from_millis(75), "the default minimum: {took:?}");
+    let config = sandbox.path("etc/config");
+    fs::write(&config, "min_milliseconds_before_pin_unlock = 500\n").unwrap();
+    fs::set_permissions(&config, Permissions::from_mode(0o644)).unwrap();
+    for (password, typed, unlocks) in [(Password::Wrong, PIN, true), (Password::Wrong, "1111", false), (Password::Right, PASSWORD, true)] {
+        let (unlocked, took) = timed(password, typed);
+        assert_eq!(unlocked, unlocks, "{typed}: {}", sandbox.log());
+        assert_eq!(took >= Duration::from_millis(500), typed == PIN, "{typed} took {took:?}");
+    }
 }
 
 /// Tests that change SIGCHLD change it for every test running in the same process, so each starts

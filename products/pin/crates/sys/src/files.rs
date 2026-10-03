@@ -105,29 +105,9 @@ impl UserFiles {
 
     // --- the owner's side: settings and hash
 
-    /// The text of `path`, provided it can be trusted: a regular file, not a symlink, owned by the
-    /// owner, that nobody else can change. `private` also refuses a file others can read.
-    /// `None` when there is no such file.
-    fn read_trusted(&self, path: &Path, private: bool) -> Result<Option<String>, Error> {
-        let (info, text) = match read_regular_file(path) {
-            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
-            result => result.map_err(|error| system(path.display(), error))?,
-        };
-        let refuse = |why: String| Err(Error::System(format!("{}: {why}", path.display())));
-        if info.uid() != self.etc_owner {
-            return refuse(format!("owned by uid {}, not {}", info.uid(), self.etc_owner));
-        }
-        if info.mode() & 0o022 != 0 {
-            return refuse("writable by its group or by others".into());
-        }
-        if private && info.mode() & 0o004 != 0 {
-            return refuse("readable by others".into());
-        }
-        Ok(Some(text))
-    }
-
+    /// The settings in `path`, if the owner owns it and nobody else can change it (see [`read_trusted`]).
     fn read_pairs(&self, path: &Path, private: bool) -> Result<kv::Pairs, Error> {
-        let text = self.read_trusted(path, private)?.unwrap_or_default();
+        let text = read_trusted(path, &[self.etc_owner], private)?.unwrap_or_default();
         kv::parse(&text, &path.display().to_string())
     }
 
@@ -347,6 +327,41 @@ impl Store for UserFiles {
 
 /// The metadata and text of `path`, which must be a regular file and not a symlink. Both come from
 /// one open file, so the file checked is the file read.
+/// The global settings alone, from the config at `path`, for the PAM module: it runs as the user,
+/// who can't read their own file. Trusted when owned by root, or by `uid`, the user the module
+/// runs as: the one setting the module uses changes only how long that user's own correct PIN
+/// waits, and the tests' sandboxes belong to the user running them. Defaults when there is no
+/// config.
+pub fn global_settings(path: &Path, uid: u32) -> Result<Settings, Error> {
+    let text = read_trusted(path, &[0, uid], false)?.unwrap_or_default();
+    let source = path.display().to_string();
+    let mut settings = Settings::default();
+    settings.apply(&kv::parse(&text, &source)?, &source, false)?;
+    Ok(settings)
+}
+
+/// The text of `path`, provided it can be trusted: a regular file, not a symlink, owned by one of
+/// `owners`, that nobody else can change. `private` also refuses a file others can read. `None`
+/// when there is no such file.
+fn read_trusted(path: &Path, owners: &[u32], private: bool) -> Result<Option<String>, Error> {
+    let (info, text) = match read_regular_file(path) {
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        result => result.map_err(|error| system(path.display(), error))?,
+    };
+    let refuse = |why: String| Err(Error::System(format!("{}: {why}", path.display())));
+    if !owners.contains(&info.uid()) {
+        let owners: Vec<String> = owners.iter().map(u32::to_string).collect();
+        return refuse(format!("owned by uid {}, not {}", info.uid(), owners.join(" or ")));
+    }
+    if info.mode() & 0o022 != 0 {
+        return refuse("writable by its group or by others".into());
+    }
+    if private && info.mode() & 0o004 != 0 {
+        return refuse("readable by others".into());
+    }
+    Ok(Some(text))
+}
+
 fn read_regular_file(path: &Path) -> std::io::Result<(Metadata, String)> {
     let file = OpenOptions::new().read(true).custom_flags(O_NOFOLLOW).open(path)?;
     let info = file.metadata()?;
@@ -402,6 +417,23 @@ mod tests {
         write(&files.user_file(), "hash = $y$j9T$abc$def\nmax_failures = 2\n", 0o640);
         let settings = files.settings().unwrap();
         assert_eq!((settings.max_failures, settings.expiry_hours, settings.pin_hash.as_str()), (2, 2.0, "$y$j9T$abc$def"));
+    }
+
+    #[test]
+    fn the_pam_module_reads_the_global_config_alone() {
+        let Scratch { files, .. } = &scratch();
+        let uid = current_uid();
+        assert_eq!(global_settings(&files.config(), uid).unwrap(), Settings::default(), "no config, the defaults");
+        write(&files.config(), "min_milliseconds_before_pin_unlock = 300\nmax_failures = 5\n", 0o644);
+        write(&files.user_file(), "max_failures = 2\n", 0o640);
+        let settings = global_settings(&files.config(), uid).unwrap();
+        assert_eq!((settings.min_milliseconds_before_pin_unlock, settings.max_failures), (300, 5));
+        let error = global_settings(&files.config(), uid + 1).unwrap_err().to_string();
+        assert!(error.contains(&format!("owned by uid {uid}, not 0 or {}", uid + 1)), "{error}");
+        write(&files.config(), "min_milliseconds_before_pin_unlock = 300\n", 0o664);
+        assert!(global_settings(&files.config(), uid).unwrap_err().to_string().contains("writable by its group"));
+        write(&files.config(), "hash = $y$j9T$abc$def\n", 0o644);
+        assert!(matches!(global_settings(&files.config(), uid), Err(Error::OutsideUserFile { .. })));
     }
 
     #[test]

@@ -26,7 +26,7 @@ pub use accounts::{Account, current_egid, current_euid, current_gid, current_uid
 pub use chkpwd::UnixChkpwd;
 pub use clock::BootClock;
 pub use crypt::{NewPin, Yescrypt};
-pub use files::UserFiles;
+pub use files::{UserFiles, global_settings};
 pub use log::FileLog;
 
 use properpin_core::Error;

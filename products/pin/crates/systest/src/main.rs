@@ -37,7 +37,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
 use pamharness::PamClient;
-use properpin_core::{Budget, Clock, PEPPER_BYTES, Pepper, PinState, exit};
+use properpin_core::{Budget, Clock, PEPPER_BYTES, Pepper, PinState, Settings, exit};
 use properpin_sys::{Account, BootClock, Yescrypt, group_by_name};
 
 mod uninstall;
@@ -164,6 +164,7 @@ fn run() -> ExitCode {
         ("concurrent wrong PINs are all counted", concurrent_wrong_pins_are_all_counted),
         ("one session serves many attempts, and the worker exits cleanly", one_session_serves_many_attempts),
         ("a killed worker never unlocks and loses no count", a_killed_worker_loses_no_count),
+        ("a correct PIN waits out the minimum, and a kill meanwhile unlocks nothing", a_correct_pin_waits_out_the_minimum),
         ("disable and uninstall leave PAM as it was", disable_and_uninstall),
     ];
     let mut failed = 0;
@@ -752,12 +753,50 @@ fn one_session_serves_many_attempts(world: &World) -> Outcome {
     {
         return Err(format!("the log doesn't show arming, two PIN unlocks and one failure: {}", said()));
     }
-    // What the minimum-duration row in docs/plan.md will turn into an assertion.
-    println!(
-        "        note: a correct PIN took {} and {} ms; kscreenlocker 6.8 calls 50 ms or less too quick",
-        answers[1].ms, answers[3].ms
-    );
+    // kscreenlocker 6.8 takes an answer within 50 ms for a broken authenticator; the module makes
+    // a correct PIN wait out min_milliseconds_before_pin_unlock, 75 ms with no config.
+    let minimum = Settings::default().min_milliseconds_before_pin_unlock;
+    if answers[1].ms < minimum || answers[3].ms < minimum {
+        return Err(format!("a correct PIN took {} and {} ms, under the {minimum} ms minimum: {}", answers[1].ms, answers[3].ms, said()));
+    }
+    println!("        note: a correct PIN took {} and {} ms, with a minimum of {minimum}", answers[1].ms, answers[3].ms);
     Ok(())
+}
+
+/// With `min_milliseconds_before_pin_unlock` raised to a second, a correct PIN takes at least that
+/// through the real stack. Killed while it waits, as the 6.8 greeter cancels, the worker unlocks
+/// nothing; the helper had already taken the PIN, so the failures in a row are reset as after any
+/// correct PIN, its helper is gone, and the PIN unlocks again afterwards.
+fn a_correct_pin_waits_out_the_minimum(world: &World) -> Outcome {
+    write_file(&world.config(), "min_milliseconds_before_pin_unlock = 1000\n", 0, 0, 0o644)?;
+    world.arm()?;
+    let mut worker = world.start(&["worker", "kde", USER])?;
+    writeln!(worker.stdin.take().expect("piped"), "{PIN}").map_err(message)?;
+    let output = world.wait_for(worker)?;
+    match Answer::all(&output)[..] {
+        [Answer { status: pamharness::PAM_SUCCESS, ms, .. }] if ms >= 1000 => {}
+        _ => return Err(format!("not one unlock after at least 1000 ms: {}", String::from_utf8_lossy(&output.stdout))),
+    }
+    world.pin_refused("1111", "not the PIN, failure 1 of 3")?;
+    let mut worker = world.start(&["worker", "kde", USER])?;
+    // Kept open, so the worker waits for more rather than exiting.
+    let mut stdin = worker.stdin.take().expect("piped");
+    writeln!(stdin, "{PIN}").map_err(message)?;
+    thread::sleep(Duration::from_millis(500));
+    let _ = worker.kill();
+    let output = worker.wait_with_output().map_err(message)?;
+    drop(stdin);
+    if !Answer::all(&output).is_empty() {
+        return Err(format!("the killed worker answered: {}", String::from_utf8_lossy(&output.stdout)));
+    }
+    no_helper_left()?;
+    let log = world.syslog.take();
+    let text = fs::read_to_string(world.state_file()).map_err(message)?;
+    let state = PinState::parse(&text).ok_or_else(|| format!("the state doesn't parse: {text}"))?;
+    if !log.contains("unlocked with the PIN") || state.failures != 0 {
+        return Err(format!("the helper should have taken the PIN and reset the failures, {} in a row now:\n{log}", state.failures));
+    }
+    world.pin_unlocks()
 }
 
 /// The 6.8 greeter cancels by killing its worker: SIGTERM and SIGKILL 25 ms later, or SIGKILL at

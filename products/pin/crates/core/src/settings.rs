@@ -15,8 +15,9 @@ use crate::{
 ///
 /// The unlock path uses the hash, the next three fields and the budget's five; `set` uses the
 /// four in between, and `seal_cost`; arming uses the cleartext salt for deriving the pepper decryption key and the
-/// encrypted pepper. The
-/// budget's settings, and `seal_cost`, may only come from the global config.
+/// encrypted pepper. The PAM module itself reads `min_milliseconds_before_pin_unlock`. The
+/// budget's settings, `seal_cost` and `min_milliseconds_before_pin_unlock` may only come from the
+/// global config.
 #[derive(Clone, PartialEq)]
 pub struct Settings {
     /// Empty: no PIN is set. The hash of the pepper's hex digits followed by the PIN
@@ -52,9 +53,16 @@ pub struct Settings {
     pub max_concerning_7d: u32,
     /// Concerning failures since the PIN was set that disable it.
     pub max_concerning_total: u64,
+    /// The shortest time a correct PIN takes to unlock, counted from when the PAM module is called;
+    /// the module waits out the rest. kscreenlocker 6.8 takes an answer within 50 ms for a broken
+    /// authenticator, so below that the PIN stops unlocking. Only a correct PIN waits: anything
+    /// else goes on to pam_unix, which is slow anyway. The PAM module reads it, as the user, so it
+    /// may only come from the global config, which everyone can read.
+    pub min_milliseconds_before_pin_unlock: u64,
 }
 
-/// The budget's settings: one policy for the machine, never per user.
+/// The budget's settings (one policy for the machine, never per user), `seal_cost`, and the PAM
+/// module's wait, which the module reads as the user, who can't read their own file.
 const GLOBAL_ONLY: &[&str] = &[
     "forgive_before_correct_pin",
     "forgive_before_correct_password",
@@ -62,6 +70,7 @@ const GLOBAL_ONLY: &[&str] = &[
     "max_concerning_7d",
     "max_concerning_total",
     "seal_cost",
+    "min_milliseconds_before_pin_unlock",
 ];
 
 impl Default for Settings {
@@ -82,6 +91,7 @@ impl Default for Settings {
             max_concerning_24h: 10,
             max_concerning_7d: 20,
             max_concerning_total: 100,
+            min_milliseconds_before_pin_unlock: 75,
         }
     }
 }
@@ -104,6 +114,7 @@ impl fmt::Debug for Settings {
             .field("max_concerning_24h", &self.max_concerning_24h)
             .field("max_concerning_7d", &self.max_concerning_7d)
             .field("max_concerning_total", &self.max_concerning_total)
+            .field("min_milliseconds_before_pin_unlock", &self.min_milliseconds_before_pin_unlock)
             .finish()
     }
 }
@@ -145,6 +156,8 @@ impl Settings {
                 "max_concerning_24h" => self.max_concerning_24h = in_range(source, key, raw, 1, 100)?,
                 "max_concerning_7d" => self.max_concerning_7d = in_range(source, key, raw, 1, 200)?,
                 "max_concerning_total" => self.max_concerning_total = in_range(source, key, raw, 1, 100_000)?,
+                // Under 50 ms breaks the PIN on kscreenlocker 6.8; allowed, for other lock screens.
+                "min_milliseconds_before_pin_unlock" => self.min_milliseconds_before_pin_unlock = in_range(source, key, raw, 0, 1000)?,
                 _ => return Err(Error::UnknownSetting { file: source.into(), key: key.into() }),
             }
         }
@@ -245,7 +258,7 @@ mod tests {
     fn every_setting_is_read() {
         let text = "expiry_hours = 2\nmax_failures = 5\nmax_pin_length = 8\nmin_pin_length = 6\nmin_letters = 1\nhash_cost = 6\n\
                     seal_cost = 9\nforgive_before_correct_pin = 30\nforgive_before_correct_password = 60\nmax_concerning_24h = 5\n\
-                    max_concerning_7d = 15\nmax_concerning_total = 50\n";
+                    max_concerning_7d = 15\nmax_concerning_total = 50\nmin_milliseconds_before_pin_unlock = 200\n";
         let expected = Settings {
             expiry_hours: 2.0,
             max_failures: 5,
@@ -259,6 +272,7 @@ mod tests {
             max_concerning_24h: 5,
             max_concerning_7d: 15,
             max_concerning_total: 50,
+            min_milliseconds_before_pin_unlock: 200,
             ..Settings::default()
         };
         assert_eq!(apply(text, false).unwrap(), expected);
@@ -266,7 +280,14 @@ mod tests {
 
     #[test]
     fn refuses_out_of_range_never_clamps() {
-        for text in ["max_failures = 11", "max_failures = 0", "expiry_hours = nan", "expiry_hours = inf", "hash_cost = -1"] {
+        for text in [
+            "max_failures = 11",
+            "max_failures = 0",
+            "expiry_hours = nan",
+            "expiry_hours = inf",
+            "hash_cost = -1",
+            "min_milliseconds_before_pin_unlock = 1001",
+        ] {
             assert!(matches!(apply(text, false), Err(Error::BadValue { .. })), "{text}");
         }
         let error = apply("max_failures = 11", false).unwrap_err().to_string();
@@ -276,7 +297,13 @@ mod tests {
     #[test]
     fn the_budget_is_set_globally_only() {
         assert_eq!(apply("max_concerning_24h = 5\nforgive_before_correct_pin = 30\n", false).unwrap().max_concerning_24h, 5);
-        for text in ["max_concerning_24h = 50", "forgive_before_correct_password = 10", "max_concerning_total = 1000", "seal_cost = 5"] {
+        for text in [
+            "max_concerning_24h = 50",
+            "forgive_before_correct_password = 10",
+            "max_concerning_total = 1000",
+            "seal_cost = 5",
+            "min_milliseconds_before_pin_unlock = 0",
+        ] {
             assert!(matches!(apply(text, true), Err(Error::GlobalOnly { .. })), "{text}");
         }
         assert!(matches!(apply("max_concerning_7d = 201", false), Err(Error::BadValue { .. })));

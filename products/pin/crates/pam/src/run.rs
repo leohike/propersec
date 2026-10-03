@@ -6,8 +6,8 @@ use std::path::Path;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
-use properpin_core::{Error, Secret, exit};
-use properpin_sys::{Account, current_euid, current_uid};
+use properpin_core::{Error, Log, Secret, Settings, exit};
+use properpin_sys::{Account, current_euid, current_uid, global_settings};
 
 use crate::Args;
 use crate::pam::DefaultSigchld;
@@ -38,6 +38,21 @@ pub fn run(transaction: &impl Transaction, args: &Args) -> Result<bool, Error> {
         exit::NO => Ok(false),
         other => Err(Error::System(format!("{} answered {other}; its log says why", args.helper.display()))),
     }
+}
+
+/// Sleep until `min_milliseconds_before_pin_unlock` from the config has passed since `started`,
+/// when the module was called. For a correct PIN only: kscreenlocker 6.8 takes an answer within
+/// 50 ms for a broken authenticator, and a correct PIN is the one answer that ends the stack with
+/// properpin's time alone. Waiting leaks nothing, since the unlock shows anyway. A config that
+/// can't be read is logged, and the default waited out: the helper read the same file a moment
+/// ago, so this hardly happens, and the PIN was right.
+pub fn wait_before_unlock(config: &Path, started: Instant, log: &impl Log) {
+    let minimum =
+        global_settings(config, current_uid()).map(|settings| settings.min_milliseconds_before_pin_unlock).unwrap_or_else(|error| {
+            log.log(&format!("waiting the default before the PIN unlocks: {error}"));
+            Settings::default().min_milliseconds_before_pin_unlock
+        });
+    std::thread::sleep(Duration::from_millis(minimum).saturating_sub(started.elapsed()));
 }
 
 /// The user being unlocked, who must be both the user this process runs as and the user PAM is
