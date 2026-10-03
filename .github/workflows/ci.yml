@@ -1,6 +1,7 @@
-# CI for propersec: the tests in Fedora 44, the podman system test, a dependency audit, and the
-# tests again with exactly the declared rust-version. clippy and fmt stay local (`just properpin
-# lint`). Every third-party action is pinned to a commit; Dependabot bumps them.
+# CI for propersec: the tests in Fedora 44, clippy and rustfmt with Fedora's toolchain, the podman
+# system test, a dependency audit, and the tests again with exactly the declared rust-version.
+# Mutation testing has its own weekly workflow (mutants.yml). Every third-party action is pinned
+# to a commit; Dependabot bumps them.
 
 name: CI
 
@@ -44,6 +45,29 @@ jobs:
           chown -R tester: "$CARGO_HOME" "$GITHUB_WORKSPACE"
       - name: cargo test
         run: runuser -u tester -- cargo test --workspace --locked
+
+  lint:
+    name: Lint (clippy, rustfmt; Fedora 44)
+    # The same two commands as `just properpin lint`. clippy's findings change between versions, so
+    # this uses the toolchain Fedora ships, like the test job, not the newest one.
+    runs-on: ubuntu-24.04
+    container: registry.fedoraproject.org/fedora:44
+    timeout-minutes: 20
+    steps:
+      - name: Install build dependencies, clippy and rustfmt
+        run: dnf -y install --setopt=install_weak_deps=False rust cargo clippy rustfmt gcc libxcrypt-devel git-core tar zstd
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Versions
+        run: |
+          cargo clippy --version
+          cargo fmt --version
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: cargo fmt
+        run: cargo fmt --all --check
 
   podman:
     name: System test (podman)
