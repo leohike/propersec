@@ -401,6 +401,7 @@ dependencies = [
  "properpin-core",
  "properpin-sys",
  "tempfile",
+ "zeroize",
 ]
 
 [[package]]

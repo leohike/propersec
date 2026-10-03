@@ -188,7 +188,7 @@ impl Bench {
         let from = case.variant.map_or(format!("{PRODUCT}/build"), |variant| format!("{BROKEN}/{variant}"));
         install_sh_from(&from, &["install"])?;
         install_sh_from(&from, &["enable", "--yes"])?;
-        properpin_as_root(&["set", "--user", USER], &format!("{PIN}\n{PIN}\n"))?;
+        properpin_as_root(&["set", "--user", USER], &format!("{PIN}\n{PIN}\n{PASSWORD}\n"))?;
         (case.damage)()?;
         self.is_broken(case).map_err(|error| format!("the broken install didn't break as expected: {error}"))?;
 
@@ -202,7 +202,7 @@ impl Bench {
         // properpin itself still installs and works afterwards, and goes again just as cleanly.
         install_sh(&["install"])?;
         install_sh(&["enable", "--yes"])?;
-        properpin_as_root(&["set", "--user", USER], &format!("{PIN}\n{PIN}\n"))?;
+        properpin_as_root(&["set", "--user", USER], &format!("{PIN}\n{PIN}\n{PASSWORD}\n"))?;
         self.expect("kde", PASSWORD, &Ran::Unlocked, "the password, reinstalled")?;
         self.expect("kde", PIN, &Ran::Unlocked, "the PIN, reinstalled")?;
         install_sh(&["uninstall", "--yes"])?;

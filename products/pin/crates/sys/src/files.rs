@@ -7,7 +7,9 @@ use std::time::{Duration, Instant};
 
 use nix::fcntl::{Flock, FlockArg};
 use nix::libc::O_NOFOLLOW;
-use properpin_core::{Budget, Error, HASH_KEY, MAX_FILE_BYTES, PinState, Settings, Store, kv};
+use nix::sys::statfs::{TMPFS_MAGIC, statfs};
+use properpin_core::{Budget, Error, MAX_FILE_BYTES, PinState, Settings, Store, kv};
+use zeroize::Zeroizing;
 
 use crate::system;
 
@@ -19,9 +21,10 @@ const LOCK_TIMEOUT: Duration = Duration::from_secs(1);
 ///
 /// ```text
 /// <etc>/config               global settings, optional            owner-only writable
-/// <etc>/users/<user>         the user's settings and hash         owner:<helper group> 0640
+/// <etc>/users/<user>         the user's settings, hash and        owner:<helper group> 0640
+///                            encrypted pepper
 /// <run_dir>/                 every user's state                   owner:<helper group> 1770
-/// <run_dir>/<uid>.state      a PinState                           <uid>:<helper group> 0600
+/// <run_dir>/<uid>.state      a PinState, with the clear pepper    <uid>:<helper group> 0600
 /// <run_dir>/<uid>.lock       serialises concurrent attempts       <uid>:<helper group> 0600
 /// <budget_dir>/              every user's budget, on disk         owner:<helper group> 1770
 /// <budget_dir>/<uid>.budget  a Budget                             <uid>:<helper group> 0600
@@ -33,8 +36,9 @@ const LOCK_TIMEOUT: Duration = Duration::from_secs(1);
 /// directory is sticky, and each user's state and lock files must belong to that user, so one
 /// user's run of the helper can't read, replace or plant another's. The budget follows the same
 /// rules in a directory on disk, so it survives a reboot; the run directory's lock covers it.
-/// `properpin set` and `remove` need the `etc` side and the budget; [`UserFiles::with_runtime`]
-/// adds the state, which only the helper uses.
+/// `properpin enable` needs the `etc` side and the budget; [`UserFiles::with_runtime`] adds the
+/// state, which the helper keeps, `properpin set` arms, and `properpin remove` deletes. Whoever
+/// writes the state or creates the lock file, the user or root, gives it to the user.
 #[derive(Debug, Clone)]
 pub struct UserFiles {
     etc: PathBuf,
@@ -127,11 +131,12 @@ impl UserFiles {
         kv::parse(&text, &path.display().to_string())
     }
 
-    /// Atomically write a new hash into the user's file: owned by the owner, readable by `group`
-    /// (the helper's), mode 0640. The user's other settings in the file are kept as they are.
-    pub fn save_pin_hash(&self, hash: &str, group: u32) -> Result<(), Error> {
+    /// Atomically write a new PIN's settings (its hash and encrypted pepper) into the user's file:
+    /// owned by the owner, readable by `group` (the helper's), mode 0640. The user's other settings
+    /// in the file are kept as they are.
+    pub fn save_pin(&self, new: &[(&str, &str)], group: u32) -> Result<(), Error> {
         let path = self.user_file();
-        let pairs = kv::with(self.read_pairs(&path, true)?, HASH_KEY, hash);
+        let pairs = new.iter().fold(self.read_pairs(&path, true)?, |pairs, (key, value)| kv::with(pairs, key, value));
         let dir = path.parent().expect("the user file is inside users/");
         fs::DirBuilder::new().recursive(true).mode(0o755).create(dir).map_err(|error| system(dir.display(), error))?;
         let write = || -> std::io::Result<()> {
@@ -165,6 +170,22 @@ impl UserFiles {
             Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
             Err(error) => Err(system(path.display(), error)),
         }
+    }
+
+    /// Delete the state, and the pepper in it: `remove` leaves nothing armed behind.
+    pub fn remove_state(&self) -> Result<bool, Error> {
+        let path = self.trusted_run_dir()?.join(format!("{}.state", self.uid));
+        match fs::remove_file(&path) {
+            Ok(()) => Ok(true),
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(system(path.display(), error)),
+        }
+    }
+
+    /// Whether the run directory is on tmpfs, so the pepper in the state stays in memory, unless
+    /// swapped out. `None` when it can't be told.
+    pub fn runtime_on_tmpfs(&self) -> Option<bool> {
+        statfs(&self.runtime.as_ref()?.path).ok().map(|info| info.filesystem_type() == TMPFS_MAGIC)
     }
 
     // --- the helper's side: per-boot state, and the budget
@@ -215,9 +236,32 @@ impl Store for UserFiles {
 
     /// Every write of the state happens under this lock, so checking here that the lock file is the
     /// user's own refuses a lock or state file planted in their name by someone else's run.
+    ///
+    /// An existing file is opened without `O_CREAT`: with `fs.protected_regular` set, root may not
+    /// `O_CREAT`-open a file of the user's in this sticky, group-writable directory, even one that
+    /// exists. A new one is created exclusively and given to the user, so root creating it (in
+    /// `properpin set`) doesn't leave a lock file the user's runs refuse.
     fn lock(&self) -> Result<Flock<File>, Error> {
-        let path = self.trusted_run_dir()?.join(format!("{}.lock", self.uid));
-        let open = OpenOptions::new().read(true).write(true).create(true).mode(0o600).custom_flags(O_NOFOLLOW).open(&path);
+        let dir = self.trusted_run_dir()?;
+        let group = self.runtime.as_ref().expect("checked by trusted_run_dir").group;
+        let path = dir.join(format!("{}.lock", self.uid));
+        let options = |create: bool| {
+            let mut options = OpenOptions::new();
+            options.read(true).write(true).create_new(create).mode(0o600).custom_flags(O_NOFOLLOW);
+            options
+        };
+        let open = match options(false).open(&path) {
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                options(true).open(&path).and_then(|file| match fchown(&file, Some(self.uid), Some(group)) {
+                    Ok(()) => Ok(file),
+                    Err(error) => {
+                        let _ = fs::remove_file(&path); // a lock file of the wrong owner would refuse every run
+                        Err(error)
+                    }
+                })
+            }
+            result => result,
+        };
         let mut file = open.map_err(|error| system(path.display(), error))?;
         let info = file.metadata().map_err(|error| system(path.display(), error))?;
         if !info.is_file() {
@@ -240,17 +284,23 @@ impl Store for UserFiles {
     /// A state file that isn't the user's own reads as no state, which requires the password.
     fn load_state(&self) -> Option<PinState> {
         let (info, text) = read_regular_file(&self.state_file()?).ok()?;
-        if info.uid() != self.uid {
+        let text = Zeroizing::new(text); // it may hold the pepper
+        if info.uid() != self.uid || info.mode() & 0o077 != 0 {
             return None;
         }
         PinState::parse(&text)
     }
 
+    /// Written for the user and the helper's group whoever writes it: the helper, as the user, or
+    /// `properpin set`, as root. Owner-only, since it may hold the pepper.
     fn save_state(&self, state: &PinState) -> Result<(), Error> {
         let dir = self.trusted_run_dir()?;
+        let group = self.runtime.as_ref().expect("checked by trusted_run_dir").group;
         let path = dir.join(format!("{}.state", self.uid));
         let write = || -> std::io::Result<()> {
             let mut file = tempfile::Builder::new().prefix(&format!(".{}.", self.uid)).tempfile_in(dir)?;
+            fchown(file.as_file(), Some(self.uid), Some(group))?;
+            file.as_file().set_permissions(Permissions::from_mode(0o600))?;
             file.write_all(state.format().as_bytes())?;
             file.persist(&path)?;
             Ok(())
@@ -380,8 +430,16 @@ mod tests {
     fn saving_a_hash_keeps_other_settings_and_sets_the_mode() {
         let Scratch { files, .. } = &scratch();
         write(&files.user_file(), "hash = $y$old\nmax_failures = 2\n", 0o640);
-        files.save_pin_hash("$y$new", nix::unistd::getgid().as_raw()).unwrap();
-        assert_eq!(fs::read_to_string(files.user_file()).unwrap(), "hash = $y$new\nmax_failures = 2\n");
+        files
+            .save_pin(
+                &[("hash", "$y$new"), ("cleartext_salt_for_deriving_pepper_decryption_key", "$y$salt")],
+                nix::unistd::getgid().as_raw(),
+            )
+            .unwrap();
+        assert_eq!(
+            fs::read_to_string(files.user_file()).unwrap(),
+            "hash = $y$new\nmax_failures = 2\ncleartext_salt_for_deriving_pepper_decryption_key = $y$salt\n"
+        );
         assert_eq!(fs::metadata(files.user_file()).unwrap().mode() & 0o777, 0o640);
         assert!(files.remove_pin().unwrap());
         assert!(!files.remove_pin().unwrap());
@@ -391,10 +449,32 @@ mod tests {
     fn state_round_trips_under_the_lock() {
         let Scratch { files, .. } = &scratch();
         assert_eq!(files.load_state(), None);
-        let state = PinState { boot_id: "b".into(), armed_at: 7, failures: 1 };
+        let pepper = properpin_core::Pepper::new(Zeroizing::new([9; properpin_core::PEPPER_BYTES]));
+        let state = PinState::armed("b", 7, pepper);
         let _lock = files.lock().unwrap();
         files.save_state(&state).unwrap();
         assert_eq!(files.load_state(), Some(state));
+        assert_eq!(fs::metadata(files.state_file().unwrap()).unwrap().mode() & 0o7777, 0o600);
+        assert!(files.remove_state().unwrap());
+        assert!(!files.remove_state().unwrap());
+        assert_eq!(files.load_state(), None);
+    }
+
+    #[test]
+    fn a_state_others_could_read_reads_as_none() {
+        let Scratch { files, .. } = &scratch();
+        files.save_state(&PinState { boot_id: "b".into(), armed_at: 7, failures: 0, pepper: None }).unwrap();
+        fs::set_permissions(files.state_file().unwrap(), Permissions::from_mode(0o640)).unwrap();
+        assert_eq!(files.load_state(), None);
+    }
+
+    #[test]
+    fn tells_whether_the_run_directory_is_tmpfs() {
+        let Scratch { files, .. } = &scratch();
+        let on_tmpfs = files.runtime_on_tmpfs();
+        assert!(on_tmpfs.is_some());
+        let etc_only = UserFiles::new(files.etc.clone(), files.etc_owner, "tester", files.uid).unwrap();
+        assert_eq!(etc_only.runtime_on_tmpfs(), None);
     }
 
     #[test]
@@ -405,7 +485,7 @@ mod tests {
             fs::set_permissions(&dir, Permissions::from_mode(mode)).unwrap();
             let error = files.lock().unwrap_err().to_string();
             assert!(error.contains(&format!("mode {mode:04o}, not 1770")), "{error}");
-            assert!(files.save_state(&PinState { boot_id: "b".into(), armed_at: 7, failures: 0 }).is_err());
+            assert!(files.save_state(&PinState { boot_id: "b".into(), armed_at: 7, failures: 0, pepper: None }).is_err());
         }
         fs::set_permissions(&dir, Permissions::from_mode(0o1770)).unwrap();
         assert!(files.lock().is_ok());
@@ -442,6 +522,11 @@ mod tests {
             runtime.owner,
             runtime.group,
         );
+        // Creating it for the victim takes root, so a test's attempt fails and leaves nothing.
+        let error = victim.lock().unwrap_err().to_string();
+        assert!(error.contains("Operation not permitted"), "{error}");
+        assert!(!victim.lock_file().unwrap().exists());
+        write(&victim.lock_file().unwrap(), "", 0o600);
         let error = victim.lock().unwrap_err().to_string();
         assert!(error.contains(&format!("owned by uid {}, not {}", files.uid, files.uid + 1)), "{error}");
     }
@@ -455,7 +540,7 @@ mod tests {
             runtime.owner,
             runtime.group,
         );
-        write(&victim.state_file().unwrap(), &PinState { boot_id: "b".into(), armed_at: 7, failures: 0 }.format(), 0o600);
+        write(&victim.state_file().unwrap(), &PinState { boot_id: "b".into(), armed_at: 7, failures: 0, pepper: None }.format(), 0o600);
         assert_eq!(victim.load_state(), None);
     }
 
@@ -476,7 +561,7 @@ mod tests {
             runtime.owner,
             runtime.group,
         );
-        let state = PinState { boot_id: "b".into(), armed_at: 7, failures: 1 };
+        let state = PinState { boot_id: "b".into(), armed_at: 7, failures: 1, pepper: None };
         files.save_state(&state).unwrap();
         assert_eq!(other.load_state(), None);
         assert_ne!(files.state_file(), other.state_file());

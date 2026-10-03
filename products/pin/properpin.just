@@ -27,7 +27,7 @@ lint:
 fmt:
     cargo fmt --all
 
-# The whole lifecycle in a temporary directory, through the real helper binary (not setgid, so its --dev options work): set, refused, armed, unlocked, three failures, refused
+# The whole lifecycle in a temporary directory, through the real helper binary (not setgid, so its --dev options work): set and armed, a reboot, refused, armed again by the password, three failures, refused
 demo:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -41,12 +41,14 @@ demo:
     printf '#!/bin/sh\nexec %s "$@" --dev-etc %s --dev-run %s --dev-budget %s --dev-chkpwd %s --dev-log %s\n' \
         "$bin/properpin-helper" "$root/etc" "$root/run" "$root/var" "$root/unix_chkpwd" "$root/log" >"$root/helper"
     chmod +x "$root/unix_chkpwd" "$root/helper"
-    properpin() { "$bin/properpin" --etc "$root/etc" --budget "$root/var" --helper "$root/helper" --owner "$(id -u)" --group "$(id -g)" "$@"; }
+    properpin() { "$bin/properpin" --etc "$root/etc" --budget "$root/var" --run "$root/run" --chkpwd "$root/unix_chkpwd" --helper "$root/helper" --owner "$(id -u)" --group "$(id -g)" "$@"; }
     step() { printf '\n\033[1m%s\033[0m\n' "$*"; }
     said() { tail -n 1 "$root/log"; }
     lock_screen() { step "lock screen: $1"; echo -n "$1" | "$root/helper" check || true; said; }
-    step "properpin set (4859, typed twice)"; printf '4859\n4859\n' | properpin set
+    step "properpin set (4859, typed twice, then the password)"; printf '4859\n4859\ncorrect horse battery staple\n' | properpin set
     step "properpin status"; properpin status
+    lock_screen 4859
+    step "a reboot: the run directory starts empty, and the pepper with it"; rm -f "$root"/run/*
     lock_screen 4859
     step "lock screen: the correct password, so the arm line runs"
     echo -n "correct horse battery staple" | "$root/helper" arm; said

@@ -2,13 +2,12 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
-use properpin_core::{Error, Secret};
-
-use crate::PasswordCheck;
+use properpin_core::{Error, PasswordCheck, Secret};
 
 /// The account password, checked by `unix_chkpwd`, pam_unix's own setuid-root helper, the same way
 /// pam_unix checks it. `unix_chkpwd` answers only about the user its caller really is, which is
 /// also the user the helper serves: the helper keeps its caller's real uid, so the two agree.
+/// Root may ask about anyone, which is how `properpin set` checks the password it seals with.
 #[derive(Debug, Clone)]
 pub struct UnixChkpwd(pub PathBuf);
 

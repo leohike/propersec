@@ -26,7 +26,7 @@
 
 use std::fs::{self, Permissions};
 use std::io::{ErrorKind, Read, Write};
-use std::os::unix::fs::{PermissionsExt, chown, symlink};
+use std::os::unix::fs::{MetadataExt, PermissionsExt, chown, symlink};
 use std::os::unix::net::UnixDatagram;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -37,7 +37,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
 use pamharness::PamClient;
-use properpin_core::{Budget, Clock, PinState, exit};
+use properpin_core::{Budget, Clock, PEPPER_BYTES, Pepper, PinState, exit};
 use properpin_sys::{Account, BootClock, Yescrypt, group_by_name};
 
 mod uninstall;
@@ -131,6 +131,9 @@ fn run() -> ExitCode {
         ("the password arms the PIN, and the PIN unlocks", the_password_arms_the_pin),
         ("a wrong password never arms the PIN", a_wrong_password_never_arms_the_pin),
         ("three wrong PINs require the password", three_wrong_pins_require_the_password),
+        ("set checks the password, seals with it, and arms at once", set_checks_the_password_and_arms_at_once),
+        ("a password change stops the PIN until set", a_password_change_stops_the_pin),
+        ("a damaged encrypted pepper refuses the PIN, not the password", a_damaged_encrypted_pepper),
         ("the PIN works at the lock screen only", the_pin_works_at_the_lock_screen_only),
         ("a user file others can read is refused", a_user_file_others_can_read),
         ("a user file the user owns is refused", a_user_file_the_user_owns),
@@ -199,9 +202,75 @@ fn three_wrong_pins_require_the_password(world: &World) -> Outcome {
     world.pin_refused("1111", "not the PIN, failure 1 of 3")?;
     world.pin_refused("2222", "not the PIN, failure 2 of 3")?;
     world.pin_refused("3333", "failure 3 of 3, password required from now on")?;
+    if world.pepper_in_memory()? {
+        return Err("three wrong PINs left the pepper in memory".into());
+    }
     world.pin_refused(PIN, "3 failures in a row")?;
     world.arm()?;
     world.pin_unlocks()
+}
+
+/// `set` checks the password through the real `unix_chkpwd`, as root asking about alice, seals the
+/// pepper with it, and arms the PIN at once, giving the files it creates in the run directory to
+/// alice. A wrong password changes nothing.
+fn set_checks_the_password_and_arms_at_once(world: &World) -> Outcome {
+    match properpin_as_root(&["set", "--user", USER], "4860\n4860\nnot the password\n") {
+        Err(said) if said.contains("that is not the password of alice") => {}
+        other => return Err(format!("set took a wrong password: {other:?}")),
+    }
+    world.pin_refused(PIN, "no password unlock since boot")?;
+    let said = properpin_as_root(&["set", "--user", USER], &format!("{PIN}\n{PIN}\n{PASSWORD}\n"))?;
+    if !said.contains("armed now") {
+        return Err(format!("set didn't arm the PIN: {said}"));
+    }
+    let lock = PathBuf::from(format!("{RUN_DIR}/{}.lock", world.user.uid));
+    for path in [world.state_file(), lock] {
+        let info = fs::metadata(&path).map_err(message)?;
+        if (info.uid(), info.gid(), info.mode() & 0o7777) != (world.user.uid, world.helper_gid, 0o600) {
+            return Err(format!("{}: {}:{} {:o}, not alice's", path.display(), info.uid(), info.gid(), info.mode() & 0o7777));
+        }
+    }
+    world.pin_unlocks()?;
+    world.pin_refused("1111", "not the PIN, failure 1 of 3")?;
+    world.pin_unlocks()
+}
+
+/// After a password change the new password decrypts the pepper to garbage, so the right PIN is
+/// wrong, until `set` again.
+fn a_password_change_stops_the_pin(world: &World) -> Outcome {
+    const NEW: &str = "a brand new password for alice";
+    world.arm()?;
+    world.pin_unlocks()?;
+    let _restore = Password::change(NEW)?;
+    let new = world.kde(NEW)?;
+    expect(new.unlocked && new.log.contains("password accepted, PIN armed"), "the new password didn't unlock", &new)?;
+    world.pin_refused(PIN, "not the PIN, failure 1 of 3")?;
+    let status = world.as_user(USER, &["/usr/local/bin/properpin", "status"], b"")?;
+    let status = String::from_utf8_lossy(&status.stdout);
+    if !status.contains("a password change stops the PIN from working") {
+        return Err(format!("status gave no hint:\n{status}"));
+    }
+    properpin_as_root(&["set", "--user", USER], &format!("{PIN}\n{PIN}\n{NEW}\n"))?;
+    world.pin_unlocks()
+}
+
+/// The encrypted pepper damaged: one hex digit changed decrypts to a wrong pepper, which nothing
+/// can tell from a password change; cut short, it can't be decrypted at all. The password unlocks
+/// either way.
+fn a_damaged_encrypted_pepper(world: &World) -> Outcome {
+    let original = String::from_utf8_lossy(&world.pin_file).into_owned();
+    let line = original.lines().find(|line| line.starts_with("encrypted_pepper = ")).ok_or("no encrypted_pepper line")?;
+    let flipped = format!("{}{}", &line[..line.len() - 1], if line.ends_with('0') { '1' } else { '0' });
+    write_file(&world.user_file(), &original.replace(line, &flipped), 0, world.helper_gid, 0o640)?;
+    world.arm()?;
+    world.pin_refused(PIN, "not the PIN, failure 1 of 3")?;
+    write_file(&world.user_file(), &original.replace(line, &line[..line.len() - 2]), 0, world.helper_gid, 0o640)?;
+    let password = world.kde(PASSWORD)?;
+    expect(
+        password.unlocked && password.log.contains("PIN not armed") && password.log.contains("not 64 hex digits"),
+        "a cut-short pepper armed, or the password failed",
+        &password,
+    )
 }
 
 /// Every other service on the system checks only the password, armed PIN or not, and never even
@@ -251,7 +320,7 @@ fn a_hash_in_the_global_config(world: &World) -> Outcome {
     world.arm()?;
     let user_file = String::from_utf8_lossy(&world.pin_file).into_owned();
     write_file(&world.config(), &user_file, 0, 0, 0o644)?;
-    world.fails_closed("only a user's own file may hold a PIN hash")
+    world.fails_closed("only a user's own file may hold hash")
 }
 
 fn a_shared_runtime_directory(world: &World) -> Outcome {
@@ -457,7 +526,8 @@ fn one_users_helper_cannot_touch_anothers_counts(world: &World) -> Outcome {
 /// whose lock file it is. The password still works.
 fn planted_counts_are_refused(world: &World) -> Outcome {
     let bob = Account::by_name("bob").map_err(message)?;
-    let armed = PinState::armed(&BootClock.boot_id().map_err(message)?, BootClock.now().map_err(message)?);
+    let pepper = Pepper::new(zeroize::Zeroizing::new([0; PEPPER_BYTES]));
+    let armed = PinState::armed(&BootClock.boot_id().map_err(message)?, BootClock.now().map_err(message)?, pepper);
     let lock = format!("{RUN_DIR}/{}.lock", world.user.uid);
     let script = format!("umask 0 && touch {lock} && chmod 666 {lock} && cat > {}", world.state_file().display());
     let planted = world.as_identity(bob.uid, world.helper_gid, &["sh", "-c", &script], armed.format().as_bytes())?;
@@ -588,7 +658,7 @@ fn the_lifetime_limit_takes_a_new_pin(world: &World) -> Outcome {
         Err(said) if said.contains("choose a new one with: properpin set") => {}
         other => return Err(format!("enable lifted the lifetime limit: {other:?}")),
     }
-    properpin_as_root(&["set", "--user", USER], &format!("{PIN}\n{PIN}\n"))?;
+    properpin_as_root(&["set", "--user", USER], &format!("{PIN}\n{PIN}\n{PASSWORD}\n"))?;
     world.arm()?;
     world.pin_unlocks()
 }
@@ -817,7 +887,7 @@ impl World {
         install_sh(&["enable", "--yes"])?;
         let helper_gid = group_by_name(HELPER_GROUP).map_err(message)?;
 
-        properpin_as_root(&["set", "--user", USER], &format!("{PIN}\n{PIN}\n"))?;
+        properpin_as_root(&["set", "--user", USER], &format!("{PIN}\n{PIN}\n{PASSWORD}\n"))?;
         let checked = install_sh(&["check"])?;
         if !checked.contains("has properpin's lines") {
             return Err(format!("install.sh check after set:\n{checked}"));
@@ -1045,12 +1115,42 @@ impl World {
         self.password_unlocks()
     }
 
+    fn pepper_in_memory(&self) -> Outcome<bool> {
+        Ok(fs::read_to_string(self.state_file()).map_err(message)?.contains("pepper = "))
+    }
+
     fn edit_state(&self, change: impl FnOnce(&mut PinState)) -> Outcome {
         let text = fs::read_to_string(self.state_file()).map_err(message)?;
         let mut state = PinState::parse(&text).ok_or("the state file doesn't parse")?;
         change(&mut state);
         overwrite(&self.state_file(), &state.format())
     }
+}
+
+/// alice's password changed, and changed back when dropped, so a failing scenario doesn't leave
+/// the next ones with the wrong password.
+struct Password;
+
+impl Password {
+    fn change(new: &str) -> Outcome<Self> {
+        chpasswd(new)?;
+        Ok(Self)
+    }
+}
+
+impl Drop for Password {
+    fn drop(&mut self) {
+        if let Err(error) = chpasswd(PASSWORD) {
+            println!("        could not put alice's password back: {error}");
+        }
+    }
+}
+
+fn chpasswd(password: &str) -> Outcome {
+    let mut child = Command::new("chpasswd").stdin(Stdio::piped()).spawn().map_err(message)?;
+    child.stdin.take().expect("piped").write_all(format!("{USER}:{password}\n").as_bytes()).map_err(message)?;
+    let status = child.wait().map_err(message)?;
+    if status.success() { Ok(()) } else { Err(format!("chpasswd: {status}")) }
 }
 
 /// `/dev/log`, read by a thread of its own as fast as anything logs. Read only between attempts,

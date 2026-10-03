@@ -1,11 +1,11 @@
 # properpin's security, once complete
 
-A short assessment of properpin as it would be with everything planned so far built, written on 2026-10-03. **This version doesn't exist yet**: the setgid helper and the failure budget are built, while the pepper and refusing a PIN equal to the password are still in `docs/plan.md`. The question it answers: how much weaker is unlocking with a PIN than typing the full password every time?
+A short assessment of properpin as it would be with everything planned so far built, written on 2026-10-03. The setgid helper, the failure budget, the pepper and refusing a PIN equal to the password are built; the pepper differs from the description below in the details listed in `docs/pepper-issues.md`. The question it answers: how much weaker is unlocking with a PIN than typing the full password every time?
 
 ## What "complete" means here
 
 - **The setgid helper** (`docs/spec-setgid-helper.md`): hashes `root:properpin 0640`, counts in `/run/properpin`, a root-owned helper setgid to a group with no members. Nothing the user runs can read a hash or reset a count.
-- **The pepper**: a secret derived from the password, mixed into the PIN hash, kept only in RAM (`/run/properpin`, checked to be a memory filesystem) while the PIN is armed, never on disk. Arming with a wrong password is pointless, and a stolen hash can't be cracked without the password.
+- **The pepper** (built): a random secret mixed into the PIN hash, in clear text only in RAM (`/run/properpin`) while the PIN is armed, and on disk only encrypted under a key derived from the password (`docs/pepper-terminology.md`). A stolen hash and encrypted pepper can't be cracked without guessing the password first. `/run/properpin` not being a memory filesystem is warned about, not refused.
 - **The failure budget** (built): every failure nobody forgave counts across reboots, and 10 a day, 20 a week or 100 per PIN disable it until root turns it back on.
 - **PIN equal to the password refused** at `properpin set`.
 - **Assumed about the system**: full-disk encryption (LUKS), swap that never reaches disk unencrypted (zram, or swap inside LUKS), and no hibernation to an unencrypted disk. The development machine meets all three (zram only, hibernation disabled).

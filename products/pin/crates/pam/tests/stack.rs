@@ -62,7 +62,7 @@ impl Sandbox {
         // libpam logs to the journal when a confdir has no "other" fallback service.
         fs::write(sandbox.path("pam.d/other"), "auth required pam_deny.so\n").unwrap();
         let user_file = sandbox.path("etc/users").join(&sandbox.user);
-        fs::write(&user_file, format!("hash = {}\n", Yescrypt.hash(PIN, 4).unwrap())).unwrap();
+        fs::write(&user_file, Yescrypt.new_pin(PIN, PASSWORD.as_bytes(), 4, 1).unwrap().lines()).unwrap();
         fs::set_permissions(&user_file, Permissions::from_mode(0o640)).unwrap();
         // unix_chkpwd's protocol: the password on stdin, ending in a NUL; exit 0 for a match.
         let chkpwd = format!("#!/bin/bash\nIFS= read -r -d '' password\n[[ $1 == \"$(id -un)\" && $password == '{PASSWORD}' ]]\n");

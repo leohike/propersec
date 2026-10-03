@@ -1,9 +1,12 @@
 //! One unlock attempt, and arming after a password unlock. Refusal is the default: the only
 //! [`Verdict::Unlock`] comes from a matching PIN while the PIN is armed and not disabled.
+//!
+//! The pepper the PIN is hashed with stays in the state only while the PIN is armed: any refusal
+//! wipes it (expired, too many failures in a row, disabled), and only the password brings it back.
 
 use std::fmt;
 
-use crate::{Budget, Error, Judged, MAX_PIN_BYTES, PinState, Refusal, Settings};
+use crate::{Budget, Error, Judged, MAX_PIN_BYTES, Pepper, PinState, Refusal, Secret, Settings};
 
 /// Where one user's settings and state live, and the rules for trusting them.
 pub trait Store {
@@ -34,9 +37,14 @@ pub trait Clock {
     fn wall(&self) -> Result<u64, Error>;
 }
 
-/// Checks a typed PIN against the stored hash.
+/// Checks a typed PIN, already peppered, against the stored hash.
 pub trait Hasher {
     fn verify(&self, pin: &str, hash: &str) -> Result<bool, Error>;
+}
+
+/// Checks the account password, the way pam_unix does: through `unix_chkpwd` once installed.
+pub trait PasswordCheck {
+    fn matches(&self, user: &str, password: &Secret) -> Result<bool, Error>;
 }
 
 /// One line per event. Never pass a PIN, a password, or anything derived from one.
@@ -128,7 +136,10 @@ pub fn check(store: &impl Store, hasher: &impl Hasher, clock: &impl Clock, typed
     budget.record_failure(wall);
     store.save_budget(&budget)?;
     let verdict = match (judged.disabled, usable_input(typed)) {
-        (Some(limit), _) => Verdict::Refused(Refusal::Disabled(limit)),
+        (Some(limit), _) => {
+            forget_pepper(store, store.load_state())?;
+            Verdict::Refused(Refusal::Disabled(limit))
+        }
         (None, None) => Verdict::Unusable,
         (None, Some(pin)) if pin.chars().count() > settings.max_pin_length => Verdict::TooLong { max: settings.max_pin_length },
         (None, Some(pin)) => in_a_row(store, hasher, clock, &settings, pin)?,
@@ -140,29 +151,45 @@ pub fn check(store: &impl Store, hasher: &impl Hasher, clock: &impl Clock, typed
     Ok(CheckOutcome { verdict, judged })
 }
 
-/// The armed PIN against the failures in a row, then the hash.
+/// The armed PIN against the failures in a row, then the peppered hash.
 fn in_a_row(store: &impl Store, hasher: &impl Hasher, clock: &impl Clock, settings: &Settings, pin: &str) -> Result<Verdict, Error> {
     let state = store.load_state();
-    let mut state = match (settings.refusal(state.as_ref(), &clock.boot_id()?, clock.now()?), state) {
-        (None, Some(state)) => state,
-        (Some(refusal), _) => return Ok(Verdict::Refused(refusal)),
-        (None, None) => return Ok(Verdict::Refused(Refusal::NotArmed)), // refusal() never allows this
-    };
+    if let Some(refusal) = settings.refusal(state.as_ref(), &clock.boot_id()?, clock.now()?) {
+        forget_pepper(store, state)?;
+        return Ok(Verdict::Refused(refusal));
+    }
+    // refusal() refuses a missing state or pepper, so neither is missing here.
+    let Some(mut state) = state else { return Ok(Verdict::Refused(Refusal::NotArmed)) };
+    let Some(pepper) = state.pepper.clone() else { return Ok(Verdict::Refused(Refusal::NoPepper)) };
     // Count the failure before checking, and take it back on a match. An attempt abandoned
     // halfway (Plasma 6.8 cancels authenticators it switches away from) then still counts.
     state.failures = state.failures.saturating_add(1);
     store.save_state(&state)?;
-    if !hasher.verify(pin, &settings.pin_hash)? {
-        return Ok(Verdict::WrongPin { failures: state.failures, max: settings.max_failures });
+    if !hasher.verify(&pepper.peppered(pin), &settings.pin_hash)? {
+        let failures = state.failures;
+        if failures >= settings.max_failures {
+            forget_pepper(store, Some(state))?;
+        }
+        return Ok(Verdict::WrongPin { failures, max: settings.max_failures });
     }
     state.failures = 0;
     store.save_state(&state)?;
     Ok(Verdict::Unlock)
 }
 
+/// Wipe the pepper from `state`, if it still holds one. The rest of the state stays, so the next
+/// attempt is refused for the same reason, and the password must arm the PIN again.
+fn forget_pepper(store: &impl Store, state: Option<PinState>) -> Result<(), Error> {
+    match state {
+        Some(state) if state.pepper.is_some() => store.save_state(&PinState { pepper: None, ..state }),
+        _ => Ok(()),
+    }
+}
+
 /// After a password unlock: forgive the recent failures as the user's own, and arm the PIN from
-/// now, with nothing failed yet, unless it is disabled. `judged.disabled` says which.
-pub fn arm(store: &impl Store, clock: &impl Clock) -> Result<Judged, Error> {
+/// now, with nothing failed yet and the `pepper` the password decrypted, unless it is disabled.
+/// `judged.disabled` says which; a disabled PIN's pepper is wiped.
+pub fn arm(store: &impl Store, clock: &impl Clock, pepper: Pepper) -> Result<Judged, Error> {
     let settings = store.settings()?;
     let _lock = store.lock()?;
     let wall = clock.wall()?;
@@ -170,8 +197,9 @@ pub fn arm(store: &impl Store, clock: &impl Clock) -> Result<Judged, Error> {
     let judged = budget.judge(wall, &settings);
     budget.forgive(wall, settings.forgive_before_correct_password);
     store.save_budget(&budget)?;
-    if judged.disabled.is_none() {
-        store.save_state(&PinState::armed(&clock.boot_id()?, clock.now()?))?;
+    match judged.disabled {
+        None => store.save_state(&PinState::armed(&clock.boot_id()?, clock.now()?, pepper))?,
+        Some(_) => forget_pepper(store, store.load_state())?,
     }
     Ok(judged)
 }
@@ -186,6 +214,11 @@ mod tests {
 
     const PIN: &str = "4859";
 
+    /// The pepper every test PIN is set with.
+    fn pepper() -> Pepper {
+        Pepper::new(zeroize::Zeroizing::new([0xab; crate::PEPPER_BYTES]))
+    }
+
     struct MemoryStore {
         settings: Settings,
         state: RefCell<Option<PinState>>,
@@ -195,7 +228,7 @@ mod tests {
 
     impl MemoryStore {
         fn with_pin() -> Self {
-            let settings = Settings { pin_hash: format!("plain:{PIN}"), ..Settings::default() };
+            let settings = Settings { pin_hash: format!("plain:{}", *pepper().peppered(PIN)), ..Settings::default() };
             Self { settings, state: RefCell::new(None), budget: RefCell::default(), saves: Cell::new(0) }
         }
 
@@ -285,7 +318,7 @@ mod tests {
 
     fn armed() -> (MemoryStore, FakeClock) {
         let (store, clock) = (MemoryStore::with_pin(), FakeClock::new());
-        arm(&store, &clock).unwrap();
+        arm(&store, &clock, pepper()).unwrap();
         (store, clock)
     }
 
@@ -325,7 +358,7 @@ mod tests {
         try_pin(&store, &clock, "correct horse battery stapl");
         clock.advance(60);
         try_pin(&store, &clock, "correct horse battery staple");
-        arm(&store, &clock).unwrap();
+        arm(&store, &clock, pepper()).unwrap();
         assert_eq!(store.pending(), 0);
         clock.advance(3600);
         assert_eq!(try_pin(&store, &clock, PIN), Verdict::Unlock);
@@ -348,14 +381,14 @@ mod tests {
         assert_eq!(rounds, 5);
         assert_eq!(try_pin(&store, &clock, PIN), Verdict::Refused(Refusal::Disabled(crate::Limit::Day(10))));
         // The password no longer arms it either, and a reboot changes nothing.
-        assert_eq!(arm(&store, &clock).unwrap().disabled, Some(crate::Limit::Day(10)));
+        assert_eq!(arm(&store, &clock, pepper()).unwrap().disabled, Some(crate::Limit::Day(10)));
         *clock.boot_id.borrow_mut() = "boot-2".into();
-        arm(&store, &clock).unwrap();
+        arm(&store, &clock, pepper()).unwrap();
         assert_eq!(try_pin(&store, &clock, PIN), Verdict::Refused(Refusal::Disabled(crate::Limit::Day(10))));
         // Root turning it back on: the same PIN works again after the next password unlock.
         let enabled = store.budget.borrow().enabled();
         *store.budget.borrow_mut() = enabled;
-        arm(&store, &clock).unwrap();
+        arm(&store, &clock, pepper()).unwrap();
         assert_eq!(try_pin(&store, &clock, PIN), Verdict::Unlock);
     }
 
@@ -385,7 +418,7 @@ mod tests {
         }
         let store = Damaged(MemoryStore::with_pin());
         let clock = FakeClock::new();
-        assert!(arm(&store, &clock).is_err());
+        assert!(arm(&store, &clock, pepper()).is_err());
         assert!(check(&store, &PlainHasher, &clock, PIN.as_bytes()).is_err());
         assert_eq!(store.0.failures(), None);
     }
@@ -394,7 +427,7 @@ mod tests {
     fn after_boot_the_password_is_required_first() {
         let (store, clock) = (MemoryStore::with_pin(), FakeClock::new());
         assert_eq!(try_pin(&store, &clock, PIN), Verdict::Refused(Refusal::NotArmed));
-        arm(&store, &clock).unwrap();
+        arm(&store, &clock, pepper()).unwrap();
         assert_eq!(try_pin(&store, &clock, PIN), Verdict::Unlock);
     }
 
@@ -414,7 +447,7 @@ mod tests {
             try_pin(&store, &clock, wrong);
         }
         assert_eq!(try_pin(&store, &clock, PIN), Verdict::Refused(Refusal::TooManyFailures { failures: 3 }));
-        arm(&store, &clock).unwrap();
+        arm(&store, &clock, pepper()).unwrap();
         assert_eq!(try_pin(&store, &clock, PIN), Verdict::Unlock);
     }
 
@@ -427,6 +460,56 @@ mod tests {
         let (store, clock) = armed();
         *clock.boot_id.borrow_mut() = "boot-2".into();
         assert_eq!(try_pin(&store, &clock, PIN), Verdict::Refused(Refusal::OtherBoot));
+    }
+
+    fn pepper_in_memory(store: &MemoryStore) -> bool {
+        store.state.borrow().as_ref().is_some_and(|state| state.pepper.is_some())
+    }
+
+    #[test]
+    fn every_refusal_wipes_the_pepper_until_the_password() {
+        // Expired.
+        let (store, clock) = armed();
+        clock.advance(8 * 3600);
+        assert!(matches!(try_pin(&store, &clock, PIN), Verdict::Refused(Refusal::Expired { .. })));
+        assert!(!pepper_in_memory(&store));
+        // Three failures in a row: wiped with the third, and the reason stays the same.
+        let (store, clock) = armed();
+        for wrong in ["1111", "2222"] {
+            try_pin(&store, &clock, wrong);
+            assert!(pepper_in_memory(&store));
+        }
+        try_pin(&store, &clock, "3333");
+        assert!(!pepper_in_memory(&store));
+        assert_eq!(try_pin(&store, &clock, PIN), Verdict::Refused(Refusal::TooManyFailures { failures: 3 }));
+        arm(&store, &clock, pepper()).unwrap();
+        assert!(pepper_in_memory(&store));
+        assert_eq!(try_pin(&store, &clock, PIN), Verdict::Unlock);
+    }
+
+    #[test]
+    fn a_disabled_pin_loses_its_pepper_and_the_password_does_not_bring_it_back() {
+        let (store, clock) = armed();
+        store.budget.borrow_mut().disabled = Some(crate::Disabled { limit: crate::Limit::Day(10), at: clock.wall.get() });
+        assert!(matches!(try_pin(&store, &clock, PIN), Verdict::Refused(Refusal::Disabled(_))));
+        assert!(!pepper_in_memory(&store));
+        assert!(arm(&store, &clock, pepper()).unwrap().disabled.is_some());
+        assert!(!pepper_in_memory(&store));
+        // Root's enable: the same PIN, once the password has armed it again.
+        let enabled = store.budget.borrow().enabled();
+        *store.budget.borrow_mut() = enabled;
+        assert_eq!(try_pin(&store, &clock, PIN), Verdict::Refused(Refusal::NoPepper));
+        arm(&store, &clock, pepper()).unwrap();
+        assert_eq!(try_pin(&store, &clock, PIN), Verdict::Unlock);
+    }
+
+    /// After a password change the new password decrypts the pepper to garbage. Nothing notices:
+    /// the right PIN is simply wrong.
+    #[test]
+    fn the_wrong_pepper_makes_the_right_pin_wrong() {
+        let (store, clock) = (MemoryStore::with_pin(), FakeClock::new());
+        arm(&store, &clock, pepper().xor(&[1; crate::PEPPER_BYTES])).unwrap();
+        assert_eq!(try_pin(&store, &clock, PIN), Verdict::WrongPin { failures: 1, max: 3 });
     }
 
     #[test]
@@ -510,7 +593,7 @@ mod tests {
                 let allowed = armed_at.is_some_and(|at| now - at < 8 * 3600) && failures < limit;
                 match event {
                     Event::PasswordUnlock => {
-                        arm(&store, &clock).unwrap();
+                        arm(&store, &clock, pepper()).unwrap();
                         (armed_at, failures) = (Some(now), 0);
                     }
                     Event::RightPin => {

@@ -99,7 +99,7 @@ wrapper() {
     cat <<EOF
 #!/bin/sh
 # Installed by properpin's install.sh: the properpin command with this machine's paths.
-exec $binary --etc $etc --budget $budget_dir --helper $helper "\$@"
+exec $binary --etc $etc --budget $budget_dir --run $run_dir --helper $helper "\$@"
 EOF
 }
 

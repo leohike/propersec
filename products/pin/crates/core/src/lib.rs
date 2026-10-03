@@ -19,14 +19,16 @@ mod attempt;
 mod budget;
 mod error;
 pub mod kv;
+mod pepper;
 mod refusal;
 mod secret;
 mod settings;
 mod state;
 
-pub use attempt::{CheckOutcome, Clock, Hasher, Log, Store, Verdict, arm, check, usable_input};
+pub use attempt::{CheckOutcome, Clock, Hasher, Log, PasswordCheck, Store, Verdict, arm, check, usable_input};
 pub use budget::{Budget, Counts, DAY, Disabled, Judged, Limit, WEEK};
 pub use error::Error;
+pub use pepper::{PEPPER_BYTES, Pepper, to_hex as pepper_hex};
 pub use refusal::{Refusal, describe_seconds};
 pub use secret::Secret;
 pub use settings::Settings;
@@ -36,6 +38,10 @@ pub use state::PinState;
 /// libpam passes at most `PAM_MAX_RESP_SIZE` (512).
 pub const MAX_PIN_BYTES: usize = 256;
 
+/// The longest text libxcrypt is ever asked to hash: a password, or a pepper's 64 hex digits and
+/// a PIN.
+pub const MAX_PHRASE_BYTES: usize = MAX_INPUT_BYTES + 2 * PEPPER_BYTES;
+
 /// Config, user and state files are a few lines; anything longer is not one of ours.
 pub const MAX_FILE_BYTES: usize = 4096;
 
@@ -43,7 +49,17 @@ pub const MAX_FILE_BYTES: usize = 4096;
 pub const HASH_PREFIX: &str = "$y$";
 
 /// The setting that holds the PIN hash. Only a user's own file may have it.
-pub const HASH_KEY: &str = "hash";
+pub const HASH_SETTING: &str = "hash";
+
+/// The setting that holds the salt `pepper_decryption_key` is derived from the password with: a
+/// whole yescrypt setting, `$y$<cost>$<salt>`. Not secret, like the salt in `/etc/shadow`.
+pub const CLEARTEXT_SALT_FOR_DERIVING_PEPPER_DECRYPTION_KEY_SETTING: &str = "cleartext_salt_for_deriving_pepper_decryption_key";
+
+/// The setting that holds the pepper, encrypted with `pepper_decryption_key`, as 64 hex digits.
+pub const ENCRYPTED_PEPPER_SETTING: &str = "encrypted_pepper";
+
+/// The settings only a user's own file may hold: what `set` writes for a new PIN.
+pub const USER_ONLY: &[&str] = &[HASH_SETTING, CLEARTEXT_SALT_FOR_DERIVING_PEPPER_DECRYPTION_KEY_SETTING, ENCRYPTED_PEPPER_SETTING];
 
 /// The setgid helper's exit codes, which are all it answers: the PAM module and the CLI read them.
 pub mod exit {

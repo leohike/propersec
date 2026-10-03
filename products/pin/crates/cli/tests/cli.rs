@@ -42,7 +42,8 @@ impl Sandbox {
             .env_remove("SUDO_USER")
             .env_remove("PKEXEC_UID")
             .args(["--etc", root.join("etc").to_str().unwrap(), "--helper", root.join("helper").to_str().unwrap()])
-            .args(["--budget", root.join("var").to_str().unwrap()])
+            .args(["--budget", root.join("var").to_str().unwrap(), "--run", root.join("run").to_str().unwrap()])
+            .args(["--chkpwd", root.join("unix_chkpwd").to_str().unwrap()])
             .args(["--owner", &current_uid().to_string(), "--group", &helper_gid().to_string()])
             .args(args)
             .write_stdin(stdin)
@@ -77,6 +78,19 @@ impl Sandbox {
     fn user_files(&self) -> Vec<PathBuf> {
         fs::read_dir(self.0.path().join("etc/users")).map(|dir| dir.map(|entry| entry.unwrap().path()).collect()).unwrap_or_default()
     }
+}
+
+/// What `set` reads: the PIN, the same again, and the password.
+fn new_pin(pin: &str, again: &str) -> String {
+    format!("{pin}\n{again}\n{PASSWORD}\n")
+}
+
+/// What the lock screen's PIN line does: whether `pin` unlocks right now.
+fn unlocks(sandbox: &Sandbox, pin: &str) -> bool {
+    let mut child =
+        std::process::Command::new(sandbox.0.path().join("helper")).arg("check").stdin(std::process::Stdio::piped()).spawn().unwrap();
+    std::io::Write::write_all(&mut child.stdin.take().unwrap(), pin.as_bytes()).unwrap();
+    child.wait().unwrap().success()
 }
 
 fn stdout(assert: &assert_cmd::assert::Assert) -> String {
@@ -118,17 +132,29 @@ fn built_helper() -> &'static Path {
 #[test]
 fn set_then_status_then_remove() {
     let sandbox = Sandbox::new();
-    sandbox.properpin(&["set"], "4859\n4859\n").success();
+    sandbox.properpin(&["set"], &new_pin("4859", "4859")).success();
     let [file] = &sandbox.user_files()[..] else { panic!("expected one user file") };
     assert_eq!(fs::metadata(file).unwrap().mode() & 0o777, 0o640);
     assert_eq!(fs::metadata(file).unwrap().gid(), helper_gid(), "readable by the helper's group");
-    assert!(fs::read_to_string(file).unwrap().starts_with("hash = $y$"));
+    let text = fs::read_to_string(file).unwrap();
+    assert!(
+        text.starts_with("hash = $y$")
+            && text.contains("\ncleartext_salt_for_deriving_pepper_decryption_key = $y$jCT$")
+            && text.contains("\nencrypted_pepper = "),
+        "{text}"
+    );
 
+    // Armed at once: set had the password, so it had the pepper.
     let status = stdout(&sandbox.properpin(&["status"], "").success());
     assert!(status.contains("PIN        set"), "{status}");
-    assert!(status.contains("password required: no password unlock since boot"), "{status}");
+    assert!(status.contains("PIN armed for another"), "{status}");
+    assert!(unlocks(&sandbox, "4859"));
+    assert!(!unlocks(&sandbox, "4860"));
 
+    let state = sandbox.0.path().join(format!("run/{}.state", current_uid()));
+    assert!(state.exists());
     sandbox.properpin(&["remove"], "").success();
+    assert!(!state.exists(), "remove leaves no pepper in memory");
     sandbox.properpin(&["remove"], "").failure();
     assert!(stdout(&sandbox.properpin(&["status"], "").success()).contains("none set"));
 }
@@ -136,15 +162,42 @@ fn set_then_status_then_remove() {
 #[test]
 fn set_refuses_mismatches_and_weak_pins() {
     let sandbox = Sandbox::new();
-    says(&sandbox.properpin(&["set"], "4859\n4860\n").failure(), "the two entries differ");
-    says(&sandbox.properpin(&["set"], "48\n48\n").failure(), "at least 4 characters");
+    says(&sandbox.properpin(&["set"], &new_pin("4859", "4860")).failure(), "the two entries differ");
+    says(&sandbox.properpin(&["set"], &new_pin("48", "48")).failure(), "at least 4 characters");
+    says(&sandbox.properpin(&["set"], "4859\n4859\nnot the password\n").failure(), "that is not the password of");
+    says(&sandbox.properpin(&["set"], "4859\n4859\n\n").failure(), "that is not the password of");
     assert!(sandbox.user_files().is_empty());
+    assert_eq!(fs::read_dir(sandbox.0.path().join("run")).unwrap().count(), 0, "nothing armed");
+}
+
+#[test]
+fn the_pin_may_not_be_the_password() {
+    let sandbox = Sandbox::new();
+    let config = sandbox.0.path().join("etc/config");
+    fs::create_dir_all(config.parent().unwrap()).unwrap();
+    fs::write(&config, "max_pin_length = 64\n").unwrap();
+    says(&sandbox.properpin(&["set"], &format!("{PASSWORD}\n{PASSWORD}\n{PASSWORD}\n")).failure(), "the PIN must not be the password");
+    assert!(sandbox.user_files().is_empty());
+}
+
+/// Seal cost 8 is the default; one PIN set at it unseals and unlocks like any other.
+#[test]
+fn a_set_pin_survives_a_reboot_through_the_password() {
+    let sandbox = Sandbox::new();
+    sandbox.properpin(&["set"], &new_pin("4859", "4859")).success();
+    // A reboot empties the run directory.
+    for entry in fs::read_dir(sandbox.0.path().join("run")).unwrap() {
+        fs::remove_file(entry.unwrap().path()).unwrap();
+    }
+    assert!(!unlocks(&sandbox, "4859"));
+    sandbox.arm();
+    assert!(unlocks(&sandbox, "4859"));
 }
 
 #[test]
 fn status_shows_what_the_helper_sees() {
     let sandbox = Sandbox::new();
-    sandbox.properpin(&["set"], "4859\n4859\n").success();
+    sandbox.properpin(&["set"], &new_pin("4859", "4859")).success();
     sandbox.arm();
     let status = stdout(&sandbox.properpin(&["status"], "").success());
     assert!(status.contains("PIN armed for another"), "{status}");
@@ -157,9 +210,18 @@ fn set_needs_the_helper_group_to_exist() {
     let sandbox = Sandbox::new();
     let assert = Command::cargo_bin("properpin")
         .unwrap()
-        .args(["--etc", sandbox.0.path().join("etc").to_str().unwrap(), "--helper", "/nonexistent", "--budget", "/nonexistent"])
+        .args([
+            "--etc",
+            sandbox.0.path().join("etc").to_str().unwrap(),
+            "--helper",
+            "/nonexistent",
+            "--budget",
+            "/nonexistent",
+            "--run",
+            "/nonexistent",
+        ])
         .args(["--owner", &current_uid().to_string(), "--group", "no-such-group-properpin", "set"])
-        .write_stdin("4859\n4859\n")
+        .write_stdin(new_pin("4859", "4859"))
         .assert()
         .failure();
     says(&assert, "no group named");
@@ -172,7 +234,7 @@ fn set_needs_the_helper_group_to_exist() {
 fn enable_and_set_bring_a_disabled_pin_back() {
     let sandbox = Sandbox::new();
     says(&sandbox.properpin(&["enable"], "").failure(), "no PIN is set");
-    sandbox.properpin(&["set"], "4859\n4859\n").success();
+    sandbox.properpin(&["set"], &new_pin("4859", "4859")).success();
     let disabled = Some(Disabled { limit: Limit::Day(10), at: 1_800_000_000 });
     sandbox.write_budget(&Budget { concerning: vec![1_800_000_000], total: 10, disabled, ..Budget::default() });
     assert!(!sandbox.try_arm(), "a disabled PIN is never armed");
@@ -190,7 +252,7 @@ fn enable_and_set_bring_a_disabled_pin_back() {
         ..Budget::default()
     });
     says(&sandbox.properpin(&["enable"], "").failure(), "choose a new one with: properpin set");
-    sandbox.properpin(&["set"], "4860\n4860\n").success();
+    sandbox.properpin(&["set"], &new_pin("4860", "4860")).success();
     sandbox.arm();
     let status = stdout(&sandbox.properpin(&["status"], "").success());
     assert!(status.contains("PIN armed for another") && status.contains("0 since the PIN was set"), "{status}");

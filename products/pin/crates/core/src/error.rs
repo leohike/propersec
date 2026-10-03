@@ -9,8 +9,8 @@ pub enum Error {
     UnknownSetting { file: String, key: String },
     #[error("{file}: {key} must be {expected}, not {raw:?}")]
     BadValue { file: String, key: String, expected: String, raw: String },
-    #[error("{file}: only a user's own file may hold a PIN hash")]
-    HashOutsideUserFile { file: String },
+    #[error("{file}: only a user's own file may hold {key}")]
+    OutsideUserFile { file: String, key: String },
     #[error("{file}: {key} may only be set in the global config")]
     GlobalOnly { file: String, key: String },
     #[error("the stored hash is not a yescrypt hash")]

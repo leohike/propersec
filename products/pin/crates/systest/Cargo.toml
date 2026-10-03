@@ -14,6 +14,7 @@ path = "src/main.rs"
 pamharness.workspace = true
 properpin-core.workspace = true
 properpin-sys.workspace = true
+zeroize.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

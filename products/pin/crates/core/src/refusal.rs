@@ -17,6 +17,8 @@ pub enum Refusal {
     TooManyFailures { failures: u32 },
     /// Too many concerning failures: disabled until root turns it back on or sets a new PIN.
     Disabled(Limit),
+    /// The pepper was wiped from memory, after a refusal, until the next password unlock.
+    NoPepper,
 }
 
 impl fmt::Display for Refusal {
@@ -28,6 +30,7 @@ impl fmt::Display for Refusal {
             Self::Expired { age } => write!(f, "the last password unlock was {} ago", describe_seconds(*age)),
             Self::TooManyFailures { failures } => write!(f, "{failures} failures in a row"),
             Self::Disabled(limit) => write!(f, "the PIN is disabled after {limit}"),
+            Self::NoPepper => write!(f, "no pepper in memory since the PIN was last refused"),
         }
     }
 }

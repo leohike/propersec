@@ -78,7 +78,7 @@ The dedicated account is the one fix aimed at the weak link, and mixing in the p
 
 ## Mixing the passphrase into the PIN hash
 
-An idea from 2026-10-02, recorded here because it closes this scenario together with the dedicated account.
+An idea from 2026-10-02, recorded here because it closes this scenario together with the dedicated account. **Built on 2026-10-03 in a different form:** a random pepper, stored encrypted under a key derived from the passphrase rather than derived from it each time, and arming still checks the passphrase through `unix_chkpwd`. The protection against copies taken while the PIN isn't armed is the same. `docs/pepper-terminology.md` describes what was built, and `docs/pepper-issues.md` what differs from the text below.
 
 **The idea.** When the PIN is set, derive a secret from the passphrase with a slow hash, called the pepper here. Store `yescrypt(PIN + pepper)` and never store the pepper. Each time the passphrase unlocks the machine, the arm step computes the pepper again and keeps it in memory until the PIN expires or the machine reboots. It never touches the disk.
 

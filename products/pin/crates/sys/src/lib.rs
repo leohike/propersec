@@ -2,7 +2,9 @@
 //!
 //! - [`UserFiles`]: one user's settings, hash, state and lock file, and the rules for trusting them;
 //! - [`Account`] and [`group_by_name`]: the passwd and group databases;
-//! - [`Yescrypt`]: hashing through the system's libxcrypt, the library `/etc/shadow` uses;
+//! - [`Yescrypt`]: hashing through the system's libxcrypt, the library `/etc/shadow` uses, and
+//!   sealing the pepper with a key derived from the password;
+//! - [`UnixChkpwd`]: the account password, checked the way pam_unix checks it;
 //! - [`BootClock`]: this boot's id, the seconds since boot, and the wall clock;
 //! - [`FileLog`]: log lines to a file, for tests and the helper's `--dev-log`.
 //!
@@ -11,14 +13,16 @@
 //! The only `unsafe` code is the libxcrypt FFI, in `crypt.rs`.
 
 mod accounts;
+mod chkpwd;
 mod clock;
 mod crypt;
 mod files;
 mod log;
 
 pub use accounts::{Account, current_egid, current_euid, current_gid, current_uid, group_by_name};
+pub use chkpwd::UnixChkpwd;
 pub use clock::BootClock;
-pub use crypt::Yescrypt;
+pub use crypt::{NewPin, Yescrypt};
 pub use files::UserFiles;
 pub use log::FileLog;
 

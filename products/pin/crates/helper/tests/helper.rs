@@ -37,7 +37,7 @@ impl Sandbox {
         let user = Account::by_uid(current_uid()).unwrap().name;
         let user_file = sandbox.path("etc/users").join(&user);
         fs::create_dir_all(user_file.parent().unwrap()).unwrap();
-        fs::write(&user_file, format!("hash = {}\n", Yescrypt.hash(PIN, 4).unwrap())).unwrap();
+        fs::write(&user_file, Yescrypt.new_pin(PIN, PASSWORD.as_bytes(), 4, 1).unwrap().lines()).unwrap();
         fs::set_permissions(&user_file, Permissions::from_mode(0o640)).unwrap();
         let chkpwd = sandbox.path("unix_chkpwd");
         let script = format!("#!/bin/bash\nIFS= read -r -d '' password\n[[ $1 == \"$(id -un)\" && $password == '{PASSWORD}' ]]\n");

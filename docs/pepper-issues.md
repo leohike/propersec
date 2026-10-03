@@ -1,0 +1,38 @@
+# Pepper: issues tabled for later
+
+The pepper was built on 2026-10-03 as a first, common-sense version of the design in `docs/pepper-terminology.md`. This file keeps what was left out on purpose, the concerns raised while designing it, and what only the VM can show. None of it blocks a first live install. Each item says why it was tabled.
+
+## What was built
+
+A short summary, so the items below have something to refer to:
+
+- **`sudo properpin set`** asks for the PIN twice, then the user's password, and checks the password through `unix_chkpwd`. It refuses a PIN equal to the password. It makes a fresh random pepper (32 bytes from `/dev/urandom`), writes `hash_of_peppered_pin`, `cleartext_salt_for_deriving_pepper_decryption_key` and `encrypted_pepper` into `/etc/properpin/users/<user>`, and arms the PIN at once.
+- **`pepper_decryption_key`** is yescrypt of the password with `cleartext_salt_for_deriving_pepper_decryption_key`, a yescrypt setting holding a fresh salt and the cost (`seal_cost`, global only, default 8). Its 43 characters of hash are decoded back into the 32 bytes they encode.
+- **The encryption** is the pepper XORed with `pepper_decryption_key`: no check value, so a wrong password decrypts to a wrong pepper, never to "wrong password".
+- **The PIN check** hashes the pepper's 64 hex digits followed by the PIN.
+- **The clear-text pepper** lives in the per-boot state file, `/run/properpin/<uid>.state`, owned by the user, mode 0600. Any refusal wipes it from there: expired, 3 failures in a row, or disabled. Only a password unlock brings it back: `arm` checks the password through `unix_chkpwd` as before, then decrypts the pepper.
+- **`properpin remove`** deletes the state too. **`status`** always says that a password change stops the PIN. It warns when the run directory isn't on tmpfs, and says when a PIN has no encrypted pepper.
+
+## Open questions and risks
+
+- **A password change fails silently, and counts against the budget.** After a password change, each PIN typed is just "not the PIN". Each counts as a failure in a row, which wipes the pepper after 3. Each also counts in the budget, and nothing forgives it except a correct password within 90 seconds. A user who keeps trying their PIN could disable it, and `status` would report concerning failures that were really a password change. The generic note in `status` is the only hint. Ideas, none built:
+  - a `pam_sm_chauthtok` in properpin's module that seals the pepper again with the new password, when the old one is at hand (as with `passwd`), which would need properpin's line in the password stack too;
+  - a stored check value, which the owner rejected because it would give an offline attacker a fast "is this the password" test.
+- **`unix_chkpwd` called by root about another user.** The container shows that it works on Fedora 44: `set` runs as root and checks alice's password. SELinux policy might treat it differently on the real machine, where `sudo properpin set` runs in a confined context. Only the VM can show that. If it fails there, the fallback is a PAM conversation inside the CLI.
+- **The tmpfs check only warns.** The owner chose warn-only. Enforcing it would break the container tests, whose `/run` is overlayfs, and would complicate uninstall. It's still worth enforcing once the tests can mount a tmpfs.
+- **Swap and hibernation.** Even on tmpfs, the state file's pages can be swapped out, and a hibernation image holds all of memory. With unencrypted swap, the pepper can reach a disk, and with it a hash that can be cracked like a plain PIN hash. Fedora's default is zram swap, which stays in memory. Unencrypted disk swap should at least be warned about, as `docs/security-target.md` already notes.
+- **Old copies of the pepper in memory.** The state file is rewritten through a temp file and a rename at every attempt. tmpfs frees the old file's pages without zeroing them, so earlier copies of the pepper stay in free kernel memory until it's reused. In the helper, the copies are wiped where the code controls them (`Pepper`, the state text, the parsed hex digits). `read_to_string` may still reallocate while reading, and libxcrypt and the kernel keep their own copies. All of this needs root or a RAM reader to exploit, and either of those wins anyway.
+- **Root on the running machine reads the pepper** while the PIN is armed. The PIN hash is then back to being a hash of a few digits at cost 5. Root can also crack the password from `/etc/shadow` and decrypt the pepper with it. This is inherent: the PIN is never stronger than the password, which is the design. It should be said plainly in `docs/threat-insider-hash-leak.md`.
+- **The crypt base64 decoder is our own code.** It is about twenty lines (`decode_hash` in `crates/sys/src/crypt.rs`), and a test re-encodes its output and compares it with libxcrypt's own text. A reviewer should still read it. The alternative was the argon2 crate in a setgid binary, which the owner declined.
+- **Arming is about 125 ms slower** at seal cost 8, on top of `unix_chkpwd`. That's fine for a password unlock, which is rare, but it should be measured against Plasma 6.8's worker in the VM, together with the planned move of the default hash cost to 8.
+- **`set` and the helper aren't serialised on the user file.** `set` writes the user file atomically, but not under the per-user lock, so an attempt that runs during `set` reads either the old or the new hash and pepper. In the worst case, that one attempt fails, and the next is right. Not worth a lock for now.
+- **The password passes through the CLI, running as root.** It is wiped when dropped, best effort; rpassword's and the terminal's buffers are beyond reach, as for the PIN.
+- **Only the user can really set their PIN now.** Root can still run `set --user`, but it needs that user's password, so in practice only the user (or root changing their password first) can. That's what the owner asked for. The `--user`, `SUDO_USER` and `PKEXEC_UID` logic stays as it was.
+- **A PIN from before peppers can't be armed.** No migration was built, since properpin was never installed live. Such a PIN fails at `arm` with "set it again", and `status` says so.
+- **Uninstall keeps the encrypted peppers,** in the user files under `/etc/properpin`, which uninstall keeps. `docs/uninstall-should-purge-pin-hashes.md` covers the hash, and the pepper goes with it.
+- **`seal_cost` applies at the next `set` only.** The cost is stored in `cleartext_salt_for_deriving_pepper_decryption_key`, so changing the setting doesn't touch existing PINs. That is intended, but undocumented outside this file.
+- **Near matches to the password.** `set` refuses a PIN identical to the password it was just given, which needs no `/etc/shadow`. Prefixes, case changes and the like aren't checked; `docs/pin-same-as-password-edge-case-threat.md` has the reasoning.
+
+## Docs that still describe the old idea
+
+`docs/threat-insider-hash-leak.md` describes the earlier design, a pepper derived from the password and never stored. The built version stores the pepper encrypted under a key derived from the password, which gives the same protection against a stolen disk or backup: the attacker must guess the password, at seal cost, before they can start on the PIN. It differs in two points that the threat doc gets wrong for the built version: arming still checks the password through `unix_chkpwd` (kept for the budget's forgiveness), and the "more slow hashing" is the seal cost, not a separate derivation. The doc should be rewritten in a later pass; for now `docs/security-target.md` and `docs/plan.md` point here.

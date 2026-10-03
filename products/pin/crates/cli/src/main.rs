@@ -1,7 +1,8 @@
 //! `properpin`: manage the PIN that unlocks the KDE lock screen.
 //!
 //! ```text
-//! sudo properpin set      choose a new PIN, typed twice; starts its budget of failures over
+//! sudo properpin set      choose a new PIN, typed twice, then your password; arms it at once and
+//!                         starts its budget of failures over
 //! sudo properpin enable   turn a PIN disabled by too many concerning failures back on
 //! sudo properpin remove   delete it; the lock screen takes the password only
 //! properpin status        your PIN: what is set, which rules apply, and whether it is armed now
@@ -14,6 +15,12 @@
 //!
 //! The hash file is written readable by the helper's group only, so the user can't read it either:
 //! `status` asks the setgid helper, which is the only program that reads hashes and counts.
+//!
+//! `set` also asks for the user's password, checks it through `unix_chkpwd`, and seals a fresh
+//! random pepper with a key derived from it (`docs/pepper-terminology.md`). The PIN is hashed with
+//! that pepper, so the hash file alone gives an attacker nothing to brute-force a few digits
+//! against. Each password unlock decrypts the pepper again; a password change stops the PIN until
+//! the next `set`.
 
 #![forbid(unsafe_code)]
 
@@ -23,8 +30,8 @@ use std::process::{Command, ExitCode, Stdio};
 
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
-use properpin_core::{Clock, MAX_PIN_BYTES, Secret, Store, exit};
-use properpin_sys::{Account, BootClock, UserFiles, Yescrypt, current_euid, current_uid, group_by_name};
+use properpin_core::{Clock, MAX_INPUT_BYTES, MAX_PIN_BYTES, PasswordCheck, Secret, Store, arm, exit};
+use properpin_sys::{Account, BootClock, UnixChkpwd, UserFiles, Yescrypt, current_euid, current_uid, group_by_name};
 
 /// Manage the PIN that unlocks the KDE lock screen.
 #[derive(Debug, Parser)]
@@ -36,6 +43,13 @@ struct Cli {
     /// Where each user's budget of failures lives; /var/lib/properpin once installed
     #[arg(long, value_name = "DIR")]
     budget: PathBuf,
+    /// Where each user's per-boot state lives, which set arms and remove deletes; /run/properpin
+    /// once installed
+    #[arg(long, value_name = "DIR")]
+    run: PathBuf,
+    /// The password checker set asks
+    #[arg(long, value_name = "PATH", default_value = "/usr/sbin/unix_chkpwd")]
+    chkpwd: PathBuf,
     /// The setgid helper, which status asks; /usr/local/libexec/properpin/properpin-helper once installed
     #[arg(long, value_name = "PATH")]
     helper: PathBuf,
@@ -51,7 +65,8 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Action {
-    /// Choose a new PIN, typed twice; starts its budget of failures over
+    /// Choose a new PIN, typed twice, then your password; arms it at once and starts its budget of
+    /// failures over
     Set(Target),
     /// Turn a PIN disabled by too many concerning failures back on, keeping it
     Enable(Target),
@@ -93,7 +108,8 @@ fn run(cli: &Cli) -> Result<bool> {
 
 fn files(cli: &Cli, account: &Account) -> Result<UserFiles> {
     let group = group_by_name(&cli.group)?;
-    Ok(UserFiles::new(&cli.etc, cli.owner, &account.name, account.uid)?.with_budget(&cli.budget, cli.owner, group))
+    let files = UserFiles::new(&cli.etc, cli.owner, &account.name, account.uid)?;
+    Ok(files.with_budget(&cli.budget, cli.owner, group).with_runtime(&cli.run, cli.owner, group))
 }
 
 /// Whose PIN: the one named, else whoever called sudo or pkexec, else whoever runs this.
@@ -115,17 +131,35 @@ fn set(cli: &Cli, account: &Account) -> Result<()> {
     let group = group_by_name(&cli.group)?;
     let files = files(cli, account)?;
     let settings = files.settings()?;
-    let pin = ask_pin_twice()?;
+    let mut input = stdin().lock();
+    let pin = ask_pin_twice(&mut input)?;
     let pin = std::str::from_utf8(pin.as_bytes()).context("the PIN is not valid UTF-8")?;
     let problems = settings.pin_problems(pin);
     if !problems.is_empty() {
         bail!("the PIN needs {}", problems.join(", "));
     }
-    // Only the hash changes. Per-user settings already in the file are kept.
-    files.save_pin_hash(&Yescrypt.hash(pin, settings.hash_cost)?, group)?;
+    // The password seals the pepper, so a mistyped one would leave a PIN that never arms.
+    let password = ask_secret(&mut input, &format!("Password for {}: ", account.name), MAX_INPUT_BYTES)?;
+    if password.as_bytes().is_empty() || !UnixChkpwd(cli.chkpwd.clone()).matches(&account.name, &password)? {
+        bail!("that is not the password of {}; nothing was changed", account.name);
+    }
+    if password.as_bytes() == pin.as_bytes() {
+        bail!("the PIN must not be the password; nothing was changed");
+    }
+    let new = Yescrypt.new_pin(pin, password.as_bytes(), settings.hash_cost, settings.seal_cost)?;
+    drop(password);
+    // Only the hash and the encrypted pepper change. Per-user settings already in the file are kept.
+    files.save_pin(&new.pairs(), group)?;
     // A new PIN, so no failure against the old one counts any more, and nothing stays disabled.
     files.remove_budget()?;
-    println!("PIN set for {}. It works after the next password unlock at the lock screen.", account.name);
+    // Armed now, as a password unlock would: the password was just typed, and the pepper is at hand.
+    match arm(&files, &BootClock, new.pepper) {
+        Ok(_) => println!("PIN set for {}, and armed now. After it expires, a password unlock arms it again.", account.name),
+        Err(error) => println!("PIN set for {}. It works after the next password unlock at the lock screen ({error}).", account.name),
+    }
+    if files.runtime_on_tmpfs() == Some(false) {
+        println!("Warning: {} is not on tmpfs, so the armed PIN's pepper may be written to a disk.", cli.run.display());
+    }
     Ok(())
 }
 
@@ -164,6 +198,7 @@ fn remove(cli: &Cli, account: &Account) -> Result<()> {
         bail!("no PIN is set for {}", account.name);
     }
     files.remove_budget()?;
+    files.remove_state()?;
     println!("PIN removed for {}. The lock screen takes the password only.", account.name);
     Ok(())
 }
@@ -193,27 +228,31 @@ fn require_owner(owner: u32) -> Result<()> {
     }
 }
 
-/// The new PIN, typed twice. Both entries are wiped when dropped. rpassword's own buffers, and
-/// the terminal's, are beyond reach; each String it returns is taken over without a copy.
-fn ask_pin_twice() -> Result<Secret> {
-    let (first, second) = if stdin().is_terminal() {
-        let prompt = |text| rpassword::prompt_password(text).map(|typed| Secret::new(typed.into_bytes()));
-        (prompt("New PIN: ")?, prompt("Same again: ")?)
-    } else {
-        let mut input = stdin().lock();
-        (read_secret_line(&mut input)?, read_secret_line(&mut input)?)
-    };
+/// The new PIN, typed twice. Both entries are wiped when dropped.
+fn ask_pin_twice(input: &mut impl BufRead) -> Result<Secret> {
+    let first = ask_secret(input, "New PIN: ", MAX_PIN_BYTES)?;
+    let second = ask_secret(input, "Same again: ", MAX_PIN_BYTES)?;
     if first.as_bytes() != second.as_bytes() {
         bail!("the two entries differ; nothing was changed");
     }
     Ok(first)
 }
 
+/// One secret, prompted for on the terminal, or the next line of `input` when stdin isn't one.
+/// rpassword's own buffers, and the terminal's, are beyond reach; each String it returns is taken
+/// over without a copy.
+fn ask_secret(input: &mut impl BufRead, prompt: &str, max: usize) -> Result<Secret> {
+    if stdin().is_terminal() {
+        return Ok(Secret::new(rpassword::prompt_password(prompt)?.into_bytes()));
+    }
+    read_secret_line(input, max)
+}
+
 /// One line of `input`, without its newline. The buffer is sized once and the read is capped to
 /// fit it, so it never grows (growing would leave an unwiped copy behind). A line longer than
-/// any PIN comes back too long to be one, and its rest stays unread.
-fn read_secret_line(input: &mut impl BufRead) -> Result<Secret> {
-    let limit = MAX_PIN_BYTES + 2;
+/// `max` bytes comes back too long, and its rest stays unread.
+fn read_secret_line(input: &mut impl BufRead, max: usize) -> Result<Secret> {
+    let limit = max + 2;
     let mut line = Vec::with_capacity(limit);
     input.take(limit as u64).read_until(b'\n', &mut line)?;
     if line.last() == Some(&b'\n') {
@@ -229,16 +268,16 @@ mod tests {
     #[test]
     fn reads_one_line_at_a_time_without_the_newline() {
         let mut input = &b"4859\n1234\nlast"[..];
-        assert_eq!(read_secret_line(&mut input).unwrap().as_bytes(), b"4859");
-        assert_eq!(read_secret_line(&mut input).unwrap().as_bytes(), b"1234");
-        assert_eq!(read_secret_line(&mut input).unwrap().as_bytes(), b"last");
-        assert_eq!(read_secret_line(&mut input).unwrap().as_bytes(), b"");
+        assert_eq!(read_secret_line(&mut input, MAX_PIN_BYTES).unwrap().as_bytes(), b"4859");
+        assert_eq!(read_secret_line(&mut input, MAX_PIN_BYTES).unwrap().as_bytes(), b"1234");
+        assert_eq!(read_secret_line(&mut input, MAX_PIN_BYTES).unwrap().as_bytes(), b"last");
+        assert_eq!(read_secret_line(&mut input, MAX_PIN_BYTES).unwrap().as_bytes(), b"");
     }
 
     #[test]
     fn a_long_line_is_capped_too_long_to_be_a_pin() {
         let long = vec![b'1'; MAX_PIN_BYTES * 3];
-        let typed = read_secret_line(&mut &long[..]).unwrap();
+        let typed = read_secret_line(&mut &long[..], MAX_PIN_BYTES).unwrap();
         assert_eq!(typed.as_bytes().len(), MAX_PIN_BYTES + 2);
         assert_eq!(properpin_core::usable_input(typed.as_bytes()), None);
     }

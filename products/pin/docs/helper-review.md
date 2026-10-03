@@ -86,7 +86,7 @@ A checklist for reviewing the setgid helper: every hazard a program with more ri
 |---|---|---|
 | `/usr/local/libexec/properpin/properpin-helper` | `root:properpin 2755` | Setgid for reading hash files and keeping counts; only root can change it |
 | `/etc/properpin/users/` | `root:properpin 0750` | The user can't list who has a PIN |
-| `/etc/properpin/users/<user>` | `root:properpin 0640` | Root writes it (`sudo properpin set`), the helper reads it, nobody else |
+| `/etc/properpin/users/<user>` | `root:properpin 0640` | The hash and the encrypted pepper. Root writes it (`sudo properpin set`), the helper reads it, nobody else |
 | `/run/properpin/` | `root:properpin 1770` | The counts, out of every user's reach; sticky, so each file is replaced or deleted only by its owner |
 | `/run/properpin/<uid>.state`, `<uid>.lock` | `<uid>:properpin 0600` | Created by the helper run by that user |
 | `/var/lib/properpin/` | `root:properpin 1770` | The budgets, on disk, under the same rules as `/run/properpin` |

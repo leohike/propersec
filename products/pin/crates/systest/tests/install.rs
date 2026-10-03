@@ -161,7 +161,7 @@ fn install_puts_everything_in_place_and_twice_is_harmless() {
     let command = fs::read_to_string(root.path("usr/local/bin/properpin")).unwrap();
     assert!(
         command.contains(
-            "exec /usr/local/libexec/properpin/properpin --etc /etc/properpin --budget /var/lib/properpin --helper /usr/local/libexec/properpin/properpin-helper \"$@\""
+            "exec /usr/local/libexec/properpin/properpin --etc /etc/properpin --budget /var/lib/properpin --run /run/properpin --helper /usr/local/libexec/properpin/properpin-helper \"$@\""
         ),
         "{command}"
     );

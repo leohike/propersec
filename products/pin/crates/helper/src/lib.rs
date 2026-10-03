@@ -11,7 +11,7 @@
 //! ```text
 //! properpin-helper check    stdin: what was typed. Exit 0 if it is the PIN and the PIN is armed
 //! properpin-helper arm      stdin: the password, just accepted by pam_unix. Checked again through
-//!                           unix_chkpwd, then the PIN is armed
+//!                           unix_chkpwd, then it decrypts the pepper and the PIN is armed
 //! properpin-helper status   prints the caller's PIN settings and whether it is armed
 //! ```
 //!
@@ -29,12 +29,10 @@
 use std::io::Read;
 use std::path::PathBuf;
 
+pub use properpin_core::PasswordCheck;
 use properpin_core::{Clock, Error, Hasher, Judged, Log, MAX_INPUT_BYTES, Refusal, Secret, Store, arm, check, describe_seconds, exit};
-use properpin_sys::{Account, UserFiles};
-
-mod chkpwd;
-
-pub use chkpwd::UnixChkpwd;
+pub use properpin_sys::UnixChkpwd;
+use properpin_sys::{Account, UserFiles, Yescrypt};
 
 /// What the caller asks for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,11 +90,6 @@ impl Places {
 /// defeat both before a caller could point the installed helper at files or a checker of their own.
 pub fn dev_options_allowed(at_secure: bool, uid: u32, euid: u32, gid: u32, egid: u32) -> bool {
     !at_secure && uid == euid && gid == egid
-}
-
-/// Checks the account password, the way pam_unix does: through `unix_chkpwd` once installed.
-pub trait PasswordCheck {
-    fn matches(&self, user: &str, password: &Secret) -> Result<bool, Error>;
 }
 
 /// What the helper answers: an exit code from `properpin_core::exit`, and for `status` some text.
@@ -173,14 +166,17 @@ fn log_judged<L: Log + ?Sized>(judged: &Judged, caller: &Account, log: &L) {
 /// Arm the PIN, but only for the right password: `arm` is open to everything the user runs, so
 /// without this check any program could arm the PIN at will, reset the failures in a row, and
 /// forgive the budget's failures as often as it liked. `unix_chkpwd` checks it, as pam_unix just
-/// did.
+/// did. The password then decrypts the pepper, which the PIN's hash needs. Nothing can tell
+/// whether that pepper is right: after a password change it isn't, and the PIN just stops
+/// matching until `properpin set`.
 fn arm_pin<H, C: Clock, P: PasswordCheck, L: Log + ?Sized>(
     files: &UserFiles,
     caller: &Account,
     typed: &Secret,
     context: &Context<'_, H, C, P, L>,
 ) -> Result<Reply, Error> {
-    if files.settings()?.pin_hash.is_empty() {
+    let settings = files.settings()?;
+    if settings.pin_hash.is_empty() {
         context.log.log(&format!("{}: no PIN is set, nothing to arm", caller.name));
         return Ok(Reply::code(exit::NO));
     }
@@ -188,7 +184,10 @@ fn arm_pin<H, C: Clock, P: PasswordCheck, L: Log + ?Sized>(
         context.log.log(&format!("{}: the password was not accepted, PIN not armed", caller.name));
         return Ok(Reply::code(exit::NO));
     }
-    let judged = arm(files, context.clock)?;
+    // Before the lock: the key takes about a tenth of a second at the default cost.
+    let pepper =
+        Yescrypt.unseal(&settings.cleartext_salt_for_deriving_pepper_decryption_key, &settings.encrypted_pepper, typed.as_bytes())?;
+    let judged = arm(files, context.clock, pepper)?;
     log_judged(&judged, caller, context.log);
     if let Some(limit) = judged.disabled {
         context.log.log(&format!("{}: password accepted, PIN not armed: disabled after {limit}", caller.name));
@@ -215,7 +214,14 @@ fn status(files: &UserFiles, clock: &impl Clock) -> Result<String, Error> {
     if settings.min_letters > 0 {
         rules += &format!(", {} English letters", settings.min_letters);
     }
-    out += &format!("set rules  {rules}, yescrypt cost {}\n", settings.hash_cost);
+    out += &format!("set rules  {rules}, yescrypt cost {}, pepper sealed at cost {}\n", settings.hash_cost, settings.seal_cost);
+    if settings.cleartext_salt_for_deriving_pepper_decryption_key.is_empty() || settings.encrypted_pepper.is_empty() {
+        out += "pepper     none: this PIN can never be armed; sudo properpin set makes a new one\n";
+    }
+    out += "note       a password change stops the PIN from working, and nothing can tell why; sudo properpin set makes a new one\n";
+    if files.runtime_on_tmpfs() == Some(false) {
+        out += "warning    the run directory is not on tmpfs, so the armed PIN's pepper may be written to a disk\n";
+    }
     // Judged as the next attempt would, without saving: status changes nothing.
     let mut budget = files.load_budget()?;
     let judged = budget.judge(clock.wall()?, &settings);
@@ -314,7 +320,7 @@ mod tests {
         // alice is whoever runs the tests: her counts files must be her own, and they are the test's.
         let caller = Account { name: "alice".into(), uid, gid: current_egid() };
         let sandbox = Sandbox { _dir: dir, places, caller };
-        sandbox.write_user_file(&format!("hash = {}\n", Yescrypt.hash(PIN, 4).unwrap()));
+        sandbox.write_user_file(&Yescrypt.new_pin(PIN, PASSWORD.as_bytes(), 4, 1).unwrap().lines());
         sandbox
     }
 
@@ -374,13 +380,52 @@ mod tests {
         }
     }
 
-    /// Accepts exactly `PASSWORD` for alice, the way `unix_chkpwd` would.
+    /// Accepts `PASSWORD` for alice, the way `unix_chkpwd` would, and `NEW_PASSWORD` too, the
+    /// password she changes to in one test.
     struct Password;
+
+    const NEW_PASSWORD: &str = "a new password after the PIN was set";
 
     impl PasswordCheck for Password {
         fn matches(&self, user: &str, password: &Secret) -> Result<bool, Error> {
-            Ok(user == "alice" && password.as_bytes() == PASSWORD.as_bytes())
+            Ok(user == "alice" && [PASSWORD.as_bytes(), NEW_PASSWORD.as_bytes()].contains(&password.as_bytes()))
         }
+    }
+
+    #[test]
+    fn after_a_password_change_the_pin_never_matches() {
+        let sandbox = sandbox();
+        assert_eq!(sandbox.ask(Request::Arm, NEW_PASSWORD).0, exit::YES);
+        let (code, _, log) = sandbox.ask(Request::Check, PIN);
+        assert_eq!((code, log.as_str()), (exit::NO, "alice: not the PIN, failure 1 of 3"));
+        assert!(sandbox.ask(Request::Status, "").1.contains("a password change stops the PIN from working"));
+        sandbox.ask(Request::Arm, PASSWORD);
+        assert_eq!(sandbox.ask(Request::Check, PIN).0, exit::YES);
+    }
+
+    #[test]
+    fn a_pin_without_a_pepper_is_never_armed() {
+        let sandbox = sandbox();
+        sandbox.write_user_file(&format!("hash = {}\n", Yescrypt.hash(PIN, 4).unwrap()));
+        let (code, _, log) = sandbox.ask(Request::Arm, PASSWORD);
+        assert_eq!(code, exit::BROKEN);
+        assert!(log.contains("no encrypted pepper") && log.contains("sudo properpin set makes a new PIN"), "{log}");
+        assert_eq!(sandbox.ask(Request::Check, PIN).0, exit::NO);
+        assert!(sandbox.ask(Request::Status, "").1.contains("pepper     none: this PIN can never be armed"));
+    }
+
+    #[test]
+    fn the_state_holds_the_pepper_only_while_armed() {
+        let sandbox = sandbox();
+        let state = sandbox.places.run_dir.join(format!("{}.state", sandbox.caller.uid));
+        sandbox.ask(Request::Arm, PASSWORD);
+        assert!(fs::read_to_string(&state).unwrap().contains("pepper = "));
+        for wrong in ["1111", "2222", "3333"] {
+            sandbox.ask(Request::Check, wrong);
+        }
+        assert!(!fs::read_to_string(&state).unwrap().contains("pepper"));
+        let (code, _, log) = sandbox.ask(Request::Check, PIN);
+        assert_eq!((code, log.as_str()), (exit::NO, "alice: PIN refused, password required: 3 failures in a row"));
     }
 
     #[test]
