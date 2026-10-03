@@ -601,6 +601,19 @@ mod tests {
     }
 
     #[test]
+    fn a_budget_past_the_size_limit_is_an_error_not_a_shorter_budget() {
+        let Scratch { files, .. } = &scratch();
+        let path = files.budget_file().unwrap();
+        let budget = Budget::default().format();
+        // Padded with a comment to exactly MAX_FILE_BYTES it is read; one byte more, and it is refused.
+        let padded = |length: usize| format!("{budget}#{}\n", "x".repeat(length - budget.len() - 2));
+        write(&path, &padded(MAX_FILE_BYTES), 0o600);
+        assert_eq!(files.load_budget().unwrap(), Budget::default());
+        write(&path, &padded(MAX_FILE_BYTES + 1), 0o600);
+        assert!(files.load_budget().unwrap_err().to_string().contains(&format!("longer than {MAX_FILE_BYTES} bytes")));
+    }
+
+    #[test]
     fn the_budget_directory_is_checked_like_the_run_directory() {
         let Scratch { files, .. } = &scratch();
         let dir = files.budget.clone().unwrap().path;

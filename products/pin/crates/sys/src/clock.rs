@@ -39,4 +39,17 @@ mod tests {
         assert!(BootClock.now().unwrap() > 0);
         assert!(BootClock.wall().unwrap() > 1_700_000_000);
     }
+
+    /// The PIN's expiry rests on this clock moving: it must be the kernel's own uptime.
+    #[test]
+    fn boot_time_is_the_kernels_uptime() {
+        let uptime = || -> u64 {
+            let text = std::fs::read_to_string("/proc/uptime").unwrap();
+            text.split('.').next().unwrap().parse().unwrap()
+        };
+        let before = uptime();
+        let now = BootClock.now().unwrap();
+        let after = uptime();
+        assert!(before <= now && now <= after + 1, "{before} <= {now} <= {after} + 1");
+    }
 }

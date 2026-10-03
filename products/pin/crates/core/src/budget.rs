@@ -284,6 +284,9 @@ mod tests {
         }
         let judged = budget.judge(T + day * 100 + 1000, &settings());
         assert_eq!((judged.disabled, judged.disabled_now), (Some(Limit::Day(10)), true));
+        // Judged again while still over the limit, it stays disabled from the first time.
+        let judged = budget.judge(T + day * 100 + 2000, &settings());
+        assert_eq!((judged.disabled_now, budget.disabled.map(|disabled| disabled.at)), (false, Some(T + day * 100 + 1000)));
         // Days later the counts are gone from the window, and it stays disabled.
         let judged = budget.judge(T + 3 * DAY, &settings());
         assert_eq!((judged.counts.day, judged.disabled, judged.disabled_now), (0, Some(Limit::Day(10)), false));
@@ -302,6 +305,17 @@ mod tests {
         let mut budget = Budget { total: 99, ..Budget::default() };
         budget.record_failure(T);
         assert_eq!(budget.judge(T + 1000, &settings()).disabled, Some(Limit::Total(100)));
+    }
+
+    #[test]
+    fn a_concerning_failure_counts_for_24_hours_and_is_kept_for_7_days() {
+        let mut budget = Budget { concerning: vec![T], total: 1, ..Budget::default() };
+        assert_eq!(budget.counts(T + 23 * 3600).day, 1);
+        assert_eq!(budget.counts(T + 24 * 3600).day, 0);
+        budget.judge(T + 7 * 24 * 3600 - 1, &settings());
+        assert_eq!(budget.concerning, [T]);
+        budget.judge(T + 7 * 24 * 3600, &settings());
+        assert_eq!((budget.concerning.len(), budget.total), (0, 1));
     }
 
     #[test]
@@ -349,6 +363,10 @@ mod tests {
         };
         assert_eq!(Budget::parse(&budget.format()), Some(budget));
         assert_eq!(Budget::parse(&Budget::default().format()), Some(Budget::default()));
+        for limit in [Limit::Day(10), Limit::Week(20), Limit::Total(100)] {
+            let disabled = Budget { disabled: Some(Disabled { limit, at: T }), ..Budget::default() };
+            assert_eq!(Budget::parse(&disabled.format()), Some(disabled));
+        }
         let valid = "pending = none\nconcerning = none\ntotal = 0\ndisabled = no\n";
         assert!(Budget::parse(valid).is_some());
         for text in [

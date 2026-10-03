@@ -242,6 +242,29 @@ mod tests {
     }
 
     #[test]
+    fn every_setting_is_read() {
+        let text = "expiry_hours = 2\nmax_failures = 5\nmax_pin_length = 8\nmin_pin_length = 6\nmin_letters = 1\nhash_cost = 6\n\
+                    seal_cost = 9\nforgive_before_correct_pin = 30\nforgive_before_correct_password = 60\nmax_concerning_24h = 5\n\
+                    max_concerning_7d = 15\nmax_concerning_total = 50\n";
+        let expected = Settings {
+            expiry_hours: 2.0,
+            max_failures: 5,
+            max_pin_length: 8,
+            min_pin_length: 6,
+            min_letters: 1,
+            hash_cost: 6,
+            seal_cost: 9,
+            forgive_before_correct_pin: 30,
+            forgive_before_correct_password: 60,
+            max_concerning_24h: 5,
+            max_concerning_7d: 15,
+            max_concerning_total: 50,
+            ..Settings::default()
+        };
+        assert_eq!(apply(text, false).unwrap(), expected);
+    }
+
+    #[test]
     fn refuses_out_of_range_never_clamps() {
         for text in ["max_failures = 11", "max_failures = 0", "expiry_hours = nan", "expiry_hours = inf", "hash_cost = -1"] {
             assert!(matches!(apply(text, false), Err(Error::BadValue { .. })), "{text}");
@@ -287,6 +310,12 @@ mod tests {
         // Twelve Cyrillic letters are 24 bytes and still fit the default 12.
         assert!(Settings::default().pin_problems("абвгдежзийкл").is_empty());
         assert_eq!(Settings::default().pin_problems("абвгдежзийклм"), ["at most 12 characters"]);
+    }
+
+    #[test]
+    fn a_pin_of_exactly_the_shortest_length_is_accepted() {
+        assert!(Settings::default().pin_problems("4859").is_empty());
+        assert_eq!(Settings::default().pin_problems("485"), ["at least 4 characters"]);
     }
 
     #[test]

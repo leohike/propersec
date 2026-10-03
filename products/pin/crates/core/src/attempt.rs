@@ -348,6 +348,18 @@ mod tests {
     }
 
     #[test]
+    fn input_exactly_at_a_length_limit_is_still_checked() {
+        let (store, clock) = armed();
+        assert_eq!(try_pin(&store, &clock, "123456789012"), Verdict::WrongPin { failures: 1, max: 3 });
+        // The longest PIN the settings allow, 64 characters of four bytes each, fills MAX_PIN_BYTES.
+        let (mut store, clock) = armed();
+        store.settings.max_pin_length = 64;
+        let longest = "\u{10348}".repeat(64);
+        assert_eq!(longest.len(), MAX_PIN_BYTES);
+        assert_eq!(try_pin(&store, &clock, &longest), Verdict::WrongPin { failures: 1, max: 3 });
+    }
+
+    #[test]
     fn typos_before_a_correct_pin_or_password_are_forgiven() {
         let (store, clock) = armed();
         try_pin(&store, &clock, "1111");
