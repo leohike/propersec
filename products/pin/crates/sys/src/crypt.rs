@@ -13,6 +13,12 @@ const CRYPT_DATA_SIZE: usize = 32768;
 /// `CRYPT_GENSALT_OUTPUT_SIZE` in libxcrypt.
 const GENSALT_OUTPUT_SIZE: usize = 192;
 
+/// The same two sizes as C `int`s, for the calls. Both are far below `c_int::MAX`.
+#[allow(clippy::cast_possible_truncation, reason = "32768 and 192 fit an int")]
+const CRYPT_DATA_SIZE_INT: c_int = CRYPT_DATA_SIZE as c_int;
+#[allow(clippy::cast_possible_truncation, reason = "32768 and 192 fit an int")]
+const GENSALT_OUTPUT_SIZE_INT: c_int = GENSALT_OUTPUT_SIZE as c_int;
+
 /// yescrypt hashing through the system's libxcrypt. No crypto is implemented here: libxcrypt
 /// hashes, this only compares.
 ///
@@ -130,16 +136,21 @@ fn decode_hash(encoded: &[u8]) -> Option<Zeroizing<[u8; PEPPER_BYTES]>> {
         return None;
     }
     let mut pepper_decryption_key = Zeroizing::new([0u8; PEPPER_BYTES]);
-    let (mut bits, mut count, mut out) = (0u32, 0, 0);
+    let mut bytes = pepper_decryption_key.iter_mut();
+    let (mut bits, mut count) = (0u32, 0);
     for character in encoded {
-        bits |= (ALPHABET.iter().position(|letter| letter == character)? as u32) << count;
+        bits |= u32::try_from(ALPHABET.iter().position(|letter| letter == character)?).ok()? << count;
         count += 6;
-        while count >= 8 && out < PEPPER_BYTES {
-            pepper_decryption_key[out] = bits as u8;
-            (bits, count, out) = (bits >> 8, count - 8, out + 1);
+        // At most 13 bits wait here, so each character completes at most one byte. 258 bits make
+        // exactly 32 bytes and 2 bits over, so a byte is always there to fill.
+        if count >= 8 {
+            let [lowest, ..] = bits.to_le_bytes();
+            *bytes.next()? = lowest;
+            (bits, count) = (bits >> 8, count - 8);
         }
     }
-    (out == PEPPER_BYTES && bits == 0).then_some(pepper_decryption_key)
+    let filled = bytes.next().is_none();
+    (filled && bits == 0).then_some(pepper_decryption_key)
 }
 
 /// 32 bytes from the kernel's random source.
@@ -196,7 +207,7 @@ fn make_setting(cost: u32) -> Result<CString, Error> {
             std::ptr::null(),
             0,
             output.as_mut_ptr().cast(),
-            GENSALT_OUTPUT_SIZE as c_int,
+            GENSALT_OUTPUT_SIZE_INT,
         );
         (!result.is_null()).then(|| CStr::from_ptr(result).to_owned())
     };
@@ -223,14 +234,14 @@ fn with_hash<T>(secret: &[u8], setting: &CStr, inspect: impl FnOnce(&[u8]) -> T)
     let mut data = Zeroizing::new(vec![0u8; CRYPT_DATA_SIZE]);
     // SAFETY: `phrase` and `setting` are NUL-terminated, and `data` is a zeroed, writable
     // `struct crypt_data` of the size given. Only the address of the result is kept.
-    let result = unsafe { ffi::crypt_rn(phrase.as_ptr().cast(), setting.as_ptr(), data.as_mut_ptr().cast(), CRYPT_DATA_SIZE as c_int) };
+    let result = unsafe { ffi::crypt_rn(phrase.as_ptr().cast(), setting.as_ptr(), data.as_mut_ptr().cast(), CRYPT_DATA_SIZE_INT) };
     // libxcrypt writes the hash into `data` and returns where it starts. Turn that address into an
     // ordinary slice of `data`, so the compiler guarantees `data` outlives it, and so an address
     // outside `data`, or a hash without its terminating NUL, is an error rather than a wild read.
     let hash = (result as usize)
         .checked_sub(data.as_ptr() as usize)
         .and_then(|start| data.get(start..))
-        .and_then(|rest| rest.iter().position(|&byte| byte == 0).map(|end| &rest[..end]));
+        .and_then(|rest| rest.iter().position(|&byte| byte == 0).and_then(|end| rest.get(..end)));
     // libxcrypt signals failure with null, or with a string starting with "*" in some modes.
     match hash {
         Some(hash) if !hash.is_empty() && !hash.starts_with(b"*") => Ok(inspect(hash)),

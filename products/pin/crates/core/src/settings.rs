@@ -155,6 +155,15 @@ impl Settings {
         self.expiry_hours * 3600.0
     }
 
+    /// The same, in whole seconds, rounded down.
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "apply() keeps expiry_hours within 0.01 to 168, so this is at most 604,800 seconds; a float-to-integer cast saturates anyway"
+    )]
+    pub fn expiry_whole_seconds(&self) -> u64 {
+        self.expiry_seconds() as u64
+    }
+
     /// What a proposed PIN is missing, phrased to follow "the PIN needs".
     pub fn pin_problems(&self, pin: &str) -> Vec<String> {
         let length = pin.chars().count();

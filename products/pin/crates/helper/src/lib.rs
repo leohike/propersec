@@ -24,6 +24,9 @@
 //! drive it directly with temporary directories. `main.rs` is the setgid part: a clean start, the
 //! fixed locations, and the real caller.
 
+// Stricter checks for shipped code (docs/plan-tools.md): every unsafe block explains why it is
+// sound, nothing indexes or slices without a bounds check, and no cast silently drops bits.
+#![warn(clippy::undocumented_unsafe_blocks, clippy::indexing_slicing, clippy::cast_possible_truncation)]
 #![forbid(unsafe_code)]
 
 use std::io::Read;
@@ -249,7 +252,7 @@ fn status(files: &UserFiles, clock: &impl Clock) -> Result<String, Error> {
         }
         (Some(refusal), _) => out += &format!("right now  password required: {refusal}\n"),
         (None, Some(state)) => {
-            let left = (settings.expiry_seconds() as u64).saturating_sub(now - state.armed_at);
+            let left = settings.expiry_whole_seconds().saturating_sub(now - state.armed_at);
             out += &format!(
                 "right now  PIN armed for another {}, {} of {} failures so far\n",
                 describe_seconds(left),
@@ -268,8 +271,9 @@ fn status(files: &UserFiles, clock: &impl Clock) -> Result<String, Error> {
 pub fn read_input(input: &mut impl Read) -> std::io::Result<Secret> {
     let mut buffer = vec![0; MAX_INPUT_BYTES + 1];
     let mut length = 0;
-    while length < buffer.len() {
-        match input.read(&mut buffer[length..]) {
+    // `length` never passes the buffer's end: each read fills at most what is left.
+    while let Some(rest) = buffer.get_mut(length..).filter(|rest| !rest.is_empty()) {
+        match input.read(rest) {
             Ok(0) => break,
             Ok(count) => length += count,
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}

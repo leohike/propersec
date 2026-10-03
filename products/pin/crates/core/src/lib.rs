@@ -13,6 +13,9 @@
 //! implements for the real machine and the tests implement in memory. It also holds what the
 //! setgid helper and its callers must agree on: the [`exit`] codes and [`MAX_INPUT_BYTES`].
 
+// Stricter checks for shipped code (docs/plan-tools.md): every unsafe block explains why it is
+// sound, nothing indexes or slices without a bounds check, and no cast silently drops bits.
+#![warn(clippy::undocumented_unsafe_blocks, clippy::indexing_slicing, clippy::cast_possible_truncation)]
 #![forbid(unsafe_code)]
 
 mod attempt;

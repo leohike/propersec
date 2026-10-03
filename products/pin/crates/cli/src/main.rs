@@ -22,6 +22,9 @@
 //! against. Each password unlock decrypts the pepper again; a password change stops the PIN until
 //! the next `set`.
 
+// Stricter checks for shipped code (docs/plan-tools.md): every unsafe block explains why it is
+// sound, nothing indexes or slices without a bounds check, and no cast silently drops bits.
+#![warn(clippy::undocumented_unsafe_blocks, clippy::indexing_slicing, clippy::cast_possible_truncation)]
 #![forbid(unsafe_code)]
 
 use std::io::{BufRead, IsTerminal, Read, stdin};

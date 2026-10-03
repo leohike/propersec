@@ -86,9 +86,10 @@ pub fn to_hex(bytes: &[u8; PEPPER_BYTES]) -> String {
     bytes.iter().flat_map(|byte| hex_digits(*byte)).collect()
 }
 
+/// The two lowercase hex digits of `byte`, the inverse of `from_hex`'s `value`.
 fn hex_digits(byte: u8) -> [char; 2] {
-    const DIGITS: &[u8; 16] = b"0123456789abcdef";
-    [DIGITS[usize::from(byte >> 4)].into(), DIGITS[usize::from(byte & 15)].into()]
+    let digit = |nibble: u8| char::from(if nibble < 10 { b'0' + nibble } else { b'a' + nibble - 10 });
+    [digit(byte >> 4), digit(byte & 15)]
 }
 
 #[cfg(test)]
@@ -101,7 +102,7 @@ mod tests {
 
     #[test]
     fn hex_round_trips() {
-        let pepper = Pepper::new(Zeroizing::new(std::array::from_fn(|index| index as u8 * 8)));
+        let pepper = Pepper::new(Zeroizing::new(std::array::from_fn(|index| u8::try_from(index * 8).unwrap())));
         assert_eq!(&pepper.to_hex()[..8], "00081018");
         assert_eq!(Pepper::from_hex(&pepper.to_hex()), Some(pepper));
     }

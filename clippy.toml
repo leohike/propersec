@@ -1,0 +1,3 @@
+# Test code may index and slice freely: a panic there is a failed test, not a crash in the lock
+# screen. The stricter lints themselves are switched on per shipped crate, at its root.
+allow-indexing-slicing-in-tests = true
