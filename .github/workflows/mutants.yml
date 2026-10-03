@@ -1,0 +1,78 @@
+# Mutation testing: cargo-mutants changes the code one small way at a time (a comparison flipped, a
+# function body replaced by a default value) and runs the tests; a change no test notices is a
+# "missed" mutant, a line nothing really tests. Too slow for every push, so it runs weekly and on
+# demand. Report only: missed mutants don't fail the job, but the list lands in the job summary
+# and in the artifact. What is left to decide is in docs/tooling-remaining-ideas.md.
+
+name: Mutants
+
+on:
+  schedule:
+    - cron: "17 3 * * 1" # Mondays, 03:17 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  mutants:
+    name: cargo-mutants (core, sys; Fedora 44)
+    runs-on: ubuntu-24.04
+    container: registry.fedoraproject.org/fedora:44
+    timeout-minutes: 180
+    env:
+      CARGO_HOME: /cargo
+    steps:
+      - name: Install build dependencies
+        run: dnf -y install --setopt=install_weak_deps=False rust cargo gcc libxcrypt-devel git-core tar zstd
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install cargo-mutants
+        uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
+        with:
+          tool: cargo-mutants@27.1.0
+          fallback: none
+      - name: Add an unprivileged user
+        # As in CI's test job: some tests check what a plain user may not do, which root may.
+        run: |
+          useradd --create-home tester
+          mkdir -p "$CARGO_HOME"
+          chown -R tester: "$CARGO_HOME" "$GITHUB_WORKSPACE"
+      - name: cargo mutants
+        # Exit 2 means missed mutants and 3 timeouts: reported, not failed. Anything else, such
+        # as tests failing on the unmutated tree, fails the job.
+        run: |
+          set +e
+          runuser -u tester -- cargo mutants --package properpin-core --package properpin-sys --jobs 2 --no-shuffle --output .
+          code=$?
+          echo "cargo mutants exited $code"
+          case $code in 0 | 2 | 3) ;; *) exit "$code" ;; esac
+      - name: Summary
+        if: always()
+        run: |
+          out=mutants.out
+          {
+            echo "## cargo-mutants"
+            for kind in caught missed timeout unviable; do
+              echo "- $kind: $(wc -l < "$out/$kind.txt" 2>/dev/null || echo 0)"
+            done
+            echo
+            echo "### Missed"
+            echo '```'
+            cat "$out/missed.txt" 2>/dev/null || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: mutants.out
+          path: mutants.out
+          if-no-files-found: ignore

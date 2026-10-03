@@ -13,3 +13,7 @@ __pycache__/
 
 # Rust
 /target/
+
+# cargo-mutants reports
+mutants.out/
+mutants.out.old/
