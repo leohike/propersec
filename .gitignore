@@ -17,3 +17,6 @@ __pycache__/
 # cargo-mutants reports
 mutants.out/
 mutants.out.old/
+
+# Worktrees of parallel agents
+.claude/worktrees/
