@@ -587,7 +587,7 @@ fn the_lifetime_limit_takes_a_new_pin(world: &World) -> Outcome {
 /// A budget that can't be trusted is never read as a fresh one.
 fn a_damaged_or_planted_budget(world: &World) -> Outcome {
     world.arm()?;
-    fs::write(world.budget_file(), "garbage\n").map_err(message)?;
+    overwrite(&world.budget_file(), "garbage\n")?;
     world.fails_closed("not a valid budget")?;
     // Planted by bob's helper: private to bob, it can't even be opened; readable, its owner is wrong.
     let bob = Account::by_name("bob").map_err(message)?;
@@ -599,7 +599,7 @@ fn a_damaged_or_planted_budget(world: &World) -> Outcome {
 
 fn a_corrupt_state(world: &World) -> Outcome {
     world.arm()?;
-    fs::write(world.state_file(), "garbage\n").map_err(message)?;
+    overwrite(&world.state_file(), "garbage\n")?;
     world.pin_refused(PIN, "no password unlock since boot")
 }
 
@@ -841,8 +841,7 @@ impl World {
     fn edit_budget(&self, change: impl FnOnce(&mut Budget)) -> Outcome {
         let mut budget = self.budget()?;
         change(&mut budget);
-        // Written in place: the file keeps its owner and mode.
-        fs::write(self.budget_file(), budget.format()).map_err(message)
+        overwrite(&self.budget_file(), &budget.format())
     }
 
     /// What a reboot does to properpin: `/run` starts empty. The budget on disk stays.
@@ -1041,8 +1040,7 @@ impl World {
         let text = fs::read_to_string(self.state_file()).map_err(message)?;
         let mut state = PinState::parse(&text).ok_or("the state file doesn't parse")?;
         change(&mut state);
-        // Written in place: the file keeps its owner and mode.
-        fs::write(self.state_file(), state.format()).map_err(message)
+        overwrite(&self.state_file(), &state.format())
     }
 }
 
@@ -1164,10 +1162,25 @@ fn install_sh(args: &[&str]) -> Outcome<String> {
     if output.status.success() { Ok(said) } else { Err(format!("install.sh {}:\n{said}", args.join(" "))) }
 }
 
+/// A new file with this owner and mode, replacing any file there. The old one is deleted first:
+/// opening it with `O_CREAT` would fail even for root under `fs.protected_regular=2` (GitHub's
+/// runners) when it is someone else's file in a sticky, group-writable directory.
 fn write_file(path: &Path, text: &str, uid: u32, gid: u32, mode: u32) -> Outcome {
+    match fs::remove_file(path) {
+        Err(error) if error.kind() != ErrorKind::NotFound => return Err(format!("{}: {error}", path.display())),
+        _ => {}
+    }
     fs::write(path, text).map_err(message)?;
     chown(path, Some(uid), Some(gid)).map_err(message)?;
     fs::set_permissions(path, Permissions::from_mode(mode)).map_err(message)
+}
+
+/// Rewrite an existing file in place, so it keeps its owner and mode. Opened without `O_CREAT`,
+/// which `fs.protected_regular=2` refuses even to root for another user's file in a sticky,
+/// group-writable directory such as `/run/properpin`.
+fn overwrite(path: &Path, text: &str) -> Outcome {
+    let mut file = fs::OpenOptions::new().write(true).truncate(true).open(path).map_err(|error| format!("{}: {error}", path.display()))?;
+    file.write_all(text.as_bytes()).map_err(message)
 }
 
 fn message(error: impl std::fmt::Display) -> String {

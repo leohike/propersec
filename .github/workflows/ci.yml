@@ -54,7 +54,11 @@ jobs:
         with:
           persist-credentials: false
       - name: podman version
-        run: podman version
+        # The container shares these with the runner's kernel; protected_regular=2 limits what even
+        # root may open in /run/properpin, which the scenarios have to respect.
+        run: |
+          podman version
+          sysctl fs.protected_regular fs.protected_symlinks
       # The two commands behind `just properpin podman`, but with rootful podman. Rootless podman
       # on this runner builds the image fine, but setuid unix_chkpwd can't read /etc/shadow inside
       # it ("check pass; user unknown"), so the real password never unlocks. Storage is kernel
