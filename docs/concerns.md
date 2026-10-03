@@ -50,3 +50,8 @@ Everything still open about properpin, however small, collected while moving the
 - **`properpin status` shows only your own PIN,** and refuses root. An administrator checking someone else's PIN would need root to read the files by hand.
 - **The CLI assumes the helper's group is called `properpin`** unless told otherwise with `--group`; the installed wrapper doesn't pass it.
 - **`docs/pin-pam-copy.md` predates the helper.** What was typed now also passes through a pipe into the helper's process, which wipes its buffer on exit. The reasoning there still holds: both copies live shorter than libpam's.
+
+## Where the state lives
+
+- **The helper doesn't check that `/run/properpin` is in memory.** On every systemd distribution `/run` is a tmpfs, but in containers and chroots it can be an ordinary directory on disk: in the podman test image, `/run` is `overlayfs`. For the counts that is harmless, since state from another boot is refused anyway. Before anything secret is stored there (the pepper), the helper should check the filesystem with `statfs` and accept only tmpfs or ramfs, and the container test should mount a tmpfs at `/run/properpin` (`podman run --tmpfs`).
+- **tmpfs can be swapped.** Under memory pressure its pages can go to swap, and hibernation writes all of RAM to disk. On the development machine swap is zram only and hibernation is disabled, so it stays in RAM there, but that is the machine's configuration, not properpin's guarantee. A `ramfs` mount would never be swapped; hibernation would still need encrypted swap. Only matters once a secret is stored.
