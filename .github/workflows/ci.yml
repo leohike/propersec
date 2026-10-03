@@ -67,6 +67,9 @@ jobs:
         run: sudo podman build --quiet --ignorefile products/pin/testing/podman/Containerfile.containerignore -f products/pin/testing/podman/Containerfile -t properpin-systest .
       - name: Run the scenarios
         run: sudo podman run --rm --init --network=none properpin-systest
+      # install.sh uninstall against deliberately broken installs, a fresh container per case.
+      - name: Run the uninstall cases
+        run: sudo products/pin/testing/podman/uninstall-cases.sh
 
   audit:
     name: Dependency audit

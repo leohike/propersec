@@ -127,7 +127,6 @@ fn install_enable_disable_uninstall_leaves_pam_as_it_was() {
     assert!(root.ok("check").contains("has properpin's lines"));
     assert_eq!(fs::read_to_string(root.path("etc/properpin/kde.pam.before-enable")).unwrap(), STOCK_KDE);
 
-    assert!(root.refused("uninstall").contains("run install.sh disable first"));
     assert!(root.ok("disable").contains("exactly as it was before enable"));
     assert_eq!(fs::read_to_string(root.kde()).unwrap(), STOCK_KDE);
     assert!(root.ok("disable").contains("nothing to do"));
@@ -145,6 +144,11 @@ fn install_enable_disable_uninstall_leaves_pam_as_it_was() {
     }
     assert!(root.path("etc/properpin/users").is_dir(), "PINs are kept");
     assert!(root.path("var/lib/properpin").is_dir(), "budgets are kept");
+    // The fake root had only etc/pam.d: every directory install had to create goes again, except
+    // those holding what is kept.
+    for gone in ["usr", "run", "etc/sysusers.d", "etc/tmpfiles.d"] {
+        assert!(!root.path(gone).exists(), "{gone} is still there");
+    }
 }
 
 #[test]
@@ -283,4 +287,91 @@ fn bad_arguments_change_nothing() {
         assert_eq!(output.status.code(), Some(2), "{args:?}: {}", says(&output));
     }
     assert!(!root.path("usr").exists());
+}
+
+/// One command is the way out: uninstall takes properpin's lines out of PAM itself.
+#[test]
+fn uninstall_takes_the_lines_out_first() {
+    let root = FakeRoot::new();
+    root.ok("install");
+    root.ok("enable");
+    let edited = format!("{}# added by an admin\n", fs::read_to_string(root.kde()).unwrap());
+    fs::write(root.kde(), &edited).unwrap();
+    assert!(root.ok("uninstall").contains("took properpin's lines out"));
+    assert_eq!(fs::read_to_string(root.kde()).unwrap(), format!("{STOCK_KDE}# added by an admin\n"), "edits outside the block stay");
+    assert!(!root.path("usr/local/lib64/security/pam_properpin.so").exists());
+}
+
+/// A block disable can't take out cleanly, or a file without its stock auth line: uninstall puts
+/// back the copy saved at enable, and keeps the damaged file.
+#[test]
+fn uninstall_restores_a_damaged_pam_file() {
+    let enabled = {
+        let root = FakeRoot::new();
+        root.ok("install");
+        root.ok("enable");
+        fs::read_to_string(root.kde()).unwrap()
+    };
+    let block_end = enabled.find("# properpin end\n").unwrap() + "# properpin end\n".len();
+    let first_line_end = enabled.find('\n').unwrap() + 1;
+    let second_line_end = first_line_end + enabled[first_line_end..].find('\n').unwrap() + 1;
+    let damaged = [
+        ("the end marker deleted", enabled.replace("# properpin end\n", "")),
+        ("the block twice", format!("{}{enabled}", &enabled[..block_end])),
+        ("the markers stripped", enabled.lines().filter(|line| !line.starts_with("# properpin")).map(|line| format!("{line}\n")).collect()),
+        ("cut off inside the block", enabled[..second_line_end].to_owned()),
+        ("emptied", String::new()),
+    ];
+    for (what, text) in damaged {
+        let root = FakeRoot::new();
+        root.ok("install");
+        root.ok("enable");
+        fs::write(root.kde(), &text).unwrap();
+        if !text.is_empty() {
+            assert!(root.refused("disable").contains("fix it by hand"), "{what}");
+        }
+        let said = root.ok("uninstall");
+        assert!(said.contains("again exactly as it was before enable"), "{what}: {said}");
+        assert_eq!(fs::read_to_string(root.kde()).unwrap(), STOCK_KDE, "{what}");
+        assert_eq!(fs::read_to_string(root.path("etc/properpin/kde.pam.damaged")).unwrap(), text, "{what}");
+        assert!(!root.path("usr/local/libexec/properpin").exists(), "{what}");
+    }
+}
+
+#[test]
+fn uninstall_restores_a_deleted_pam_file() {
+    let root = FakeRoot::new();
+    root.ok("install");
+    root.ok("enable");
+    fs::remove_file(root.kde()).unwrap();
+    root.ok("uninstall");
+    assert_eq!(fs::read_to_string(root.kde()).unwrap(), STOCK_KDE);
+}
+
+/// Without a copy to go back to, uninstall leaves everything in place rather than delete a module
+/// the PAM file still names.
+#[test]
+fn uninstall_without_a_saved_copy_removes_nothing() {
+    let root = FakeRoot::new();
+    root.ok("install");
+    root.ok("enable");
+    let damaged = fs::read_to_string(root.kde()).unwrap().replace("# properpin end\n", "");
+    fs::write(root.kde(), &damaged).unwrap();
+    fs::remove_file(root.path("etc/properpin/kde.pam.before-enable")).unwrap();
+    assert!(root.refused("uninstall").contains("nothing was removed"));
+    assert_eq!(fs::read_to_string(root.kde()).unwrap(), damaged);
+    assert!(root.path("usr/local/lib64/security/pam_properpin.so").exists());
+}
+
+/// Whatever else ended up in properpin's own directory, and whatever is already missing.
+#[test]
+fn uninstall_copes_with_extra_and_missing_files() {
+    let root = FakeRoot::new();
+    root.ok("install");
+    fs::write(root.path("usr/local/libexec/properpin/left-behind"), "junk").unwrap();
+    fs::remove_file(root.path("usr/local/bin/properpin")).unwrap();
+    fs::remove_file(root.path("usr/local/lib64/security/pam_properpin.so")).unwrap();
+    root.ok("uninstall");
+    assert!(!root.path("usr/local/libexec/properpin").exists());
+    root.ok("uninstall");
 }

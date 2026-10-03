@@ -9,6 +9,8 @@
 //! properpin-systest run                    every scenario in order; exit 1 if any fails
 //! properpin-systest attempt SERVICE USER   one pam_authenticate, typing stdin, printing the outcome
 //! properpin-systest worker SERVICE USER    one PAM session, an attempt for each line of stdin
+//! properpin-systest uninstall-cases        the names of the uninstall cases, one per line
+//! properpin-systest uninstall-case NAME    install a broken properpin, uninstall it, check the repair
 //! ```
 //!
 //! `run` does each PAM attempt by starting `attempt` as the test user, the way the lock screen runs
@@ -16,6 +18,9 @@
 //! kscreenlocker 6.8's `kscreenlocker_worker`: one session for many attempts, killed when the greeter
 //! cancels. `run` listens on `/dev/log` itself, so what the module and `pam_unix` log through syslog
 //! comes back to the scenario that caused it. After every scenario no helper may still be running.
+//!
+//! The uninstall cases (`uninstall.rs`) each run in a fresh container: they install a deliberately
+//! broken properpin and check that `install.sh uninstall` puts the system back as it was.
 
 #![forbid(unsafe_code)]
 
@@ -34,6 +39,8 @@ use std::time::{Duration, Instant, SystemTime};
 use pamharness::PamClient;
 use properpin_core::{Budget, Clock, PinState, exit};
 use properpin_sys::{Account, BootClock, Yescrypt, group_by_name};
+
+mod uninstall;
 
 /// Where the Containerfile puts the build, `packaging/` and `pam/`.
 const PRODUCT: &str = "/opt/properpin";
@@ -66,8 +73,10 @@ fn main() -> ExitCode {
         ["run"] => run(),
         ["attempt", service, user] => attempt_here(service, user),
         ["worker", service, user] => worker_here(service, user),
+        ["uninstall-cases"] => uninstall::list(),
+        ["uninstall-case", name] => uninstall::run(name),
         _ => {
-            eprintln!("usage: properpin-systest run | attempt SERVICE USER | worker SERVICE USER");
+            eprintln!("usage: properpin-systest run | attempt SERVICE USER | worker SERVICE USER | uninstall-cases | uninstall-case NAME");
             ExitCode::from(2)
         }
     }
@@ -1151,10 +1160,15 @@ fn properpin_as_root(args: &[&str], typed: &str) -> Outcome<String> {
 
 /// Run `packaging/install.sh` against the real root, from the container's build.
 fn install_sh(args: &[&str]) -> Outcome<String> {
+    install_sh_from(&format!("{PRODUCT}/build"), args)
+}
+
+/// The same, installing the build in `from`.
+fn install_sh_from(from: &str, args: &[&str]) -> Outcome<String> {
     let output = Command::new("bash")
         .arg(format!("{PRODUCT}/packaging/install.sh"))
         .args(args)
-        .args(["--from", &format!("{PRODUCT}/build")])
+        .args(["--from", from])
         .stdin(Stdio::null())
         .output()
         .map_err(message)?;

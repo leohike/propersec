@@ -32,6 +32,8 @@ A brief for adding GitHub Actions CI to propersec, written so an agent (or a per
   - `podman build --quiet --ignorefile products/pin/testing/podman/Containerfile.containerignore -f products/pin/testing/podman/Containerfile -t properpin-systest .`
   - `podman run --rm --init --network=none properpin-systest`
 
+  `just properpin podman-uninstall` then runs `products/pin/testing/podman/uninstall-cases.sh`, which starts a fresh container per uninstall case (13 so far), and CI runs it after the scenarios.
+
   Inside the container it runs its scenarios (35 as of the harness closer to kscreenlocker) as root: it installs properpin with `install.sh`, listens on `/dev/log`, and runs attempts through the setuid `unix_chkpwd`. The Containerfile uses `RUN --mount=type=cache`, which needs a buildah/podman recent enough to support it.
 - **Read first:** `CLAUDE.md`, the root `Cargo.toml`, `products/pin/properpin.just`, `products/pin/docs/README.md`, `products/pin/testing/podman/Containerfile`, and `docs/plan.md`.
 

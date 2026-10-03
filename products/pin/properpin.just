@@ -59,3 +59,7 @@ demo:
 podman:
     podman build --quiet --ignorefile products/pin/testing/podman/Containerfile.containerignore -f products/pin/testing/podman/Containerfile -t properpin-systest .
     podman run --rm --init --network=none properpin-systest
+
+# install.sh uninstall against deliberately broken installs, one fresh container per case (after podman builds the image)
+podman-uninstall: podman
+    products/pin/testing/podman/uninstall-cases.sh

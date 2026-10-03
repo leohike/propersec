@@ -1,0 +1,22 @@
+[package]
+name = "brokenpin"
+description = "Test-only: deliberately broken stand-ins for pam_properpin.so and properpin-helper, for testing the uninstaller."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+# Copied over libpam_properpin.so in a variant's build directory; never installed outside the
+# container. Without a feature it lacks pam_sm_authenticate altogether.
+crate-type = ["cdylib"]
+
+[features]
+# What pam_sm_authenticate does; at most one.
+panics = []
+segfaults = []
+sleeps = []
+says-yes = []
+
+[lints]
+workspace = true

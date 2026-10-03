@@ -14,6 +14,10 @@ RUN --mount=type=cache,target=/root/.cargo/registry \
     && mkdir -p /out/build \
     && cp target/release/libpam_properpin.so target/release/properpin-helper target/release/properpin /out/build/ \
     && cp target/release/properpin-systest /out/
+# The deliberately broken variants the uninstall cases install, built after the real ones.
+RUN --mount=type=cache,target=/root/.cargo/registry \
+    --mount=type=cache,target=/src/target \
+    products/pin/testing/podman/build-broken.sh
 
 FROM registry.fedoraproject.org/fedora:44
 # util-linux brings su and login, each with its PAM service; install.sh needs diff and cmp.
