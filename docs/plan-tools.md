@@ -1,6 +1,6 @@
 # Tools that check Rust code automatically
 
-A survey made on 2026-10-03 of linters, analysers and verifiers that could check properpin's code beyond what it uses today, with a recommended order. Nothing here is set up yet. Everything would run in CI or in a podman container, so nothing gets installed on the development machine; trying a tool locally (each is one cargo crate) is to be agreed with the owner first.
+A survey made on 2026-10-03 of linters, analysers and verifiers that could check properpin's code beyond what it used then, with a recommended order. The first three steps were built the same day as proofs of concept; `docs/tooling-remaining-ideas.md` says what each does and what was left for later. Everything would run in CI or in a podman container, so nothing gets installed on the development machine; trying a tool locally (each is one cargo crate) is to be agreed with the owner first.
 
 ## What properpin already has
 
@@ -8,7 +8,7 @@ A survey made on 2026-10-03 of linters, analysers and verifiers that could check
 - **In CI:** `cargo deny` and `cargo audit`, which check dependencies against known security advisories; `cargo deny`'s licence, ban and source checks only warn.
 - **In the code:** `unsafe_code = "deny"` everywhere except the FFI modules.
 
-One gap: **clippy and rustfmt don't run in CI,** so nothing stops a commit that fails lint.
+One gap: **clippy and rustfmt didn't run in CI,** so nothing stopped a commit that failed lint. Closed by the first step below.
 
 ## Linters beyond plain clippy
 
@@ -41,9 +41,9 @@ One gap: **clippy and rustfmt don't run in CI,** so nothing stops a commit that 
 
 ## The recommended order
 
-- **First, clippy and rustfmt in CI.** Trivial, and it closes a real gap.
-- **Then a handful of restriction lints** in the workspace `Cargo.toml`: `undocumented_unsafe_blocks`, `indexing_slicing` and `cast_possible_truncation`, at least for properpin-sys and the helper. Expect a short round of fixes or justified exceptions.
-- **Then cargo-mutants in CI,** as `docs/plan.md` already plans.
+- **First, clippy and rustfmt in CI.** Trivial, and it closes a real gap. Done.
+- **Then a handful of restriction lints:** `undocumented_unsafe_blocks`, `indexing_slicing` and `cast_possible_truncation`, at least for properpin-sys and the helper. Expect a short round of fixes or justified exceptions. Done, for all the shipped crates.
+- **Then cargo-mutants in CI,** as `docs/plan.md` already plans. Done, weekly and report only.
 - **Then cargo-fuzz targets** for the parsers and `decode_hash`, in CI.
 - **Later, Kani proofs** for `decode_hash`, the hex and XOR functions, and perhaps the budget.
 
