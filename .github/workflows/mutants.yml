@@ -1,8 +1,10 @@
 # Mutation testing: cargo-mutants changes the code one small way at a time (a comparison flipped, a
 # function body replaced by a default value) and runs the tests; a change no test notices is a
 # "missed" mutant, a line nothing really tests. Too slow for every push, so it runs weekly and on
-# demand. Report only: missed mutants don't fail the job, but the list lands in the job summary
-# and in the artifact. What is left to decide is in docs/tooling-remaining-ideas.md.
+# demand. Mutants in core and sys are tested against the helper's tests too, which drive much of
+# core (the log lines, the status text). Report only: missed mutants don't fail the job, but the
+# list lands in the job summary and in the artifact. What is left to decide is in
+# docs/tooling-remaining-ideas.md.
 
 name: Mutants
 
@@ -51,7 +53,9 @@ jobs:
         # as tests failing on the unmutated tree, fails the job.
         run: |
           set +e
-          runuser -u tester -- cargo mutants --package properpin-core --package properpin-sys --jobs 2 --no-shuffle --output .
+          runuser -u tester -- cargo mutants --package properpin-core --package properpin-sys \
+            --test-package properpin-core --test-package properpin-sys --test-package properpin-helper \
+            --jobs 2 --no-shuffle --output .
           code=$?
           echo "cargo mutants exited $code"
           case $code in 0 | 2 | 3) ;; *) exit "$code" ;; esac

@@ -25,7 +25,7 @@ lint:
 
 # Mutation testing of core and sys, slow (CI runs it weekly): each change to the code that no test notices is listed in mutants.out/missed.txt. Needs cargo-mutants, and stays on half the CPUs
 mutants:
-    CARGO_BUILD_JOBS=2 taskset -c 0-$(( $(nproc) / 2 - 1 )) nice -n 10 cargo mutants --package properpin-core --package properpin-sys --jobs 2
+    CARGO_BUILD_JOBS=2 taskset -c 0-$(( $(nproc) / 2 - 1 )) nice -n 10 cargo mutants --package properpin-core --package properpin-sys --test-package properpin-core --test-package properpin-sys --test-package properpin-helper --jobs 2
 
 # Format everything
 fmt:
