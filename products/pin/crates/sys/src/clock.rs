@@ -7,6 +7,7 @@ const BOOT_ID: &str = "/proc/sys/kernel/random/boot_id";
 
 /// This boot's id from the kernel, and `CLOCK_BOOTTIME`: seconds since boot, suspend included.
 /// Changing the wall clock moves neither, so nobody at the keyboard can stretch the PIN's window.
+/// The wall clock itself, `CLOCK_REALTIME`, is only for the budget, which must outlive the boot.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct BootClock;
 
@@ -20,6 +21,11 @@ impl Clock for BootClock {
         let now = clock_gettime(ClockId::CLOCK_BOOTTIME).map_err(|error| system("CLOCK_BOOTTIME", error))?;
         u64::try_from(now.tv_sec()).map_err(|error| system("CLOCK_BOOTTIME", error))
     }
+
+    fn wall(&self) -> Result<u64, Error> {
+        let now = clock_gettime(ClockId::CLOCK_REALTIME).map_err(|error| system("CLOCK_REALTIME", error))?;
+        u64::try_from(now.tv_sec()).map_err(|error| system("CLOCK_REALTIME", error))
+    }
 }
 
 #[cfg(test)]
@@ -31,5 +37,6 @@ mod tests {
         assert_eq!(BootClock.boot_id().unwrap(), BootClock.boot_id().unwrap());
         assert_eq!(BootClock.boot_id().unwrap().len(), 36);
         assert!(BootClock.now().unwrap() > 0);
+        assert!(BootClock.wall().unwrap() > 1_700_000_000);
     }
 }

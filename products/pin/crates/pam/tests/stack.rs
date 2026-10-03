@@ -40,9 +40,11 @@ impl Sandbox {
         let dir = tempfile::tempdir().unwrap();
         let user = Account::by_uid(current_uid()).unwrap().name;
         let sandbox = Self { dir, user };
-        fs::create_dir(sandbox.run_dir()).unwrap();
-        // Set explicitly: the umask would strip the group's write bit from a mkdir mode.
-        fs::set_permissions(sandbox.run_dir(), Permissions::from_mode(0o1770)).unwrap();
+        for shared in [sandbox.run_dir(), sandbox.path("var")] {
+            fs::create_dir(&shared).unwrap();
+            // Set explicitly: the umask would strip the group's write bit from a mkdir mode.
+            fs::set_permissions(&shared, Permissions::from_mode(0o1770)).unwrap();
+        }
         fs::create_dir_all(sandbox.path("etc/users")).unwrap();
         fs::create_dir_all(sandbox.path("pam.d")).unwrap();
         // libpam logs to the journal when a confdir has no "other" fallback service.
@@ -54,10 +56,11 @@ impl Sandbox {
         let chkpwd = format!("#!/bin/bash\nIFS= read -r -d '' password\n[[ $1 == \"$(id -un)\" && $password == '{PASSWORD}' ]]\n");
         sandbox.script("unix_chkpwd", &chkpwd);
         let helper = format!(
-            "#!/bin/sh\nexec {} \"$@\" --dev-etc {} --dev-run {} --dev-chkpwd {} --dev-log {}\n",
+            "#!/bin/sh\nexec {} \"$@\" --dev-etc {} --dev-run {} --dev-budget {} --dev-chkpwd {} --dev-log {}\n",
             built().join("properpin-helper").display(),
             sandbox.path("etc").display(),
             sandbox.run_dir().display(),
+            sandbox.path("var").display(),
             sandbox.path("unix_chkpwd").display(),
             sandbox.path("log").display()
         );

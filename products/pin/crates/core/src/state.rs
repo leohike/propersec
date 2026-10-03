@@ -38,7 +38,7 @@ impl PinState {
 }
 
 /// Plain ASCII digits only: no sign, no spaces, no "²".
-fn digits<T: std::str::FromStr>(text: &str) -> Option<T> {
+pub(crate) fn digits<T: std::str::FromStr>(text: &str) -> Option<T> {
     text.bytes().all(|byte| byte.is_ascii_digit()).then(|| text.parse().ok()).flatten()
 }
 

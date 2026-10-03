@@ -29,9 +29,11 @@ struct Run {
 impl Sandbox {
     fn new() -> Self {
         let sandbox = Self { dir: tempfile::tempdir().unwrap() };
-        fs::create_dir(sandbox.path("run")).unwrap();
-        // Set explicitly: the umask would strip the group's write bit from a mkdir mode.
-        fs::set_permissions(sandbox.path("run"), Permissions::from_mode(0o1770)).unwrap();
+        for shared in ["run", "var"] {
+            fs::create_dir(sandbox.path(shared)).unwrap();
+            // Set explicitly: the umask would strip the group's write bit from a mkdir mode.
+            fs::set_permissions(sandbox.path(shared), Permissions::from_mode(0o1770)).unwrap();
+        }
         let user = Account::by_uid(current_uid()).unwrap().name;
         let user_file = sandbox.path("etc/users").join(&user);
         fs::create_dir_all(user_file.parent().unwrap()).unwrap();
@@ -50,7 +52,9 @@ impl Sandbox {
 
     fn dev_args(&self) -> Vec<String> {
         let mut args = Vec::new();
-        for (option, path) in [("--dev-etc", "etc"), ("--dev-run", "run"), ("--dev-chkpwd", "unix_chkpwd"), ("--dev-log", "log")] {
+        for (option, path) in
+            [("--dev-etc", "etc"), ("--dev-run", "run"), ("--dev-budget", "var"), ("--dev-chkpwd", "unix_chkpwd"), ("--dev-log", "log")]
+        {
             args.extend([option.to_owned(), self.path(path).display().to_string()]);
         }
         args

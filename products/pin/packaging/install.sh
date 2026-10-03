@@ -2,13 +2,13 @@
 # properpin's installer.
 #
 #   install.sh install     the properpin group, the module, the setgid helper, the command,
-#                          /etc/properpin and /run/properpin; never touches PAM
+#                          /etc/properpin, /var/lib/properpin and /run/properpin; never touches PAM
 #   install.sh check       every installed path: kind, mode, owner, same bytes as the build, SELinux label;
 #                          and that the group has no members and a locked password
 #   install.sh enable      add properpin's three lines to /etc/pam.d/kde, after a diff and a yes
 #   install.sh disable     take exactly those lines out again, after a diff and a yes
-#   install.sh uninstall   remove what install put in place; refuses while enabled; keeps /etc/properpin
-#                          and the properpin group
+#   install.sh uninstall   remove what install put in place; refuses while enabled; keeps /etc/properpin,
+#                          /var/lib/properpin and the properpin group
 #
 # Options:
 #   --from DIR       where the built libpam_properpin.so, properpin-helper and properpin are
@@ -73,6 +73,7 @@ command_path=/usr/local/bin/properpin
 etc=/etc/properpin
 users=$etc/users
 run_dir=/run/properpin
+budget_dir=/var/lib/properpin
 sysusers=/etc/sysusers.d/properpin.conf
 tmpfiles=/etc/tmpfiles.d/properpin.conf
 pam_file=/etc/pam.d/kde
@@ -94,7 +95,7 @@ wrapper() {
     cat <<EOF
 #!/bin/sh
 # Installed by properpin's install.sh: the properpin command with this machine's paths.
-exec $binary --etc $etc --helper $helper "\$@"
+exec $binary --etc $etc --budget $budget_dir --helper $helper "\$@"
 EOF
 }
 
@@ -107,9 +108,12 @@ sysusers_conf() {
 
 # /run/properpin, created again at every boot: the helper's per-boot state, which only the helper's
 # group can enter. Sticky, so each user's run of the helper can only replace that user's own files.
+# /var/lib/properpin, the budgets of failures, follows the same rules on disk; the rule only keeps
+# it in shape, since tmpfiles never empties a d directory without an age.
 tmpfiles_conf() {
-    echo "# Installed by properpin's install.sh: properpin-helper's per-boot state."
+    echo "# Installed by properpin's install.sh: properpin-helper's per-boot state, and its budgets."
     echo "d $run_dir 1770 $owner $helper_group -"
+    echo "d $budget_dir 1770 $owner $helper_group -"
 }
 
 # --- helpers
@@ -212,13 +216,14 @@ do_install() {
     own_dir "$libexec"
     own_dir "$etc"
     own_dir "$users" 0750 "$owner" "$helper_group"
-    mkdir -p "$root$(dirname "$run_dir")"
+    mkdir -p "$root$(dirname "$run_dir")" "$root$(dirname "$budget_dir")"
     own_dir "$run_dir" 1770 "$owner" "$helper_group"
+    own_dir "$budget_dir" 1770 "$owner" "$helper_group"
     put "$module_path" 0755 <"$built_module"
     put "$binary" 0755 <"$built_binary"
     put "$helper" 2755 "$owner:$helper_group" <"$built_helper"
     wrapper | put "$command_path" 0755
-    relabel "$root$module_path" "$root$libexec" "$root$command_path" "$root$etc" "$root$run_dir" "$root$sysusers" "$root$tmpfiles"
+    relabel "$root$module_path" "$root$libexec" "$root$command_path" "$root$etc" "$root$run_dir" "$root$budget_dir" "$root$sysusers" "$root$tmpfiles"
     echo "installed under ${root:-/}; /etc/pam.d/kde is unchanged"
     echo "next: install.sh check, then install.sh enable"
 }
@@ -280,6 +285,7 @@ do_check() {
     expect "$etc" dir 755 "$owner" "$group"
     expect "$users" dir 750 "$owner" "$helper_group"
     expect "$run_dir" dir 1770 "$owner" "$helper_group"
+    expect "$budget_dir" dir 1770 "$owner" "$helper_group"
     if [[ -e $root$etc/config ]]; then
         expect "$etc/config" file 644 "$owner" "$group"
     fi
@@ -310,7 +316,7 @@ do_check() {
     fi
     if selinux_enabled; then
         local path
-        for path in "$module_path" "$libexec" "$binary" "$helper" "$command_path" "$etc" "$users" "$run_dir" "$sysusers" "$tmpfiles"; do
+        for path in "$module_path" "$libexec" "$binary" "$helper" "$command_path" "$etc" "$users" "$run_dir" "$budget_dir" "$sysusers" "$tmpfiles"; do
             matchpathcon -V "$path" >/dev/null 2>&1 || problems+=("$path: wrong SELinux label; install again")
         done
     elif [[ $real == 1 ]]; then
@@ -379,8 +385,9 @@ do_uninstall() {
     [[ -d $root$libexec ]] && rmdir "$root$libexec"
     # Only per-boot state: failure counts and arming times.
     rm -rf "$root$run_dir"
-    echo "uninstalled; $etc is kept, with any PINs and the PAM backup, and so is the $helper_group group,"
-    echo "which those files belong to. To remove both: rm -r $etc && groupdel $helper_group"
+    echo "uninstalled; $etc is kept, with any PINs and the PAM backup, and so are $budget_dir, with each"
+    echo "user's budget of failures, and the $helper_group group those files belong to. To remove them all:"
+    echo "rm -r $etc $budget_dir && groupdel $helper_group"
 }
 
 "do_$command"

@@ -14,6 +14,8 @@ Someone who has the `properpin` group can create `<alice uid>.lock` before alice
 
 A planted `<uid>.state` does nothing more: a state file that isn't the user's own reads as no state, which requires the password.
 
+**The failure budget has the same weakness, and it lasts longer.** `/var/lib/properpin` follows the same rules on disk. A `<uid>.budget` planted in alice's name is refused the same way, and since it isn't cleared at reboot, her PIN stays refused until root runs `properpin set`, which deletes the budget whoever owns it. The fix below applies to both directories.
+
 ## Who can do it
 
 Only someone who already has the `properpin` group. The group has no members and a locked password, so in practice that means someone who has exploited a bug in the helper. Such an attacker can already read every PIN hash. Blocking one user's PIN until reboot is minor next to that, and it is visible in the log.

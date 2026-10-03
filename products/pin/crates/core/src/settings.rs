@@ -11,7 +11,8 @@ use crate::{Error, HASH_KEY, PinState, Refusal};
 /// Like a line of `/etc/shadow`, that file keeps the secret and the rules for it together, where
 /// only root can change them.
 ///
-/// The unlock path uses the hash and the next three fields; `set` uses the last four.
+/// The unlock path uses the hash, the next three fields and the budget's five; `set` uses the
+/// four in between. The budget's settings may only come from the global config.
 #[derive(Clone, PartialEq)]
 pub struct Settings {
     /// Empty: no PIN is set.
@@ -28,7 +29,21 @@ pub struct Settings {
     pub min_letters: usize,
     /// yescrypt cost `set` hashes with: 5 takes about 20 ms, 8 about 160 ms.
     pub hash_cost: u32,
+    /// Seconds before a correct PIN in which failures are forgiven as the user's own typos.
+    pub forgive_before_correct_pin: u64,
+    /// The same before a correct password.
+    pub forgive_before_correct_password: u64,
+    /// Concerning failures within 24 hours that disable the PIN.
+    pub max_concerning_24h: u32,
+    /// Concerning failures within 7 days that disable the PIN.
+    pub max_concerning_7d: u32,
+    /// Concerning failures since the PIN was set that disable it.
+    pub max_concerning_total: u64,
 }
+
+/// The budget's settings: one policy for the machine, never per user.
+const GLOBAL_ONLY: &[&str] =
+    &["forgive_before_correct_pin", "forgive_before_correct_password", "max_concerning_24h", "max_concerning_7d", "max_concerning_total"];
 
 impl Default for Settings {
     fn default() -> Self {
@@ -40,6 +55,11 @@ impl Default for Settings {
             min_pin_length: 4,
             min_letters: 0,
             hash_cost: 5,
+            forgive_before_correct_pin: 45,
+            forgive_before_correct_password: 90,
+            max_concerning_24h: 10,
+            max_concerning_7d: 20,
+            max_concerning_total: 100,
         }
     }
 }
@@ -55,6 +75,11 @@ impl fmt::Debug for Settings {
             .field("min_pin_length", &self.min_pin_length)
             .field("min_letters", &self.min_letters)
             .field("hash_cost", &self.hash_cost)
+            .field("forgive_before_correct_pin", &self.forgive_before_correct_pin)
+            .field("forgive_before_correct_password", &self.forgive_before_correct_password)
+            .field("max_concerning_24h", &self.max_concerning_24h)
+            .field("max_concerning_7d", &self.max_concerning_7d)
+            .field("max_concerning_total", &self.max_concerning_total)
             .finish()
     }
 }
@@ -65,10 +90,13 @@ impl Settings {
     /// allow 50 failures.
     ///
     /// Only a user's own file may set the hash (`may_set_hash`). Anywhere else, one line would give
-    /// every user the same PIN.
+    /// every user the same PIN. The user's own file may not set the budget's settings.
     pub fn apply(&mut self, pairs: &Pairs, source: &str, may_set_hash: bool) -> Result<(), Error> {
         for (key, raw) in pairs {
             let key = key.as_str();
+            if may_set_hash && GLOBAL_ONLY.contains(&key) {
+                return Err(Error::GlobalOnly { file: source.into(), key: key.into() });
+            }
             match key {
                 HASH_KEY if may_set_hash => self.pin_hash.clone_from(raw),
                 HASH_KEY => return Err(Error::HashOutsideUserFile { file: source.into() }),
@@ -79,6 +107,12 @@ impl Settings {
                 "min_pin_length" => self.min_pin_length = in_range(source, key, raw, 1, 64)?,
                 "min_letters" => self.min_letters = in_range(source, key, raw, 0, 64)?,
                 "hash_cost" => self.hash_cost = in_range(source, key, raw, 1, 11)?,
+                "forgive_before_correct_pin" => self.forgive_before_correct_pin = in_range(source, key, raw, 0, 3600)?,
+                "forgive_before_correct_password" => self.forgive_before_correct_password = in_range(source, key, raw, 0, 3600)?,
+                // The budget keeps at most MAX_CONCERNING concerning failures, so no limit may need more.
+                "max_concerning_24h" => self.max_concerning_24h = in_range(source, key, raw, 1, 100)?,
+                "max_concerning_7d" => self.max_concerning_7d = in_range(source, key, raw, 1, 200)?,
+                "max_concerning_total" => self.max_concerning_total = in_range(source, key, raw, 1, 100_000)?,
                 _ => return Err(Error::UnknownSetting { file: source.into(), key: key.into() }),
             }
         }
@@ -170,6 +204,15 @@ mod tests {
         }
         let error = apply("max_failures = 11", false).unwrap_err().to_string();
         assert_eq!(error, "f: max_failures must be a number from 1 to 10, not \"11\"");
+    }
+
+    #[test]
+    fn the_budget_is_set_globally_only() {
+        assert_eq!(apply("max_concerning_24h = 5\nforgive_before_correct_pin = 30\n", false).unwrap().max_concerning_24h, 5);
+        for text in ["max_concerning_24h = 50", "forgive_before_correct_password = 10", "max_concerning_total = 1000"] {
+            assert!(matches!(apply(text, true), Err(Error::GlobalOnly { .. })), "{text}");
+        }
+        assert!(matches!(apply("max_concerning_7d = 201", false), Err(Error::BadValue { .. })));
     }
 
     #[test]

@@ -35,13 +35,13 @@ demo:
     bin="$PWD/target/debug"
     root=$(mktemp -d)
     trap 'rm -rf "$root"' EXIT
-    mkdir "$root/run" && chmod 1770 "$root/run"
+    mkdir "$root/run" "$root/var" && chmod 1770 "$root/run" "$root/var"
     # Stands in for unix_chkpwd: accepts the password "correct horse battery staple".
     printf '#!/bin/bash\nIFS= read -r -d "" p\n[[ $p == "correct horse battery staple" ]]\n' >"$root/unix_chkpwd"
-    printf '#!/bin/sh\nexec %s "$@" --dev-etc %s --dev-run %s --dev-chkpwd %s --dev-log %s\n' \
-        "$bin/properpin-helper" "$root/etc" "$root/run" "$root/unix_chkpwd" "$root/log" >"$root/helper"
+    printf '#!/bin/sh\nexec %s "$@" --dev-etc %s --dev-run %s --dev-budget %s --dev-chkpwd %s --dev-log %s\n' \
+        "$bin/properpin-helper" "$root/etc" "$root/run" "$root/var" "$root/unix_chkpwd" "$root/log" >"$root/helper"
     chmod +x "$root/unix_chkpwd" "$root/helper"
-    properpin() { "$bin/properpin" --etc "$root/etc" --helper "$root/helper" --owner "$(id -u)" --group "$(id -g)" "$@"; }
+    properpin() { "$bin/properpin" --etc "$root/etc" --budget "$root/var" --helper "$root/helper" --owner "$(id -u)" --group "$(id -g)" "$@"; }
     step() { printf '\n\033[1m%s\033[0m\n' "$*"; }
     said() { tail -n 1 "$root/log"; }
     lock_screen() { step "lock screen: $1"; echo -n "$1" | "$root/helper" check || true; said; }

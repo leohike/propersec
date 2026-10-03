@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use nix::fcntl::{Flock, FlockArg};
 use nix::libc::O_NOFOLLOW;
-use properpin_core::{Error, HASH_KEY, MAX_FILE_BYTES, PinState, Settings, Store, kv};
+use properpin_core::{Budget, Error, HASH_KEY, MAX_FILE_BYTES, PinState, Settings, Store, kv};
 
 use crate::system;
 
@@ -23,26 +23,32 @@ const LOCK_TIMEOUT: Duration = Duration::from_secs(1);
 /// <run_dir>/                 every user's state                   owner:<helper group> 1770
 /// <run_dir>/<uid>.state      a PinState                           <uid>:<helper group> 0600
 /// <run_dir>/<uid>.lock       serialises concurrent attempts       <uid>:<helper group> 0600
+/// <budget_dir>/              every user's budget, on disk         owner:<helper group> 1770
+/// <budget_dir>/<uid>.budget  a Budget                             <uid>:<helper group> 0600
 /// ```
 ///
 /// The settings and the hash must belong to `etc_owner`, so nobody else can change them: root once
 /// installed, the test's own uid in tests. The state lives in one directory for all users, which
 /// only the helper's group can enter, so a user can neither read nor reset their counts. The
 /// directory is sticky, and each user's state and lock files must belong to that user, so one
-/// user's run of the helper can't read, replace or plant another's. `properpin set` and `remove`
-/// need only the `etc` side; [`UserFiles::with_runtime`] adds the state, which only the helper uses.
+/// user's run of the helper can't read, replace or plant another's. The budget follows the same
+/// rules in a directory on disk, so it survives a reboot; the run directory's lock covers it.
+/// `properpin set` and `remove` need the `etc` side and the budget; [`UserFiles::with_runtime`]
+/// adds the state, which only the helper uses.
 #[derive(Debug, Clone)]
 pub struct UserFiles {
     etc: PathBuf,
     etc_owner: u32,
-    runtime: Option<Runtime>,
+    runtime: Option<SharedDir>,
+    budget: Option<SharedDir>,
     user: String,
     uid: u32,
 }
 
+/// A directory every user's files share: owned by `owner`, with the helper's `group`.
 #[derive(Debug, Clone)]
-struct Runtime {
-    dir: PathBuf,
+struct SharedDir {
+    path: PathBuf,
     owner: u32,
     group: u32,
 }
@@ -52,12 +58,17 @@ impl UserFiles {
         if user.is_empty() || user.contains('/') || user == "." || user == ".." {
             return Err(Error::System(format!("{user:?} is not a usable user name")));
         }
-        Ok(Self { etc: etc.into(), etc_owner, runtime: None, user: user.into(), uid })
+        Ok(Self { etc: etc.into(), etc_owner, runtime: None, budget: None, user: user.into(), uid })
     }
 
     /// The same files, plus the per-boot state in `dir`, which must belong to `owner` and `group`.
     pub fn with_runtime(self, dir: impl Into<PathBuf>, owner: u32, group: u32) -> Self {
-        Self { runtime: Some(Runtime { dir: dir.into(), owner, group }), ..self }
+        Self { runtime: Some(SharedDir { path: dir.into(), owner, group }), ..self }
+    }
+
+    /// The same files, plus the budget in `dir`, which must belong to `owner` and `group`.
+    pub fn with_budget(self, dir: impl Into<PathBuf>, owner: u32, group: u32) -> Self {
+        Self { budget: Some(SharedDir { path: dir.into(), owner, group }), ..self }
     }
 
     pub fn user(&self) -> &str {
@@ -76,16 +87,16 @@ impl UserFiles {
         self.etc.join("users").join(&self.user)
     }
 
-    fn runtime(&self) -> Result<&Runtime, Error> {
-        self.runtime.as_ref().ok_or_else(|| Error::System("no runtime directory: only the helper keeps state".into()))
-    }
-
     pub fn state_file(&self) -> Option<PathBuf> {
-        Some(self.runtime.as_ref()?.dir.join(format!("{}.state", self.uid)))
+        Some(self.runtime.as_ref()?.path.join(format!("{}.state", self.uid)))
     }
 
     pub fn lock_file(&self) -> Option<PathBuf> {
-        Some(self.runtime.as_ref()?.dir.join(format!("{}.lock", self.uid)))
+        Some(self.runtime.as_ref()?.path.join(format!("{}.lock", self.uid)))
+    }
+
+    pub fn budget_file(&self) -> Option<PathBuf> {
+        Some(self.budget.as_ref()?.path.join(format!("{}.budget", self.uid)))
     }
 
     // --- the owner's side: settings and hash
@@ -145,30 +156,50 @@ impl UserFiles {
         }
     }
 
-    // --- the helper's side: per-boot state
-
-    /// Refuse a runtime directory that isn't exactly as installed: a directory, not a symlink,
-    /// owned by the owner and the helper's group, mode 1770. Without the group's write bit the
-    /// helper can't keep state; without the sticky bit one user's run could delete or replace
-    /// another's files; any bit for others would let users in.
-    fn trusted_run_dir(&self) -> Result<&Path, Error> {
-        let runtime = self.runtime()?;
-        let info = fs::symlink_metadata(&runtime.dir).map_err(|error| system(runtime.dir.display(), error))?;
-        let refuse = |why: String| Err(Error::System(format!("run directory {}: {why}", runtime.dir.display())));
-        if !info.is_dir() {
-            return refuse("not a directory".into());
+    /// Start the budget over: `set` gives a new PIN a fresh one, and `remove` leaves none behind.
+    /// Root can delete it whoever owns it, which also clears a budget planted in the user's name.
+    pub fn remove_budget(&self) -> Result<bool, Error> {
+        let path = self.trusted_budget_dir()?.join(format!("{}.budget", self.uid));
+        match fs::remove_file(&path) {
+            Ok(()) => Ok(true),
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(system(path.display(), error)),
         }
-        if info.uid() != runtime.owner {
-            return refuse(format!("owned by uid {}, not {}", info.uid(), runtime.owner));
-        }
-        if info.gid() != runtime.group {
-            return refuse(format!("group {}, not {}", info.gid(), runtime.group));
-        }
-        if info.mode() & 0o7777 != 0o1770 {
-            return refuse(format!("mode {:04o}, not 1770", info.mode() & 0o7777));
-        }
-        Ok(&runtime.dir)
     }
+
+    // --- the helper's side: per-boot state, and the budget
+
+    fn trusted_run_dir(&self) -> Result<&Path, Error> {
+        let runtime = self.runtime.as_ref().ok_or_else(|| Error::System("no runtime directory: only the helper keeps state".into()))?;
+        trusted_dir(runtime, "run directory")
+    }
+
+    fn trusted_budget_dir(&self) -> Result<&Path, Error> {
+        let budget = self.budget.as_ref().ok_or_else(|| Error::System("no budget directory given".into()))?;
+        trusted_dir(budget, "budget directory")
+    }
+}
+
+/// Refuse a shared directory that isn't exactly as installed: a directory, not a symlink, owned by
+/// the owner and the helper's group, mode 1770. Without the group's write bit the helper can't
+/// keep its files; without the sticky bit one user's run could delete or replace another's files;
+/// any bit for others would let users in.
+fn trusted_dir<'a>(dir: &'a SharedDir, what: &str) -> Result<&'a Path, Error> {
+    let info = fs::symlink_metadata(&dir.path).map_err(|error| system(dir.path.display(), error))?;
+    let refuse = |why: String| Err(Error::System(format!("{what} {}: {why}", dir.path.display())));
+    if !info.is_dir() {
+        return refuse("not a directory".into());
+    }
+    if info.uid() != dir.owner {
+        return refuse(format!("owned by uid {}, not {}", info.uid(), dir.owner));
+    }
+    if info.gid() != dir.group {
+        return refuse(format!("group {}, not {}", info.gid(), dir.group));
+    }
+    if info.mode() & 0o7777 != 0o1770 {
+        return refuse(format!("mode {:04o}, not 1770", info.mode() & 0o7777));
+    }
+    Ok(&dir.path)
 }
 
 impl Store for UserFiles {
@@ -226,6 +257,42 @@ impl Store for UserFiles {
         };
         write().map_err(|error| system(path.display(), error))
     }
+
+    /// The budget must be the user's own and private, like the state; unlike the state, a budget
+    /// that isn't is an error, never an empty budget.
+    fn load_budget(&self) -> Result<Budget, Error> {
+        let path = self.trusted_budget_dir()?.join(format!("{}.budget", self.uid));
+        let (info, text) = match read_regular_file(&path) {
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Budget::default()),
+            result => result.map_err(|error| system(path.display(), error))?,
+        };
+        let refuse = |why: &str| Err(Error::System(format!("{}: {why}; sudo properpin set starts it over", path.display())));
+        if info.uid() != self.uid {
+            return refuse(&format!("owned by uid {}, not {}", info.uid(), self.uid));
+        }
+        if info.mode() & 0o077 != 0 {
+            return refuse("open to its group or others");
+        }
+        Budget::parse(&text).map_or_else(|| refuse("not a valid budget"), Ok)
+    }
+
+    /// Written for the user and the helper's group whoever writes it: the helper, as the user, or
+    /// `properpin enable`, as root. Synced, file and directory, since it must survive a power cut.
+    fn save_budget(&self, budget: &Budget) -> Result<(), Error> {
+        let dir = self.trusted_budget_dir()?;
+        let group = self.budget.as_ref().expect("checked by trusted_budget_dir").group;
+        let path = dir.join(format!("{}.budget", self.uid));
+        let write = || -> std::io::Result<()> {
+            let mut file = tempfile::Builder::new().prefix(&format!(".{}.", self.uid)).tempfile_in(dir)?;
+            fchown(file.as_file(), Some(self.uid), Some(group))?;
+            file.as_file().set_permissions(Permissions::from_mode(0o600))?;
+            file.write_all(budget.format().as_bytes())?;
+            file.as_file().sync_all()?;
+            file.persist(&path)?;
+            File::open(dir)?.sync_all()
+        };
+        write().map_err(|error| system(path.display(), error))
+    }
 }
 
 /// The metadata and text of `path`, which must be a regular file and not a symlink. Both come from
@@ -251,7 +318,7 @@ mod tests {
     use super::*;
     use crate::{current_egid, current_uid};
 
-    /// A scratch `etc` and `run` owned by whoever runs the tests.
+    /// A scratch `etc`, `run` and `var` owned by whoever runs the tests.
     struct Scratch {
         _dir: tempfile::TempDir,
         files: UserFiles,
@@ -260,11 +327,15 @@ mod tests {
     fn scratch() -> Scratch {
         let dir = tempfile::tempdir().unwrap();
         let uid = current_uid();
-        let run_dir = dir.path().join("run");
-        fs::create_dir(&run_dir).unwrap();
-        // Set explicitly: the umask would strip the group's write bit from a mkdir mode.
-        fs::set_permissions(&run_dir, Permissions::from_mode(0o1770)).unwrap();
-        let files = UserFiles::new(dir.path().join("etc"), uid, "tester", uid).unwrap().with_runtime(run_dir, uid, current_egid());
+        for shared in ["run", "var"] {
+            fs::create_dir(dir.path().join(shared)).unwrap();
+            // Set explicitly: the umask would strip the group's write bit from a mkdir mode.
+            fs::set_permissions(dir.path().join(shared), Permissions::from_mode(0o1770)).unwrap();
+        }
+        let files = UserFiles::new(dir.path().join("etc"), uid, "tester", uid)
+            .unwrap()
+            .with_runtime(dir.path().join("run"), uid, current_egid())
+            .with_budget(dir.path().join("var"), uid, current_egid());
         Scratch { _dir: dir, files }
     }
 
@@ -344,9 +415,9 @@ mod tests {
     fn a_run_dir_with_another_owner_or_group_is_refused() {
         let Scratch { files, .. } = &scratch();
         let runtime = files.runtime.clone().unwrap();
-        let theirs = files.clone().with_runtime(&runtime.dir, runtime.owner + 1, runtime.group);
+        let theirs = files.clone().with_runtime(&runtime.path, runtime.owner + 1, runtime.group);
         assert!(theirs.lock().unwrap_err().to_string().contains("owned by uid"));
-        let theirs = files.clone().with_runtime(&runtime.dir, runtime.owner, runtime.group + 1);
+        let theirs = files.clone().with_runtime(&runtime.path, runtime.owner, runtime.group + 1);
         assert!(theirs.lock().unwrap_err().to_string().contains(&format!("group {}, not {}", runtime.group, runtime.group + 1)));
     }
 
@@ -355,7 +426,7 @@ mod tests {
         let Scratch { files, _dir } = &scratch();
         let runtime = files.runtime.clone().unwrap();
         let link = _dir.path().join("link");
-        symlink(&runtime.dir, &link).unwrap();
+        symlink(&runtime.path, &link).unwrap();
         let linked = files.clone().with_runtime(link, runtime.owner, runtime.group);
         assert!(linked.lock().unwrap_err().to_string().contains("not a directory"));
     }
@@ -367,7 +438,7 @@ mod tests {
         let Scratch { files, .. } = &scratch();
         let runtime = files.runtime.clone().unwrap();
         let victim = UserFiles::new(files.etc.clone(), files.etc_owner, "victim", files.uid + 1).unwrap().with_runtime(
-            &runtime.dir,
+            &runtime.path,
             runtime.owner,
             runtime.group,
         );
@@ -380,7 +451,7 @@ mod tests {
         let Scratch { files, .. } = &scratch();
         let runtime = files.runtime.clone().unwrap();
         let victim = UserFiles::new(files.etc.clone(), files.etc_owner, "victim", files.uid + 1).unwrap().with_runtime(
-            &runtime.dir,
+            &runtime.path,
             runtime.owner,
             runtime.group,
         );
@@ -401,7 +472,7 @@ mod tests {
         let Scratch { files, .. } = &scratch();
         let runtime = files.runtime.clone().unwrap();
         let other = UserFiles::new(files.etc.clone(), files.etc_owner, "other", files.uid + 1).unwrap().with_runtime(
-            runtime.dir,
+            runtime.path,
             runtime.owner,
             runtime.group,
         );
@@ -409,6 +480,49 @@ mod tests {
         files.save_state(&state).unwrap();
         assert_eq!(other.load_state(), None);
         assert_ne!(files.state_file(), other.state_file());
+    }
+
+    #[test]
+    fn the_budget_round_trips_and_starts_empty() {
+        let Scratch { files, .. } = &scratch();
+        assert_eq!(files.load_budget().unwrap(), Budget::default());
+        let budget = Budget { pending: vec![1], concerning: vec![2], total: 3, disabled: None };
+        files.save_budget(&budget).unwrap();
+        assert_eq!(files.load_budget().unwrap(), budget);
+        assert_eq!(fs::metadata(files.budget_file().unwrap()).unwrap().mode() & 0o7777, 0o600);
+        assert!(files.remove_budget().unwrap());
+        assert!(!files.remove_budget().unwrap());
+        assert_eq!(files.load_budget().unwrap(), Budget::default());
+    }
+
+    #[test]
+    fn a_budget_that_cannot_be_trusted_is_an_error_not_an_empty_budget() {
+        let Scratch { files, .. } = &scratch();
+        let path = files.budget_file().unwrap();
+        write(&path, "garbage\n", 0o600);
+        assert!(files.load_budget().unwrap_err().to_string().contains("sudo properpin set starts it over"));
+        write(&path, &Budget::default().format(), 0o640);
+        assert!(files.load_budget().unwrap_err().to_string().contains("open to its group or others"));
+        // Planted in another user's name: the test's own file stands in for the planted one.
+        write(&path, &Budget::default().format(), 0o600);
+        let budget = files.budget.clone().unwrap();
+        let victim = UserFiles::new(files.etc.clone(), files.etc_owner, "victim", files.uid + 1).unwrap().with_budget(
+            &budget.path,
+            budget.owner,
+            budget.group,
+        );
+        fs::rename(&path, victim.budget_file().unwrap()).unwrap();
+        assert!(victim.load_budget().unwrap_err().to_string().contains(&format!("owned by uid {}, not {}", files.uid, files.uid + 1)));
+    }
+
+    #[test]
+    fn the_budget_directory_is_checked_like_the_run_directory() {
+        let Scratch { files, .. } = &scratch();
+        let dir = files.budget.clone().unwrap().path;
+        fs::set_permissions(&dir, Permissions::from_mode(0o777)).unwrap();
+        assert!(files.load_budget().unwrap_err().to_string().contains("budget directory"));
+        assert!(files.save_budget(&Budget::default()).is_err());
+        assert!(files.remove_budget().is_err());
     }
 
     #[test]

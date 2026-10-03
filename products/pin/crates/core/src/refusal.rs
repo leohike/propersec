@@ -1,5 +1,7 @@
 use std::fmt;
 
+use crate::Limit;
+
 /// Why the PIN is refused without being checked. Every one means "the password is required".
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Refusal {
@@ -13,6 +15,8 @@ pub enum Refusal {
     Expired { age: u64 },
     /// Too many failures in a row since the PIN was armed or last used.
     TooManyFailures { failures: u32 },
+    /// Too many concerning failures: disabled until root turns it back on or sets a new PIN.
+    Disabled(Limit),
 }
 
 impl fmt::Display for Refusal {
@@ -23,6 +27,7 @@ impl fmt::Display for Refusal {
             Self::ArmedInFuture => write!(f, "the arming time is in the future"),
             Self::Expired { age } => write!(f, "the last password unlock was {} ago", describe_seconds(*age)),
             Self::TooManyFailures { failures } => write!(f, "{failures} failures in a row"),
+            Self::Disabled(limit) => write!(f, "the PIN is disabled after {limit}"),
         }
     }
 }

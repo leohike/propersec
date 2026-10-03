@@ -32,7 +32,7 @@ A brief for adding GitHub Actions CI to propersec, written so an agent (or a per
   - `podman build --quiet --ignorefile products/pin/testing/podman/Containerfile.containerignore -f products/pin/testing/podman/Containerfile -t properpin-systest .`
   - `podman run --rm --network=none properpin-systest`
 
-  Inside the container it runs its scenarios (28 as of the setgid helper) as root: it installs properpin with `install.sh`, listens on `/dev/log`, and runs attempts through the setuid `unix_chkpwd`. The Containerfile uses `RUN --mount=type=cache`, which needs a buildah/podman recent enough to support it.
+  Inside the container it runs its scenarios (33 as of the failure budget) as root: it installs properpin with `install.sh`, listens on `/dev/log`, and runs attempts through the setuid `unix_chkpwd`. The Containerfile uses `RUN --mount=type=cache`, which needs a buildah/podman recent enough to support it.
 - **Read first:** `CLAUDE.md`, the root `Cargo.toml`, `products/pin/properpin.just`, `products/pin/docs/README.md`, `products/pin/testing/podman/Containerfile`, and `docs/plan.md`.
 
 ## What CI should do

@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use assert_cmd::Command;
+use properpin_core::{Budget, Disabled, Limit};
 use properpin_sys::current_uid;
 
 const PASSWORD: &str = "correct horse battery staple";
@@ -18,13 +19,15 @@ impl Sandbox {
     fn new() -> Self {
         let sandbox = Self(tempfile::tempdir().unwrap());
         let root = sandbox.0.path();
-        fs::create_dir(root.join("run")).unwrap();
-        // Set explicitly: the umask would strip the group's write bit from a mkdir mode.
-        fs::set_permissions(root.join("run"), Permissions::from_mode(0o1770)).unwrap();
+        for shared in ["run", "var"] {
+            fs::create_dir(root.join(shared)).unwrap();
+            // Set explicitly: the umask would strip the group's write bit from a mkdir mode.
+            fs::set_permissions(root.join(shared), Permissions::from_mode(0o1770)).unwrap();
+        }
         let chkpwd = format!("#!/bin/bash\nIFS= read -r -d '' password\n[[ $password == '{PASSWORD}' ]]\n");
         script(&root.join("unix_chkpwd"), &chkpwd);
         let helper = format!(
-            "#!/bin/sh\nexec {} \"$@\" --dev-etc {root}/etc --dev-run {root}/run --dev-chkpwd {root}/unix_chkpwd --dev-log {root}/log\n",
+            "#!/bin/sh\nexec {} \"$@\" --dev-etc {root}/etc --dev-run {root}/run --dev-budget {root}/var --dev-chkpwd {root}/unix_chkpwd --dev-log {root}/log\n",
             built_helper().display(),
             root = root.display()
         );
@@ -39,14 +42,19 @@ impl Sandbox {
             .env_remove("SUDO_USER")
             .env_remove("PKEXEC_UID")
             .args(["--etc", root.join("etc").to_str().unwrap(), "--helper", root.join("helper").to_str().unwrap()])
+            .args(["--budget", root.join("var").to_str().unwrap()])
             .args(["--owner", &current_uid().to_string(), "--group", &helper_gid().to_string()])
             .args(args)
             .write_stdin(stdin)
             .assert()
     }
 
-    /// What the lock screen's arm line does after a correct password.
+    /// What the lock screen's arm line does after a correct password. It must arm the PIN.
     fn arm(&self) {
+        assert!(self.try_arm(), "the password didn't arm the PIN");
+    }
+
+    fn try_arm(&self) -> bool {
         let status = std::process::Command::new(self.0.path().join("helper"))
             .arg("arm")
             .stdin(std::process::Stdio::piped())
@@ -56,7 +64,14 @@ impl Sandbox {
                 child.wait()
             })
             .unwrap();
-        assert!(status.success());
+        status.success()
+    }
+
+    /// Replace the user's budget with `budget`, the way the helper would have written it.
+    fn write_budget(&self, budget: &Budget) {
+        let path = self.0.path().join(format!("var/{}.budget", current_uid()));
+        fs::write(&path, budget.format()).unwrap();
+        fs::set_permissions(&path, Permissions::from_mode(0o600)).unwrap();
     }
 
     fn user_files(&self) -> Vec<PathBuf> {
@@ -142,13 +157,46 @@ fn set_needs_the_helper_group_to_exist() {
     let sandbox = Sandbox::new();
     let assert = Command::cargo_bin("properpin")
         .unwrap()
-        .args(["--etc", sandbox.0.path().join("etc").to_str().unwrap(), "--helper", "/nonexistent"])
+        .args(["--etc", sandbox.0.path().join("etc").to_str().unwrap(), "--helper", "/nonexistent", "--budget", "/nonexistent"])
         .args(["--owner", &current_uid().to_string(), "--group", "no-such-group-properpin", "set"])
         .write_stdin("4859\n4859\n")
         .assert()
         .failure();
     says(&assert, "no group named");
     assert!(sandbox.user_files().is_empty());
+}
+
+/// A PIN disabled by its budget: `enable` brings the same PIN back, until the total since it was
+/// set reaches its limit; then only `set` does, and starts the budget over.
+#[test]
+fn enable_and_set_bring_a_disabled_pin_back() {
+    let sandbox = Sandbox::new();
+    says(&sandbox.properpin(&["enable"], "").failure(), "no PIN is set");
+    sandbox.properpin(&["set"], "4859\n4859\n").success();
+    let disabled = Some(Disabled { limit: Limit::Day(10), at: 1_800_000_000 });
+    sandbox.write_budget(&Budget { concerning: vec![1_800_000_000], total: 10, disabled, ..Budget::default() });
+    assert!(!sandbox.try_arm(), "a disabled PIN is never armed");
+    says(&sandbox.properpin(&["status"], "").success(), "the PIN is disabled after 10 concerning failures within 24 hours");
+
+    says(&sandbox.properpin(&["enable"], "").success(), "PIN enabled again");
+    sandbox.arm();
+    let status = stdout(&sandbox.properpin(&["status"], "").success());
+    assert!(status.contains("PIN armed for another") && status.contains("10 since the PIN was set (of 100)"), "{status}");
+    says(&sandbox.properpin(&["enable"], "").success(), "wasn't disabled");
+
+    sandbox.write_budget(&Budget {
+        total: 100,
+        disabled: Some(Disabled { limit: Limit::Total(100), at: 1_800_000_000 }),
+        ..Budget::default()
+    });
+    says(&sandbox.properpin(&["enable"], "").failure(), "choose a new one with: properpin set");
+    sandbox.properpin(&["set"], "4860\n4860\n").success();
+    sandbox.arm();
+    let status = stdout(&sandbox.properpin(&["status"], "").success());
+    assert!(status.contains("PIN armed for another") && status.contains("0 since the PIN was set"), "{status}");
+
+    sandbox.properpin(&["remove"], "").success();
+    assert!(!sandbox.0.path().join(format!("var/{}.budget", current_uid())).exists(), "remove leaves no budget behind");
 }
 
 #[test]

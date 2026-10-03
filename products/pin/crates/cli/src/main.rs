@@ -1,12 +1,13 @@
 //! `properpin`: manage the PIN that unlocks the KDE lock screen.
 //!
 //! ```text
-//! sudo properpin set      choose a new PIN, typed twice
+//! sudo properpin set      choose a new PIN, typed twice; starts its budget of failures over
+//! sudo properpin enable   turn a PIN disabled by too many concerning failures back on
 //! sudo properpin remove   delete it; the lock screen takes the password only
 //! properpin status        your PIN: what is set, which rules apply, and whether it is armed now
 //! ```
 //!
-//! `set` and `remove` change files only root may change, so they run under sudo or pkexec, and
+//! `set`, `enable` and `remove` change files only root may change, so they run under sudo or pkexec, and
 //! getting there takes the password. That's the point: someone at an unlocked desk must not be able
 //! to plant a PIN they know. The PIN is read from the terminal, or from stdin when it isn't one,
 //! never from the command line, where other users could see it in the process list.
@@ -22,8 +23,8 @@ use std::process::{Command, ExitCode, Stdio};
 
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
-use properpin_core::{MAX_PIN_BYTES, Secret, Store, exit};
-use properpin_sys::{Account, UserFiles, Yescrypt, current_euid, current_uid, group_by_name};
+use properpin_core::{Clock, MAX_PIN_BYTES, Secret, Store, exit};
+use properpin_sys::{Account, BootClock, UserFiles, Yescrypt, current_euid, current_uid, group_by_name};
 
 /// Manage the PIN that unlocks the KDE lock screen.
 #[derive(Debug, Parser)]
@@ -32,10 +33,13 @@ struct Cli {
     /// Where config and users/ live; /etc/properpin once installed
     #[arg(long, value_name = "DIR")]
     etc: PathBuf,
+    /// Where each user's budget of failures lives; /var/lib/properpin once installed
+    #[arg(long, value_name = "DIR")]
+    budget: PathBuf,
     /// The setgid helper, which status asks; /usr/local/libexec/properpin/properpin-helper once installed
     #[arg(long, value_name = "PATH")]
     helper: PathBuf,
-    /// Who must own the files under --etc
+    /// Who must own the files under --etc, and the --budget directory
     #[arg(long, value_name = "UID", default_value_t = 0)]
     owner: u32,
     /// The helper's group, the only one that may read hash files
@@ -47,8 +51,10 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Action {
-    /// Choose a new PIN, typed twice
+    /// Choose a new PIN, typed twice; starts its budget of failures over
     Set(Target),
+    /// Turn a PIN disabled by too many concerning failures back on, keeping it
+    Enable(Target),
     /// Delete the PIN; the lock screen takes the password only
     Remove(Target),
     /// Show your PIN: what is set and whether it is armed right now
@@ -78,6 +84,7 @@ fn main() -> ExitCode {
 fn run(cli: &Cli) -> Result<bool> {
     match &cli.command {
         Action::Set(target) => set(cli, &target_account(target)?)?,
+        Action::Enable(target) => enable(cli, &target_account(target)?)?,
         Action::Remove(target) => remove(cli, &target_account(target)?)?,
         Action::Status => return status(cli),
     }
@@ -85,7 +92,8 @@ fn run(cli: &Cli) -> Result<bool> {
 }
 
 fn files(cli: &Cli, account: &Account) -> Result<UserFiles> {
-    Ok(UserFiles::new(&cli.etc, cli.owner, &account.name, account.uid)?)
+    let group = group_by_name(&cli.group)?;
+    Ok(UserFiles::new(&cli.etc, cli.owner, &account.name, account.uid)?.with_budget(&cli.budget, cli.owner, group))
 }
 
 /// Whose PIN: the one named, else whoever called sudo or pkexec, else whoever runs this.
@@ -115,15 +123,47 @@ fn set(cli: &Cli, account: &Account) -> Result<()> {
     }
     // Only the hash changes. Per-user settings already in the file are kept.
     files.save_pin_hash(&Yescrypt.hash(pin, settings.hash_cost)?, group)?;
+    // A new PIN, so no failure against the old one counts any more, and nothing stays disabled.
+    files.remove_budget()?;
     println!("PIN set for {}. It works after the next password unlock at the lock screen.", account.name);
+    Ok(())
+}
+
+/// The same PIN back on, with its recent failures forgotten. The total since it was set is kept,
+/// so its limit still holds: once reached, only a new PIN will do.
+fn enable(cli: &Cli, account: &Account) -> Result<()> {
+    require_owner(cli.owner)?;
+    let files = files(cli, account)?;
+    let settings = files.settings()?;
+    if settings.pin_hash.is_empty() {
+        bail!("no PIN is set for {}", account.name);
+    }
+    let mut budget = files.load_budget()?;
+    let judged = budget.judge(BootClock.wall()?, &settings);
+    if budget.total >= settings.max_concerning_total {
+        bail!(
+            "{} concerning failures since this PIN was set, and {} are allowed; choose a new one with: properpin set",
+            budget.total,
+            settings.max_concerning_total
+        );
+    }
+    let was = judged.disabled;
+    files.save_budget(&budget.enabled())?;
+    match was {
+        Some(limit) => println!("PIN enabled again for {}; it was disabled after {limit}.", account.name),
+        None => println!("The PIN for {} wasn't disabled; its recent failures are forgotten.", account.name),
+    }
+    println!("It works after the next password unlock at the lock screen.");
     Ok(())
 }
 
 fn remove(cli: &Cli, account: &Account) -> Result<()> {
     require_owner(cli.owner)?;
-    if !files(cli, account)?.remove_pin()? {
+    let files = files(cli, account)?;
+    if !files.remove_pin()? {
         bail!("no PIN is set for {}", account.name);
     }
+    files.remove_budget()?;
     println!("PIN removed for {}. The lock screen takes the password only.", account.name);
     Ok(())
 }

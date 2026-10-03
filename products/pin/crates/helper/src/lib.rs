@@ -29,7 +29,7 @@
 use std::io::Read;
 use std::path::PathBuf;
 
-use properpin_core::{Clock, Error, Hasher, Log, MAX_INPUT_BYTES, Secret, Store, arm, check, describe_seconds, exit, usable_input};
+use properpin_core::{Clock, Error, Hasher, Judged, Log, MAX_INPUT_BYTES, Refusal, Secret, Store, arm, check, describe_seconds, exit};
 use properpin_sys::{Account, UserFiles};
 
 mod chkpwd;
@@ -74,12 +74,15 @@ pub struct Places {
     /// The group `run_dir` must have: the one the helper runs with, so a helper installed without
     /// its setgid bit runs with the caller's group and refuses.
     pub run_group: u32,
+    /// `/var/lib/properpin` once installed: every user's budget, on disk. Same owner and group as
+    /// `run_dir`.
+    pub budget_dir: PathBuf,
 }
 
 impl Places {
     fn files(&self, caller: &Account) -> Result<UserFiles, Error> {
         let files = UserFiles::new(&self.etc, self.etc_owner, &caller.name, caller.uid)?;
-        Ok(files.with_runtime(&self.run_dir, self.run_owner, self.run_group))
+        Ok(files.with_runtime(&self.run_dir, self.run_owner, self.run_group).with_budget(&self.budget_dir, self.run_owner, self.run_group))
     }
 }
 
@@ -155,14 +158,22 @@ fn check_pin<H: Hasher, C: Clock, P, L: Log + ?Sized>(
     typed: &Secret,
     context: &Context<'_, H, C, P, L>,
 ) -> Result<Reply, Error> {
-    let verdict = check(files, context.hasher, context.clock, usable_input(typed.as_bytes()))?;
-    context.log.log(&format!("{}: {verdict}", caller.name));
-    Ok(Reply::code(if verdict.unlocks() { exit::YES } else { exit::NO }))
+    let outcome = check(files, context.hasher, context.clock, typed.as_bytes())?;
+    log_judged(&outcome.judged, caller, context.log);
+    context.log.log(&format!("{}: {}", caller.name, outcome.verdict));
+    Ok(Reply::code(if outcome.verdict.unlocks() { exit::YES } else { exit::NO }))
+}
+
+fn log_judged<L: Log + ?Sized>(judged: &Judged, caller: &Account, log: &L) {
+    for note in judged.notes() {
+        log.log(&format!("{}: {note}", caller.name));
+    }
 }
 
 /// Arm the PIN, but only for the right password: `arm` is open to everything the user runs, so
-/// without this check any program could arm the PIN at will and reset the failures as often as it
-/// liked. `unix_chkpwd` checks it, as pam_unix just did.
+/// without this check any program could arm the PIN at will, reset the failures in a row, and
+/// forgive the budget's failures as often as it liked. `unix_chkpwd` checks it, as pam_unix just
+/// did.
 fn arm_pin<H, C: Clock, P: PasswordCheck, L: Log + ?Sized>(
     files: &UserFiles,
     caller: &Account,
@@ -177,7 +188,12 @@ fn arm_pin<H, C: Clock, P: PasswordCheck, L: Log + ?Sized>(
         context.log.log(&format!("{}: the password was not accepted, PIN not armed", caller.name));
         return Ok(Reply::code(exit::NO));
     }
-    arm(files, context.clock)?;
+    let judged = arm(files, context.clock)?;
+    log_judged(&judged, caller, context.log);
+    if let Some(limit) = judged.disabled {
+        context.log.log(&format!("{}: password accepted, PIN not armed: disabled after {limit}", caller.name));
+        return Ok(Reply::code(exit::NO));
+    }
     context.log.log(&format!("{}: password accepted, PIN armed", caller.name));
     Ok(Reply::code(exit::YES))
 }
@@ -200,9 +216,31 @@ fn status(files: &UserFiles, clock: &impl Clock) -> Result<String, Error> {
         rules += &format!(", {} English letters", settings.min_letters);
     }
     out += &format!("set rules  {rules}, yescrypt cost {}\n", settings.hash_cost);
+    // Judged as the next attempt would, without saving: status changes nothing.
+    let mut budget = files.load_budget()?;
+    let judged = budget.judge(clock.wall()?, &settings);
+    let counts = judged.counts;
+    out += &format!(
+        "budget     concerning failures: {} within 24 hours (of {}), {} within 7 days (of {}), {} since the PIN was set (of {}); \
+         {} waiting to be forgiven\n",
+        counts.day,
+        settings.max_concerning_24h,
+        counts.week,
+        settings.max_concerning_7d,
+        counts.total,
+        settings.max_concerning_total,
+        counts.pending
+    );
     let state = files.load_state();
     let now = clock.now()?;
-    match (settings.refusal(state.as_ref(), &clock.boot_id()?, now), state) {
+    let refusal = match judged.disabled {
+        Some(limit) => Some(Refusal::Disabled(limit)),
+        None => settings.refusal(state.as_ref(), &clock.boot_id()?, now),
+    };
+    match (refusal, state) {
+        (Some(refusal @ Refusal::Disabled(_)), _) => {
+            out += &format!("right now  password required: {refusal}; sudo properpin enable or set turns it back on\n")
+        }
         (Some(refusal), _) => out += &format!("right now  password required: {refusal}\n"),
         (None, Some(state)) => {
             let left = (settings.expiry_seconds() as u64).saturating_sub(now - state.armed_at);
@@ -267,9 +305,12 @@ mod tests {
             run_dir: dir.path().join("run"),
             run_owner: uid,
             run_group: current_egid(),
+            budget_dir: dir.path().join("var"),
         };
-        fs::create_dir(&places.run_dir).unwrap();
-        fs::set_permissions(&places.run_dir, Permissions::from_mode(0o1770)).unwrap();
+        for shared in [&places.run_dir, &places.budget_dir] {
+            fs::create_dir(shared).unwrap();
+            fs::set_permissions(shared, Permissions::from_mode(0o1770)).unwrap();
+        }
         // alice is whoever runs the tests: her counts files must be her own, and they are the test's.
         let caller = Account { name: "alice".into(), uid, gid: current_egid() };
         let sandbox = Sandbox { _dir: dir, places, caller };
@@ -290,10 +331,37 @@ mod tests {
         }
 
         fn ask_as(&self, caller: &Account, request: Request, typed: &str) -> (u8, String, String) {
+            self.ask_with(&BootClock, caller, request, typed)
+        }
+
+        fn ask_with(&self, clock: &impl Clock, caller: &Account, request: Request, typed: &str) -> (u8, String, String) {
             let log = Lines::default();
-            let context = Context { places: &self.places, hasher: &Yescrypt, clock: &BootClock, password: &Password, log: &log };
+            let context = Context { places: &self.places, hasher: &Yescrypt, clock, password: &Password, log: &log };
             let reply = serve(request, caller, &Secret::new(typed.as_bytes().to_vec()), &context);
             (reply.code, reply.output, log.0.into_inner().join("\n"))
+        }
+
+        fn write_config(&self, text: &str) {
+            let path = self.places.etc.join("config");
+            fs::write(&path, text).unwrap();
+            fs::set_permissions(&path, Permissions::from_mode(0o644)).unwrap();
+        }
+    }
+
+    /// The real boot clock, with the wall clock moved on by `ahead` seconds.
+    struct Later {
+        ahead: u64,
+    }
+
+    impl Clock for Later {
+        fn boot_id(&self) -> Result<String, Error> {
+            BootClock.boot_id()
+        }
+        fn now(&self) -> Result<u64, Error> {
+            BootClock.now()
+        }
+        fn wall(&self) -> Result<u64, Error> {
+            Ok(BootClock.wall()? + self.ahead)
         }
     }
 
@@ -433,6 +501,62 @@ mod tests {
         assert!(sandbox.ask(Request::Status, "").1.contains("none set"));
     }
 
+    /// Guesses nobody forgives, a wrong password included, are judged later, logged, and disable
+    /// the PIN; the password then no longer arms it.
+    #[test]
+    fn concerning_failures_are_logged_and_disable_the_pin() {
+        let sandbox = sandbox();
+        let alice = &sandbox.caller;
+        sandbox.ask(Request::Arm, PASSWORD);
+        for wrong in ["1111", "2222", "not the password at all"] {
+            sandbox.ask(Request::Check, wrong);
+        }
+        // Two minutes on, the correct PIN comes too late to forgive them.
+        let (code, _, log) = sandbox.ask_with(&Later { ahead: 120 }, alice, Request::Check, PIN);
+        assert_eq!(code, exit::YES);
+        assert!(log.contains("3 failure(s) not followed by an unlock in time, now concerning: 3 within 24 hours"), "{log}");
+        let output = sandbox.ask_with(&Later { ahead: 120 }, alice, Request::Status, "").1;
+        assert!(
+            output.contains("concerning failures: 3 within 24 hours (of 10), 3 within 7 days (of 20), 3 since the PIN was set (of 100)"),
+            "{output}"
+        );
+
+        sandbox.write_config("max_concerning_24h = 4\n");
+        sandbox.ask_with(&Later { ahead: 120 }, alice, Request::Check, "3333");
+        let (code, _, log) = sandbox.ask_with(&Later { ahead: 300 }, alice, Request::Check, PIN);
+        assert_eq!(code, exit::NO);
+        assert!(log.contains("PIN disabled after 4 concerning failures within 24 hours"), "{log}");
+        assert!(log.contains("PIN refused, password required: the PIN is disabled after 4 concerning failures"), "{log}");
+        let (code, _, log) = sandbox.ask_with(&Later { ahead: 300 }, alice, Request::Arm, PASSWORD);
+        assert_eq!((code, log.contains("password accepted, PIN not armed: disabled after")), (exit::NO, true), "{log}");
+        let output = sandbox.ask_with(&Later { ahead: 300 }, alice, Request::Status, "").1;
+        assert!(output.contains("sudo properpin enable or set turns it back on"), "{output}");
+    }
+
+    #[test]
+    fn typos_followed_by_the_pin_or_the_password_are_forgiven() {
+        let sandbox = sandbox();
+        sandbox.ask(Request::Arm, PASSWORD);
+        sandbox.ask(Request::Check, "1111");
+        sandbox.ask(Request::Check, PIN);
+        sandbox.ask(Request::Check, "correct horse battery stapl");
+        sandbox.ask(Request::Check, PASSWORD);
+        sandbox.ask(Request::Arm, PASSWORD);
+        let output = sandbox.ask_with(&Later { ahead: 3600 }, &sandbox.caller, Request::Status, "").1;
+        assert!(output.contains("0 since the PIN was set (of 100); 0 waiting to be forgiven"), "{output}");
+    }
+
+    #[test]
+    fn a_damaged_budget_refuses_the_pin() {
+        let sandbox = sandbox();
+        sandbox.ask(Request::Arm, PASSWORD);
+        let budget = sandbox.places.budget_dir.join(format!("{}.budget", sandbox.caller.uid));
+        fs::write(&budget, "garbage\n").unwrap();
+        let (code, _, log) = sandbox.ask(Request::Check, PIN);
+        assert_eq!(code, exit::BROKEN);
+        assert!(log.contains("not a valid budget"), "{log}");
+    }
+
     #[test]
     fn input_is_read_up_to_the_limit_only() {
         let typed = read_input(&mut &b"4859"[..]).unwrap();
@@ -440,7 +564,7 @@ mod tests {
         let long = vec![b'1'; MAX_INPUT_BYTES * 3];
         let typed = read_input(&mut &long[..]).unwrap();
         assert_eq!(typed.as_bytes().len(), MAX_INPUT_BYTES + 1);
-        assert_eq!(usable_input(typed.as_bytes()), None);
+        assert_eq!(properpin_core::usable_input(typed.as_bytes()), None);
     }
 
     #[test]

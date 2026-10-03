@@ -11,6 +11,8 @@ pub enum Error {
     BadValue { file: String, key: String, expected: String, raw: String },
     #[error("{file}: only a user's own file may hold a PIN hash")]
     HashOutsideUserFile { file: String },
+    #[error("{file}: {key} may only be set in the global config")]
+    GlobalOnly { file: String, key: String },
     #[error("the stored hash is not a yescrypt hash")]
     NotYescrypt,
     /// Anything the machine reports: a file, the clock, libxcrypt. Kept as text, so this crate

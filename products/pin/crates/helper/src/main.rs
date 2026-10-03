@@ -6,14 +6,15 @@
 //!
 //! Installed `root:properpin 2755`, setgid to the `properpin` group, with fixed locations: the
 //! hashes in `/etc/properpin` (owned by root, readable by the group), the counts in `/run/properpin`
-//! (root's, sticky, writable by the group), the password checked by `/usr/sbin/unix_chkpwd`, and logs
-//! to syslog.
+//! (root's, sticky, writable by the group), the budget in `/var/lib/properpin` (the same, on disk),
+//! the password checked by `/usr/sbin/unix_chkpwd`, and logs to syslog.
 //!
 //! For local tests, and only when started without elevated rights, these options replace them:
 //!
 //! ```text
 //! --dev-etc DIR       instead of /etc/properpin                   required with any --dev option
 //! --dev-run DIR       instead of /run/properpin                   required with any --dev option
+//! --dev-budget DIR    instead of /var/lib/properpin               required with any --dev option
 //! --dev-owner UID     who must own --dev-run and the files under --dev-etc   default: the caller
 //! --dev-chkpwd PATH   instead of /usr/sbin/unix_chkpwd
 //! --dev-log FILE      append log lines here instead of syslog
@@ -96,6 +97,7 @@ fn run(args: &[OsString]) -> u8 {
                 run_dir: "/run/properpin".into(),
                 run_owner: 0,
                 run_group: current_egid(),
+                budget_dir: "/var/lib/properpin".into(),
             },
             UnixChkpwd::system(),
         ),
@@ -106,6 +108,7 @@ fn run(args: &[OsString]) -> u8 {
                 run_dir: dev.run.clone(),
                 run_owner: dev.owner.unwrap_or(uid),
                 run_group: current_egid(),
+                budget_dir: dev.budget.clone(),
             },
             dev.chkpwd.clone().map_or_else(UnixChkpwd::system, UnixChkpwd),
         ),
@@ -126,6 +129,7 @@ struct Options {
 struct Dev {
     etc: PathBuf,
     run: PathBuf,
+    budget: PathBuf,
     owner: Option<u32>,
     chkpwd: Option<PathBuf>,
     log: Option<PathBuf>,
@@ -135,7 +139,7 @@ impl Options {
     /// Exactly one request, and `--dev-*` options given as `--dev-x VALUE`. Anything else is refused.
     fn parse(args: &[OsString]) -> Result<Self, String> {
         let mut request = None;
-        let (mut etc, mut run, mut owner, mut chkpwd, mut log, mut any_dev) = (None, None, None, None, None, false);
+        let (mut etc, mut run, mut budget, mut owner, mut chkpwd, mut log, mut any_dev) = (None, None, None, None, None, None, false);
         let mut args = args.iter();
         while let Some(arg) = args.next() {
             let word = arg.to_str().ok_or("an argument is not UTF-8")?;
@@ -145,6 +149,7 @@ impl Options {
                 match name {
                     "etc" => etc = Some(value),
                     "run" => run = Some(value),
+                    "budget" => budget = Some(value),
                     "owner" => owner = Some(value.to_str().and_then(|uid| uid.parse().ok()).ok_or(format!("{word} needs a uid"))?),
                     "chkpwd" => chkpwd = Some(value),
                     "log" => log = Some(value),
@@ -157,10 +162,10 @@ impl Options {
             }
         }
         let request = request.ok_or("no request: expected check, arm or status")?;
-        let dev = match (any_dev, etc, run) {
+        let dev = match (any_dev, etc, run, budget) {
             (false, ..) => None,
-            (true, Some(etc), Some(run)) => Some(Dev { etc, run, owner, chkpwd, log }),
-            (true, ..) => return Err("--dev options need both --dev-etc and --dev-run".into()),
+            (true, Some(etc), Some(run), Some(budget)) => Some(Dev { etc, run, budget, owner, chkpwd, log }),
+            (true, ..) => return Err("--dev options need --dev-etc, --dev-run and --dev-budget".into()),
         };
         Ok(Self { request, dev })
     }

@@ -29,7 +29,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use pamharness::PamClient;
-use properpin_core::{Clock, PinState, exit};
+use properpin_core::{Budget, Clock, PinState, exit};
 use properpin_sys::{Account, BootClock, Yescrypt, group_by_name};
 
 /// Where the Containerfile puts the build, `packaging/` and `pam/`.
@@ -42,6 +42,7 @@ const HELPER: &str = "/usr/local/libexec/properpin/properpin-helper";
 /// The group the helper runs with, created by install.sh.
 const HELPER_GROUP: &str = "properpin";
 const RUN_DIR: &str = "/run/properpin";
+const BUDGET_DIR: &str = "/var/lib/properpin";
 /// Where scenarios that play the attacker keep their files; emptied between scenarios.
 const SCRATCH: &str = "/tmp/properpin-scratch";
 const SYSLOG: &str = "/dev/log";
@@ -112,6 +113,11 @@ fn run() -> ExitCode {
         ("one user's helper can't touch another's counts", one_users_helper_cannot_touch_anothers_counts),
         ("counts planted in another user's name are refused", planted_counts_are_refused),
         ("the helper's group stays empty and locked, with no account", the_group_stays_empty_and_locked),
+        ("typos followed by the PIN or the password are forgiven", typos_are_forgiven),
+        ("the slow attack: a guess, the user's PIN much later, again", the_slow_attack_is_stopped),
+        ("guesses nobody forgives disable the PIN, across a reboot", unforgiven_guesses_disable_the_pin),
+        ("the lifetime limit takes a new PIN", the_lifetime_limit_takes_a_new_pin),
+        ("a damaged or planted budget refuses the PIN", a_damaged_or_planted_budget),
         ("a corrupt state means not armed", a_corrupt_state),
         ("state from an earlier boot is refused", state_from_an_earlier_boot),
         ("an arming time in the future is refused", an_arming_time_in_the_future),
@@ -265,6 +271,7 @@ fn dev_options_are_refused_under_setgid(world: &World) -> Outcome {
     let fake = Path::new(SCRATCH);
     fs::create_dir_all(fake.join("etc/users")).map_err(message)?;
     fs::create_dir_all(fake.join("run")).map_err(message)?;
+    fs::create_dir_all(fake.join("var")).map_err(message)?;
     write_file(
         &fake.join("etc/users").join(USER),
         &format!("hash = {}\n", Yescrypt.hash("0000", 4).map_err(message)?),
@@ -272,7 +279,7 @@ fn dev_options_are_refused_under_setgid(world: &World) -> Outcome {
         user.gid,
         0o640,
     )?;
-    for dir in [fake.to_path_buf(), fake.join("etc"), fake.join("etc/users"), fake.join("run")] {
+    for dir in [fake.to_path_buf(), fake.join("etc"), fake.join("etc/users"), fake.join("run"), fake.join("var")] {
         chown(&dir, Some(user.uid), Some(user.gid)).map_err(message)?;
         fs::set_permissions(&dir, Permissions::from_mode(0o700)).map_err(message)?;
     }
@@ -281,6 +288,8 @@ fn dev_options_are_refused_under_setgid(world: &World) -> Outcome {
         &format!("{SCRATCH}/etc"),
         "--dev-run",
         &format!("{SCRATCH}/run"),
+        "--dev-budget",
+        &format!("{SCRATCH}/var"),
         "--dev-owner",
         &user.uid.to_string(),
         "--dev-chkpwd",
@@ -469,6 +478,96 @@ fn the_group_stays_empty_and_locked(_world: &World) -> Outcome {
     install_sh(&["check"]).map(drop)
 }
 
+/// The user's own mistakes never count: a wrong PIN, then the right one; a wrong password, then
+/// the right one. Nothing is left waiting, nothing is concerning.
+fn typos_are_forgiven(world: &World) -> Outcome {
+    world.arm()?;
+    world.pin_refused("1111", "not the PIN, failure 1 of 3")?;
+    world.pin_unlocks()?;
+    let wrong = world.kde("a wrong password, long enough")?;
+    expect(!wrong.unlocked, "a wrong password unlocked", &wrong)?;
+    world.arm()?;
+    let budget = world.budget()?;
+    if !budget.pending.is_empty() || budget.total != 0 {
+        return Err(format!("typos were kept: {budget:?}"));
+    }
+    Ok(())
+}
+
+/// The repeated-access attack: a guess while the user is away, then the user's own correct PIN
+/// two minutes later, which wipes the failures in a row but can't forgive the guess. With the
+/// daily limit at 3, the third round finds the PIN disabled.
+fn the_slow_attack_is_stopped(world: &World) -> Outcome {
+    write_file(&world.config(), "max_concerning_24h = 3\n", 0, 0, 0o644)?;
+    world.arm()?;
+    for round in 1..=2 {
+        world.pin_refused("1111", "not the PIN, failure 1 of 3")?;
+        world.edit_budget(|budget| budget.pending.iter_mut().for_each(|at| *at -= 120))?;
+        world.pin_unlocks().map_err(|error| format!("round {round}: {error}"))?;
+    }
+    world.pin_refused("1111", "not the PIN, failure 1 of 3")?;
+    world.edit_budget(|budget| budget.pending.iter_mut().for_each(|at| *at -= 120))?;
+    world.pin_refused(PIN, "the PIN is disabled after 3 concerning failures within 24 hours")?;
+    world.password_unlocks()
+}
+
+/// Nine concerning failures already today, and one more guess the user never forgives: the PIN is
+/// disabled, stays disabled after a reboot even for the password, and comes back with `enable`.
+fn unforgiven_guesses_disable_the_pin(world: &World) -> Outcome {
+    world.arm()?;
+    let now = BootClock.wall().map_err(message)?;
+    world.edit_budget(|budget| {
+        budget.concerning = (1..=9).map(|hour| now - hour * 600).rev().collect();
+        budget.total = 9;
+    })?;
+    world.pin_refused("1111", "not the PIN, failure 1 of 3")?;
+    // Two minutes pass before the user comes back: too late to forgive the guess.
+    world.edit_budget(|budget| budget.pending.iter_mut().for_each(|at| *at -= 120))?;
+    let attempt = world.kde(PIN)?;
+    let why = "the PIN is disabled after 10 concerning failures within 24 hours";
+    expect(!attempt.unlocked && attempt.log.contains("PIN disabled after") && attempt.log.contains(why), why, &attempt)?;
+    // A reboot: the per-boot state is gone, the budget isn't.
+    world.forget_this_boot()?;
+    let password = world.kde(PASSWORD)?;
+    expect(password.unlocked && password.log.contains("PIN not armed: disabled after"), "the password armed a disabled PIN", &password)?;
+    world.pin_refused(PIN, why)?;
+    let enabled = properpin_as_root(&["enable", "--user", USER], "")?;
+    if !enabled.contains("PIN enabled again") {
+        return Err(format!("properpin enable said: {enabled}"));
+    }
+    world.arm()?;
+    world.pin_unlocks()
+}
+
+/// The total since the PIN was set has its own limit, which `enable` can't lift: only a new PIN.
+fn the_lifetime_limit_takes_a_new_pin(world: &World) -> Outcome {
+    world.arm()?;
+    world.edit_budget(|budget| budget.total = 99)?;
+    world.pin_refused("1111", "not the PIN")?;
+    world.edit_budget(|budget| budget.pending.iter_mut().for_each(|at| *at -= 120))?;
+    world.pin_refused(PIN, "the PIN is disabled after 100 concerning failures since the PIN was set")?;
+    match properpin_as_root(&["enable", "--user", USER], "") {
+        Err(said) if said.contains("choose a new one with: properpin set") => {}
+        other => return Err(format!("enable lifted the lifetime limit: {other:?}")),
+    }
+    properpin_as_root(&["set", "--user", USER], &format!("{PIN}\n{PIN}\n"))?;
+    world.arm()?;
+    world.pin_unlocks()
+}
+
+/// A budget that can't be trusted is never read as a fresh one.
+fn a_damaged_or_planted_budget(world: &World) -> Outcome {
+    world.arm()?;
+    fs::write(world.budget_file(), "garbage\n").map_err(message)?;
+    world.fails_closed("not a valid budget")?;
+    // Planted by bob's helper: private to bob, it can't even be opened; readable, its owner is wrong.
+    let bob = Account::by_name("bob").map_err(message)?;
+    write_file(&world.budget_file(), &Budget::default().format(), bob.uid, world.helper_gid, 0o600)?;
+    world.fails_closed(&format!("{}: Permission denied", world.budget_file().display()))?;
+    write_file(&world.budget_file(), &Budget::default().format(), bob.uid, world.helper_gid, 0o644)?;
+    world.fails_closed(&format!("owned by uid {}, not {}", bob.uid, world.user.uid))
+}
+
 fn a_corrupt_state(world: &World) -> Outcome {
     world.arm()?;
     fs::write(world.state_file(), "garbage\n").map_err(message)?;
@@ -547,6 +646,9 @@ fn disable_and_uninstall(world: &World) -> Outcome {
     if Account::by_name(HELPER_GROUP).is_ok() {
         return Err(format!("a user named {HELPER_GROUP} exists"));
     }
+    if !world.budget_file().exists() {
+        return Err("uninstall deleted the user's budget".into());
+    }
     Ok(())
 }
 
@@ -586,20 +688,7 @@ impl World {
         install_sh(&["enable", "--yes"])?;
         let helper_gid = group_by_name(HELPER_GROUP).map_err(message)?;
 
-        let set = Command::new("/usr/local/bin/properpin")
-            .args(["set", "--user", USER])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .and_then(|mut child| {
-                child.stdin.take().expect("piped").write_all(format!("{PIN}\n{PIN}\n").as_bytes())?;
-                child.wait_with_output()
-            })
-            .map_err(message)?;
-        if !set.status.success() {
-            return Err(format!("properpin set failed: {}", String::from_utf8_lossy(&set.stderr)));
-        }
+        properpin_as_root(&["set", "--user", USER], &format!("{PIN}\n{PIN}\n"))?;
         let checked = install_sh(&["check"])?;
         if !checked.contains("has properpin's lines") {
             return Err(format!("install.sh check after set:\n{checked}"));
@@ -620,10 +709,34 @@ impl World {
         PathBuf::from(format!("{RUN_DIR}/{}.state", self.user.uid))
     }
 
+    fn budget_file(&self) -> PathBuf {
+        PathBuf::from(format!("{BUDGET_DIR}/{}.budget", self.user.uid))
+    }
+
+    fn budget(&self) -> Outcome<Budget> {
+        let text = fs::read_to_string(self.budget_file()).map_err(message)?;
+        Budget::parse(&text).ok_or_else(|| format!("the budget doesn't parse: {text}"))
+    }
+
+    fn edit_budget(&self, change: impl FnOnce(&mut Budget)) -> Outcome {
+        let mut budget = self.budget()?;
+        change(&mut budget);
+        // Written in place: the file keeps its owner and mode.
+        fs::write(self.budget_file(), budget.format()).map_err(message)
+    }
+
+    /// What a reboot does to properpin: `/run` starts empty. The budget on disk stays.
+    fn forget_this_boot(&self) -> Outcome {
+        for entry in fs::read_dir(RUN_DIR).map_err(message)? {
+            fs::remove_file(entry.map_err(message)?.path()).map_err(message)?;
+        }
+        Ok(())
+    }
+
     /// Back to just after set-up: the PIN set, not armed, nothing tampered with.
     fn reset(&self) -> Outcome {
         let lock = PathBuf::from(format!("{RUN_DIR}/{}.lock", self.user.uid));
-        for path in [self.state_file(), lock, self.config(), self.user_file().with_extension("real")] {
+        for path in [self.state_file(), lock, self.budget_file(), self.config(), self.user_file().with_extension("real")] {
             match fs::remove_file(&path) {
                 Err(error) if error.kind() != ErrorKind::NotFound => return Err(format!("{}: {error}", path.display())),
                 _ => {}
@@ -631,8 +744,10 @@ impl World {
         }
         let _ = fs::remove_file(self.user_file());
         write_file(&self.user_file(), &String::from_utf8_lossy(&self.pin_file), 0, self.helper_gid, 0o640)?;
-        chown(RUN_DIR, Some(0), Some(self.helper_gid)).map_err(message)?;
-        fs::set_permissions(RUN_DIR, Permissions::from_mode(0o1770)).map_err(message)?;
+        for dir in [RUN_DIR, BUDGET_DIR] {
+            chown(dir, Some(0), Some(self.helper_gid)).map_err(message)?;
+            fs::set_permissions(dir, Permissions::from_mode(0o1770)).map_err(message)?;
+        }
         let _ = fs::remove_dir_all(SCRATCH);
         self.syslog.take();
         Ok(())
@@ -808,6 +923,23 @@ fn expect_code(output: &std::process::Output, code: u8, what: &str) -> Outcome {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     ))
+}
+
+/// Run the installed `properpin` command as root, `typed` on stdin.
+fn properpin_as_root(args: &[&str], typed: &str) -> Outcome<String> {
+    let output = Command::new("/usr/local/bin/properpin")
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            child.stdin.take().expect("piped").write_all(typed.as_bytes())?;
+            child.wait_with_output()
+        })
+        .map_err(message)?;
+    let said = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    if output.status.success() { Ok(said) } else { Err(format!("properpin {}: {said}", args.join(" "))) }
 }
 
 /// Run `packaging/install.sh` against the real root, from the container's build.

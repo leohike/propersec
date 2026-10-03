@@ -3,7 +3,7 @@
 //! - [`UserFiles`]: one user's settings, hash, state and lock file, and the rules for trusting them;
 //! - [`Account`] and [`group_by_name`]: the passwd and group databases;
 //! - [`Yescrypt`]: hashing through the system's libxcrypt, the library `/etc/shadow` uses;
-//! - [`BootClock`]: this boot's id and the seconds since boot;
+//! - [`BootClock`]: this boot's id, the seconds since boot, and the wall clock;
 //! - [`FileLog`]: log lines to a file, for tests and the helper's `--dev-log`.
 //!
 //! Nothing here names `/etc` or `/run`: every location comes in through [`UserFiles::new`] and

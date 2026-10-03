@@ -61,6 +61,19 @@ Everything still open about properpin, however small, collected while moving the
 - **`fs.protected_regular=2` would refuse even sooner.** With that sysctl the kernel refuses to open, with `O_CREAT`, a file someone else owns in a group-writable sticky directory, so alice's helper would get "Permission denied" on a planted lock file before the owner check sees it. The result is the same refusal with a vaguer log line. Fedora and the test container use 1, where the owner check is what refuses; the container scenario accepts either.
 - **The run directory must be exactly `1770`.** A future change to the tmpfiles rule or a distribution default that adds a bit (setgid on the directory, say) makes every PIN fail closed until `install.sh` runs again.
 
+## The failure budget
+
+- **Anyone at the keyboard can disable the PIN.** Ten wrong inputs, wrong passwords included, with nobody unlocking within the next 90 seconds, and the PIN stays off until root runs `properpin enable`. The password still works. That is the price of disabling at all; the alternative is letting an attack go on.
+- **The user's own wrong password counts too,** when they give up and walk away instead of typing the right one within 90 seconds. Ten a day is the margin.
+- **`enable` and `set` don't take the helper's lock.** They run as root without the per-boot lock file, which root must not create in the user's name. A helper run at the same moment could overwrite `enable`'s write (the PIN stays disabled; run `enable` again) or `enable` could drop a failure recorded in between. It needs an administrator running `enable` during an attempt at that user's lock screen.
+- **Every attempt now writes to disk,** synced, a few milliseconds. A full disk or a read-only `/var` makes the write fail, which refuses the PIN: fail closed.
+- **The clock can still be moved by root or in the firmware.** Moving it forward ages concerning failures out of the 24-hour and 7-day windows; only the total limit then holds. Moving it back is handled. Firmware access usually means the disk's encryption passphrase is needed anyway.
+- **A planted budget lasts across reboots,** unlike a planted lock file: an exploited helper could create one in another user's name, and that user's PIN is refused until root runs `properpin set`, which deletes it whoever owns it. `docs/planted-lock-dos.md` covers the fix for both.
+- **`enable` can be run again and again.** Each run forgets the recent failures and keeps the total, so an administrator who keeps re-enabling gives an attacker up to the total limit of guesses on one PIN. Only the total limit is absolute.
+- **Failures are judged lazily,** at the helper's next run. A failure followed by no other attempt stays pending until then; nothing is lost, `status` shows it as waiting.
+- **The windows are rolling,** 24 hours and 7 days back from now, not calendar days.
+- **The budget's failure is recorded before the in-a-row one,** in a separate file. A kill between the two writes leaves a budget failure without its in-a-row twin: more cautious, never less.
+
 ## Where the state lives
 
 - **The helper doesn't check that `/run/properpin` is in memory.** On every systemd distribution `/run` is a tmpfs, but in containers and chroots it can be an ordinary directory on disk: in the podman test image, `/run` is `overlayfs`. For the counts that is harmless, since state from another boot is refused anyway. Before anything secret is stored there (the pepper), the helper should check the filesystem with `statfs` and accept only tmpfs or ramfs, and the container test should mount a tmpfs at `/run/properpin` (`podman run --tmpfs`).

@@ -1,6 +1,6 @@
 # Idea: alert the user about failed PIN attempts made while away
 
-An idea from 2026-10-03, not built. It is the "tell the owner" remedy from poc-py's security analysis (`poc-py/docs/short-password-security-analysis.md`, the Repeated access section), and the only thing that actually ends a slow repeated-access attack: once the user sees failed attempts they didn't make, they change the PIN.
+An idea from 2026-10-03, not built. Its detection side now exists as the failure budget (`products/pin/docs/README.md`, The failure budget section): concerning failures are the "failures not followed by a success" below, with 45 and 90 seconds instead of one 60-second window, and the stricter mode's automatic disarm became disabling the PIN past a limit. It is the "tell the owner" remedy from poc-py's security analysis (`poc-py/docs/short-password-security-analysis.md`, the Repeated access section), and the only thing that actually ends a slow repeated-access attack: once the user sees failed attempts they didn't make, they change the PIN.
 
 ## The idea
 
@@ -38,5 +38,5 @@ Two possible shapes, which can coexist:
 
 ## Where it fits
 
-- **The helper side** (recording events, the automatic disarm, events shown by `properpin status`) belongs with the repeated-access fix in `docs/plan.md`, since both change how failures are counted.
+- **The helper side** is built as the failure budget: concerning failures are recorded, logged and shown by `properpin status`, and disable the PIN past a limit. What remains is an `events` request for the agent.
 - **The notification agent and its button** would be a separate, later item, tested on the real system.

@@ -144,6 +144,7 @@ fn install_enable_disable_uninstall_leaves_pam_as_it_was() {
         assert!(!root.path(gone).exists(), "{gone} is still there");
     }
     assert!(root.path("etc/properpin/users").is_dir(), "PINs are kept");
+    assert!(root.path("var/lib/properpin").is_dir(), "budgets are kept");
 }
 
 #[test]
@@ -156,7 +157,7 @@ fn install_puts_everything_in_place_and_twice_is_harmless() {
     let command = fs::read_to_string(root.path("usr/local/bin/properpin")).unwrap();
     assert!(
         command.contains(
-            "exec /usr/local/libexec/properpin/properpin --etc /etc/properpin --helper /usr/local/libexec/properpin/properpin-helper \"$@\""
+            "exec /usr/local/libexec/properpin/properpin --etc /etc/properpin --budget /var/lib/properpin --helper /usr/local/libexec/properpin/properpin-helper \"$@\""
         ),
         "{command}"
     );
@@ -164,11 +165,13 @@ fn install_puts_everything_in_place_and_twice_is_harmless() {
     assert_eq!(mode("usr/local/libexec/properpin/properpin-helper"), 0o2755, "the helper is setgid only");
     assert_eq!(mode("etc/properpin/users"), 0o750);
     assert_eq!(mode("run/properpin"), 0o1770);
+    assert_eq!(mode("var/lib/properpin"), 0o1770);
     let sysusers = fs::read_to_string(root.path("etc/sysusers.d/properpin.conf")).unwrap();
     assert!(sysusers.lines().any(|line| line == format!("g {} -", group())), "{sysusers}");
     assert!(!sysusers.lines().any(|line| line.starts_with("u ")), "no account: {sysusers}");
     let tmpfiles = fs::read_to_string(root.path("etc/tmpfiles.d/properpin.conf")).unwrap();
     assert!(tmpfiles.contains(&format!("d /run/properpin 1770 {} {} -", whoami(), group())), "{tmpfiles}");
+    assert!(tmpfiles.contains(&format!("d /var/lib/properpin 1770 {} {} -", whoami(), group())), "{tmpfiles}");
     assert_eq!(
         fs::read(root.path("usr/local/lib64/security/pam_properpin.so")).unwrap(),
         fs::read(built().join("libpam_properpin.so")).unwrap()
@@ -199,11 +202,13 @@ fn check_finds_what_is_wrong() {
         fs::set_permissions(&user_file, Permissions::from_mode(0o640)).unwrap();
         fs::set_permissions(root.path("usr/local/libexec/properpin/properpin-helper"), Permissions::from_mode(helper)).unwrap();
         fs::set_permissions(root.path("run/properpin"), Permissions::from_mode(run_dir)).unwrap();
+        fs::set_permissions(root.path("var/lib/properpin"), Permissions::from_mode(0o1777)).unwrap();
         fs::write(root.path("etc/tmpfiles.d/properpin.conf"), "d /run/properpin 0777 root root -\n").unwrap();
         fs::write(root.path("etc/sysusers.d/properpin.conf"), "u properpin - \"an account\" - -\n").unwrap();
         let problems = root.refused("check");
         assert!(problems.contains(&format!("properpin-helper: is {helper:o}")), "{problems}");
         assert!(problems.contains(&format!("/run/properpin: is {run_dir:o}")), "{problems}");
+        assert!(problems.contains("/var/lib/properpin: is 1777"), "{problems}");
         assert!(problems.contains("tmpfiles.d/properpin.conf: not what install.sh writes"), "{problems}");
         assert!(problems.contains("sysusers.d/properpin.conf: not what install.sh writes"), "{problems}");
     }
