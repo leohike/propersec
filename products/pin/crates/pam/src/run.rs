@@ -29,12 +29,9 @@ pub trait Transaction {
 
 /// `Ok(true)` unlocks (for `check`) or armed the PIN (for `arm`). Everything else refuses.
 pub fn run(transaction: &impl Transaction, args: &Args) -> Result<bool, Error> {
-    if args.test_panic {
-        panic!("test_panic: a panic must become PAM_IGNORE");
-    }
     calling_account(transaction)?;
     let typed = transaction.typed()?;
-    let code = ask_helper(&args.helper, args.mode.request(), &typed)?;
+    let code = ask_helper(&args.helper, args.mode.request(), &typed, args.test_panic)?;
     drop(typed);
     match code {
         exit::YES => Ok(true),
@@ -63,12 +60,16 @@ fn calling_account(transaction: &impl Transaction) -> Result<Account, Error> {
 /// pam_unix runs `unix_chkpwd`: an empty environment, `/` as the working directory, the default
 /// SIGCHLD action while the helper runs (so a host that ignores or reaps children can't take its
 /// exit status away), and the read end of the pipe kept open here until the write is done.
-fn ask_helper(helper: &Path, request: &str, typed: &Secret) -> Result<u8, Error> {
+/// `test_panic` panics while SIGCHLD is changed, to prove the panic puts it back.
+fn ask_helper(helper: &Path, request: &str, typed: &Secret, test_panic: bool) -> Result<u8, Error> {
     let fail = |what: &str, error: std::io::Error| Error::System(format!("{}: {what}: {error}", helper.display()));
     // std's pipes are close-on-exec: they reach the helper as its stdin and nothing else.
     let (reader, mut writer) = std::io::pipe().map_err(|error| fail("pipe", error))?;
     let child_end = reader.try_clone().map_err(|error| fail("pipe", error))?;
     let _sigchld = DefaultSigchld::set();
+    if test_panic {
+        panic!("test_panic: a panic must become PAM_IGNORE and put SIGCHLD back");
+    }
     let mut child = Command::new(helper)
         .arg(request)
         .env_clear()

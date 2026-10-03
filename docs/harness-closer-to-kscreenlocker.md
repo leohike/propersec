@@ -1,6 +1,6 @@
 # A test harness closer to the real lock screen
 
-A report from 2026-10-03 on the plan row "Harness closer to kscreenlocker": what the real lock screen does that properpin's tests don't, why that matters more since the PIN check moved into a helper, what the work would be, and what it is likely to find. Nothing here was run; it is read from source. `docs/kscreenlocker-pam-contract.md` has the wider comparison of how kscreenlocker calls PAM; this report is about the lifecycle and the host process.
+A report from 2026-10-03 on the plan row "Harness closer to kscreenlocker": what the real lock screen does that properpin's tests don't, why that matters more since the PIN check moved into a helper, what the work would be, and what it is likely to find. The report was written from source first; the work was then done the same day, and What was done, and what it found, right below the short version, records the outcome. `docs/kscreenlocker-pam-contract.md` has the wider comparison of how kscreenlocker calls PAM; this report is about the lifecycle and the host process.
 
 Sources, in the clone at `/home/shared/projects/kscreenlocker`:
 
@@ -13,6 +13,24 @@ Sources, in the clone at `/home/shared/projects/kscreenlocker`:
 properpin's tests call PAM the way a simple test client does: a fresh PAM session for each attempt, on one thread, in a process that does nothing else. The real lock screen keeps one session for many attempts, runs several authenticators side by side, and in 6.8 kills attempts midway. That didn't matter much while the module was a library that did its work and returned. Since the setuid (now setgid) helper, the module starts a child process from inside the lock screen and needs that child's exit code, because the exit code is the answer. That makes process-wide state part of properpin's correctness: the SIGCHLD setting, which children get reaped by whom, and what other threads are doing at the same moment. None of that is tested today.
 
 The work is mostly test code: a PAM session that runs many attempts, hosts that misbehave in the ways real hosts do, a long-lived worker that gets killed, and checks that every process exits cleanly. Small to medium effort. The likeliest finding, if any, is a host that reaps every child or two threads racing over SIGCHLD; the likeliest fix is reading the helper's answer from a pipe instead of its exit code, which removes the dependence on SIGCHLD altogether.
+
+## What was done, and what it found
+
+Everything in What the work would be below was built, except the panic point, which went into the existing `test_panic` argument rather than a new one: it now panics just after the guard is set, instead of before anything happens.
+
+- **The harness:** `PamSession` in `pamharness` keeps one handle for many attempts, calls `pam_setcred(PAM_REFRESH_CRED)` after a success and ignores the result, and sets a `PAM_FAIL_DELAY` callback that records the delay. `PamClient::authenticate` is now a session of one attempt, so every older test got the callback and `pam_setcred` too. `pamharness::host` sets SIGCHLD the ways real hosts do.
+- **`stack.rs`:** a session test (every attempt asks again, the counts carry on, `pam_setcred` only after a success), and six host tests, each in a process of its own: SIGCHLD ignored, a handler reaping every child, a thread looping on `waitpid(-1)`, the host's own child exiting during an attempt, four threads at once, and a panic inside the guard.
+- **The container:** a `worker` mode that keeps one session for a line-by-line stream of attempts; a scenario running the password, the PIN, a wrong PIN and the PIN again on it; a scenario killing it 16 times while it checks a wrong PIN; every attempt process checked for a clean exit; no helper left running after any scenario; and `podman run --init`, so orphaned helpers are reaped as on a real system.
+
+What it found:
+
+- **The race between threads is real.** Four threads, each on its own session, lost the host's SIGCHLD handler in the first run, exactly as in the table under Two threads at once. It is latent for the real lock screen: properpin runs on one thread there, and on Fedora the fingerprint and smartcard stacks (`pam_env`, `pam_fprintd`, `pam_deny`, `pam_debug`) start no children. The fix is small: a process-wide mutex in `DefaultSigchld`, held from saving to restoring, so properpin's own attempts take turns. Another module doing the same dance on another thread could still race with it, as with pam_unix, which the pipe fix below would end.
+- **A thread looping on `waitpid(-1)` wins every time.** All five correct PINs were refused in each run, the wrong PINs never unlocked, and the password still worked: fail closed, as predicted. Left as documented behaviour.
+- **Everything else passed at once:** SIGCHLD ignored, a reaping handler (which never saw the helper), the host's own child, the panic, one session for many attempts, and the 16 kills, where the guess reached the helper in 13 or 14 rounds and not in the others, and logs, state and budget always agreed.
+- **A correct PIN takes about 20 to 25 ms** through the real stack in the container, under the 50 ms that 6.8 calls too quick. The minimum-duration row in `docs/plan.md` now has a measurement behind it.
+- **The clean-exit check doesn't catch the unload crash in a worker.** With `-z nodelete` removed, every container scenario still passed: glibc keeps a library mapped while it has thread-local destructors pending, so the crash needs a thread that exits after `pam_end`, which the load/unload test in `stack.rs` covers. The check stays, for any other crash at exit.
+
+Checked by breaking things on purpose: with the guard's restore skipped during a panic, the panic test fails; without the mutex, the four-thread test fails. The pipe fix was not made: the one problem the tests found has a smaller fix, and the remaining hazards are a host thread stealing exit statuses and another module racing on another thread, neither of which the real lock screen does today.
 
 ## What the real lock screen does
 

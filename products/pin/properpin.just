@@ -58,4 +58,4 @@ demo:
 # Everything for real in a stock Fedora 44 container: install.sh, the real /etc/pam.d, pam_unix and unix_chkpwd. Never touches this machine's PAM
 podman:
     podman build --quiet --ignorefile products/pin/testing/podman/Containerfile.containerignore -f products/pin/testing/podman/Containerfile -t properpin-systest .
-    podman run --rm --network=none properpin-systest
+    podman run --rm --init --network=none properpin-systest

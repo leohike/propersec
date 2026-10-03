@@ -62,7 +62,7 @@ jobs:
       - name: Build the test image
         run: sudo podman build --quiet --ignorefile products/pin/testing/podman/Containerfile.containerignore -f products/pin/testing/podman/Containerfile -t properpin-systest .
       - name: Run the scenarios
-        run: sudo podman run --rm --network=none properpin-systest
+        run: sudo podman run --rm --init --network=none properpin-systest
 
   audit:
     name: Dependency audit

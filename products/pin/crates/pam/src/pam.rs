@@ -4,6 +4,7 @@
 
 use std::ffi::{CStr, CString, c_char, c_int};
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use properpin_core::{Error, Log, Secret};
 use properpin_sys::FileLog;
@@ -95,13 +96,25 @@ unsafe fn arguments(argc: c_int, argv: *const *const c_char) -> Vec<String> {
 
 /// SIGCHLD set to its default action for as long as this lives, and then put back as it was. Like
 /// pam_unix around `unix_chkpwd`: a host that ignores SIGCHLD would have the helper's exit status
-/// discarded by the kernel, and the module couldn't read the answer. The setting is process-wide,
-/// so a host that changes it from another thread at the same moment could race with this, as it
-/// could with pam_unix.
-pub(crate) struct DefaultSigchld(libc::sigaction);
+/// discarded by the kernel, and the module couldn't read the answer.
+///
+/// The setting is process-wide. Two threads saving and restoring it at once can lose the host's
+/// setting for good (the second saves the first's default, and restores it last), so properpin's
+/// own attempts on different threads take turns here. Another module doing the same on another
+/// thread at the same moment could still race with this, as it could with pam_unix; none in
+/// Fedora's fingerprint or smartcard stacks does (docs/harness-closer-to-kscreenlocker.md).
+pub(crate) struct DefaultSigchld {
+    old: libc::sigaction,
+    // Released after `drop` has put the old setting back.
+    _turn: MutexGuard<'static, ()>,
+}
+
+/// Held while SIGCHLD is changed. A panic while holding it poisons it, which changes nothing here.
+static TURN: Mutex<()> = Mutex::new(());
 
 impl DefaultSigchld {
     pub(crate) fn set() -> Self {
+        let turn = TURN.lock().unwrap_or_else(PoisonError::into_inner);
         // SAFETY: sigaction with a zeroed, default-action struct and a valid place for the old one.
         unsafe {
             let mut default: libc::sigaction = std::mem::zeroed();
@@ -109,7 +122,7 @@ impl DefaultSigchld {
             libc::sigemptyset(&mut default.sa_mask);
             let mut old: libc::sigaction = std::mem::zeroed();
             libc::sigaction(libc::SIGCHLD, &default, &mut old);
-            Self(old)
+            Self { old, _turn: turn }
         }
     }
 }
@@ -117,7 +130,7 @@ impl DefaultSigchld {
 impl Drop for DefaultSigchld {
     fn drop(&mut self) {
         // SAFETY: puts back exactly what `set` found.
-        unsafe { libc::sigaction(libc::SIGCHLD, &self.0, std::ptr::null_mut()) };
+        unsafe { libc::sigaction(libc::SIGCHLD, &self.old, std::ptr::null_mut()) };
     }
 }
 

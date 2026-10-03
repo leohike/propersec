@@ -8,7 +8,7 @@
 //! arm    The password just succeeded: arm the PIN, with no failures and a fresh window.
 //! ```
 //!
-//! It decides nothing itself. The hashes and the counts belong to the `properpin` account, out of
+//! It decides nothing itself. The hashes and the counts belong to the `properpin` group, out of
 //! the user's reach, and only the setgid helper `properpin-helper` reads them: the module hands it
 //! what was typed through a pipe and reads its exit code, the way pam_unix uses `unix_chkpwd`.
 //!
@@ -17,7 +17,8 @@
 //! ```text
 //! helper=PATH    the helper (/usr/local/libexec/properpin/properpin-helper)   required
 //! log=FILE       append the module's own log lines here instead of syslog (tests)
-//! test_panic     panic on purpose, to prove a panic becomes PAM_IGNORE (tests)
+//! test_panic     panic on purpose while SIGCHLD is changed, to prove a panic becomes PAM_IGNORE
+//!                and puts SIGCHLD back (tests)
 //! ```
 //!
 //! It runs inside the lock screen, as the locked user, never as root. Refusal is the default:

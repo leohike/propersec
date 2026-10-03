@@ -30,9 +30,9 @@ A brief for adding GitHub Actions CI to propersec, written so an agent (or a per
 - **Tests:** the stack tests use the real libpam through `pam_start_confdir`, which needs Linux-PAM 1.4 or later, plus `pam_permit.so` and `pam_deny.so`. Hashing is yescrypt through libxcrypt. The stack tests build the module themselves with `cargo build`, which is expected. Fedora 44 ships Rust 1.98.1 and Linux-PAM 1.7.2, matching the local setup.
 - **The system test,** `just properpin podman`, which takes about a minute locally, is two commands:
   - `podman build --quiet --ignorefile products/pin/testing/podman/Containerfile.containerignore -f products/pin/testing/podman/Containerfile -t properpin-systest .`
-  - `podman run --rm --network=none properpin-systest`
+  - `podman run --rm --init --network=none properpin-systest`
 
-  Inside the container it runs its scenarios (33 as of the failure budget) as root: it installs properpin with `install.sh`, listens on `/dev/log`, and runs attempts through the setuid `unix_chkpwd`. The Containerfile uses `RUN --mount=type=cache`, which needs a buildah/podman recent enough to support it.
+  Inside the container it runs its scenarios (35 as of the harness closer to kscreenlocker) as root: it installs properpin with `install.sh`, listens on `/dev/log`, and runs attempts through the setuid `unix_chkpwd`. The Containerfile uses `RUN --mount=type=cache`, which needs a buildah/podman recent enough to support it.
 - **Read first:** `CLAUDE.md`, the root `Cargo.toml`, `products/pin/properpin.just`, `products/pin/docs/README.md`, `products/pin/testing/podman/Containerfile`, and `docs/plan.md`.
 
 ## What CI should do

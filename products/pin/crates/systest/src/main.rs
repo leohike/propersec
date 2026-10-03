@@ -8,11 +8,14 @@
 //! ```text
 //! properpin-systest run                    every scenario in order; exit 1 if any fails
 //! properpin-systest attempt SERVICE USER   one pam_authenticate, typing stdin, printing the outcome
+//! properpin-systest worker SERVICE USER    one PAM session, an attempt for each line of stdin
 //! ```
 //!
 //! `run` does each PAM attempt by starting `attempt` as the test user, the way the lock screen runs
-//! as the locked user. It listens on `/dev/log` itself, so what the module and `pam_unix` log through
-//! syslog comes back to the scenario that caused it.
+//! as the locked user, and checks that the process exited cleanly. `worker` stands in for
+//! kscreenlocker 6.8's `kscreenlocker_worker`: one session for many attempts, killed when the greeter
+//! cancels. `run` listens on `/dev/log` itself, so what the module and `pam_unix` log through syslog
+//! comes back to the scenario that caused it. After every scenario no helper may still be running.
 
 #![forbid(unsafe_code)]
 
@@ -22,11 +25,11 @@ use std::os::unix::fs::{PermissionsExt, chown, symlink};
 use std::os::unix::net::UnixDatagram;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitCode, Stdio};
+use std::process::{Child, Command, ExitCode, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use pamharness::PamClient;
 use properpin_core::{Budget, Clock, PinState, exit};
@@ -48,6 +51,11 @@ const SCRATCH: &str = "/tmp/properpin-scratch";
 const SYSLOG: &str = "/dev/log";
 /// Longer than any attempt takes, failure delays included; a hung attempt is killed after this.
 const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(60);
+/// A helper whose attempt was killed finishes on its own: at most a second waiting for the lock,
+/// then a hash or `unix_chkpwd`. Still running after this, it is a bug.
+const HELPER_LINGER: Duration = Duration::from_secs(5);
+/// What the kernel calls the helper: its name cut to 15 bytes.
+const HELPER_COMM: &str = "properpin-helpe";
 
 type Outcome<T = ()> = Result<T, String>;
 type Scenario = fn(&World) -> Outcome;
@@ -57,8 +65,9 @@ fn main() -> ExitCode {
     match args.iter().map(String::as_str).collect::<Vec<_>>()[..] {
         ["run"] => run(),
         ["attempt", service, user] => attempt_here(service, user),
+        ["worker", service, user] => worker_here(service, user),
         _ => {
-            eprintln!("usage: properpin-systest run | attempt SERVICE USER");
+            eprintln!("usage: properpin-systest run | attempt SERVICE USER | worker SERVICE USER");
             ExitCode::from(2)
         }
     }
@@ -77,6 +86,24 @@ fn attempt_here(service: &str, user: &str) -> ExitCode {
     for message in &attempt.messages {
         println!("message {message}");
     }
+    ExitCode::SUCCESS
+}
+
+/// Like `kscreenlocker_worker`: one PAM session, an attempt for each line typed, each answered with
+/// one line as soon as it is done, and `pam_end` before exiting at the end of the input.
+fn worker_here(service: &str, user: &str) -> ExitCode {
+    let mut session = PamClient::system(service, user).session();
+    let mut out = std::io::stdout().lock();
+    for typed in std::io::stdin().lines() {
+        let typed = typed.expect("typed input on stdin");
+        let started = Instant::now();
+        let attempt = session.authenticate(&typed);
+        let ms = started.elapsed().as_millis();
+        let delays = attempt.delays.len();
+        writeln!(out, "status {} prompts {} delays {delays} ms {ms}", attempt.status, attempt.prompts.len()).expect("stdout");
+        out.flush().expect("stdout");
+    }
+    drop(session);
     ExitCode::SUCCESS
 }
 
@@ -123,11 +150,13 @@ fn run() -> ExitCode {
         ("an arming time in the future is refused", an_arming_time_in_the_future),
         ("an expired PIN is refused", an_expired_pin),
         ("concurrent wrong PINs are all counted", concurrent_wrong_pins_are_all_counted),
+        ("one session serves many attempts, and the worker exits cleanly", one_session_serves_many_attempts),
+        ("a killed worker never unlocks and loses no count", a_killed_worker_loses_no_count),
         ("disable and uninstall leave PAM as it was", disable_and_uninstall),
     ];
     let mut failed = 0;
     for (name, scenario) in scenarios {
-        match world.reset().and_then(|()| scenario(&world)) {
+        match world.reset().and_then(|()| scenario(&world)).and_then(|()| no_helper_left()) {
             Ok(()) => println!("ok      {name}"),
             Err(error) => {
                 failed += 1;
@@ -616,6 +645,70 @@ fn concurrent_wrong_pins_are_all_counted(world: &World) -> Outcome {
     world.pin_refused(PIN, "3 failures in a row")
 }
 
+/// The 6.8 worker's way: one session, the password, the PIN, a wrong PIN and the PIN again, each
+/// asking once, the failure asking for pam_unix's delay, and the worker exiting cleanly after
+/// `pam_end`, where a Rust module that had been unloaded would crash.
+fn one_session_serves_many_attempts(world: &World) -> Outcome {
+    let mut worker = world.start(&["worker", "kde", USER])?;
+    let mut stdin = worker.stdin.take().expect("piped");
+    for typed in [PASSWORD, PIN, "1111", PIN] {
+        writeln!(stdin, "{typed}").map_err(message)?;
+    }
+    drop(stdin);
+    let output = world.wait_for(worker)?;
+    let log = world.syslog.take();
+    let answers = Answer::all(&output);
+    let said = || format!("{answers:?}\n{log}");
+    let statuses: Vec<bool> = answers.iter().map(|answer| answer.status == pamharness::PAM_SUCCESS).collect();
+    if statuses != [true, true, false, true] {
+        return Err(format!("unlocked {statuses:?}, not [true, true, false, true]: {}", said()));
+    }
+    if answers.iter().any(|answer| answer.prompts != 1) {
+        return Err(format!("every attempt asks once: {}", said()));
+    }
+    if answers.iter().map(|answer| answer.delays > 0).collect::<Vec<_>>() != [false, false, true, false] {
+        return Err(format!("only the failure asks for a delay: {}", said()));
+    }
+    if !log.contains("password accepted, PIN armed") || log.matches("unlocked with the PIN").count() != 2 || !log.contains("failure 1 of 3")
+    {
+        return Err(format!("the log doesn't show arming, two PIN unlocks and one failure: {}", said()));
+    }
+    // What the minimum-duration row in docs/plan.md will turn into an assertion.
+    println!(
+        "        note: a correct PIN took {} and {} ms; kscreenlocker 6.8 calls 50 ms or less too quick",
+        answers[1].ms, answers[3].ms
+    );
+    Ok(())
+}
+
+/// The 6.8 greeter cancels by killing its worker: SIGTERM and SIGKILL 25 ms later, or SIGKILL at
+/// once. A wrong PIN typed into a worker killed at chosen and random moments: no unlock, the helper
+/// finishes on its own and its count is kept, a fresh attempt right after gets the lock and is
+/// counted, and the counts and the budget agree.
+fn a_killed_worker_loses_no_count(world: &World) -> Outcome {
+    let seed = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map_err(message)?.subsec_nanos() | 1;
+    let mut random = u64::from(seed);
+    let mut next = move || {
+        random ^= random << 13;
+        random ^= random >> 7;
+        random ^= random << 17;
+        random
+    };
+    let chosen = [0, 2, 5, 10, 20, 40, 80, 150];
+    let mut reached = 0;
+    for round in 0..16 {
+        let after = chosen.get(round).copied().unwrap_or_else(|| next() % 250);
+        let gently = round % 2 == 1;
+        let counted = world.kill_a_worker(Duration::from_millis(after), gently).map_err(|error| {
+            let how = if gently { "SIGTERM, then SIGKILL" } else { "SIGKILL" };
+            format!("round {round}, seed {seed}: {how} after {after} ms: {error}")
+        })?;
+        reached += usize::from(counted == 2);
+    }
+    println!("        note: the killed worker's guess reached the helper, and was counted, in {reached} of 16 rounds");
+    Ok(())
+}
+
 fn disable_and_uninstall(world: &World) -> Outcome {
     world.arm()?;
     install_sh(&["disable", "--yes"])?;
@@ -671,6 +764,33 @@ struct Attempt {
     unlocked: bool,
     prompts: usize,
     log: String,
+}
+
+/// One attempt's line from a worker.
+#[derive(Debug)]
+struct Answer {
+    status: i32,
+    prompts: usize,
+    delays: usize,
+    ms: u64,
+}
+
+impl Answer {
+    fn all(output: &Output) -> Vec<Self> {
+        let parse = |line: &str| -> Option<Self> {
+            let words: Vec<&str> = line.split(' ').collect();
+            match words[..] {
+                ["status", status, "prompts", prompts, "delays", delays, "ms", ms] => Some(Self {
+                    status: status.parse().ok()?,
+                    prompts: prompts.parse().ok()?,
+                    delays: delays.parse().ok()?,
+                    ms: ms.parse().ok()?,
+                }),
+                _ => None,
+            }
+        };
+        String::from_utf8_lossy(&output.stdout).lines().filter_map(parse).collect()
+    }
 }
 
 impl World {
@@ -785,8 +905,16 @@ impl World {
 
     /// Start one attempt as the test user, in their own process.
     fn spawn(&self, service: &str, typed: &str) -> Outcome<Child> {
-        let mut child = Command::new(std::env::current_exe().map_err(message)?)
-            .args(["attempt", service, USER])
+        let mut child = self.start(&["attempt", service, USER])?;
+        child.stdin.take().expect("piped").write_all(typed.as_bytes()).map_err(message)?;
+        Ok(child)
+    }
+
+    /// Start this program with `args` as the test user, the way the lock screen runs as the
+    /// locked user.
+    fn start(&self, args: &[&str]) -> Outcome<Child> {
+        Command::new(std::env::current_exe().map_err(message)?)
+            .args(args)
             .uid(self.user.uid)
             .gid(self.user.gid)
             .env_clear()
@@ -796,12 +924,23 @@ impl World {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .map_err(message)?;
-        child.stdin.take().expect("piped").write_all(typed.as_bytes()).map_err(message)?;
-        Ok(child)
+            .map_err(message)
     }
 
-    fn finish(&self, mut child: Child) -> Outcome<Attempt> {
+    fn finish(&self, child: Child) -> Outcome<Attempt> {
+        let output = self.wait_for(child)?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let status = stdout.lines().find_map(|line| line.strip_prefix("status ")).and_then(|status| status.parse::<i32>().ok());
+        let Some(status) = status else {
+            return Err(format!("the attempt didn't finish: {}{}", stdout, String::from_utf8_lossy(&output.stderr)));
+        };
+        let prompts = stdout.lines().filter(|line| line.starts_with("prompt ")).count();
+        Ok(Attempt { unlocked: status == pamharness::PAM_SUCCESS, prompts, log: self.syslog.take() })
+    }
+
+    /// Wait for a process started by `start`, which must exit by itself, cleanly: a crash after
+    /// `pam_end`, as Rust modules have had at exit, would otherwise go unnoticed.
+    fn wait_for(&self, mut child: Child) -> Outcome<Output> {
         let deadline = Instant::now() + ATTEMPT_TIMEOUT;
         while child.try_wait().map_err(message)?.is_none() {
             if Instant::now() > deadline {
@@ -812,13 +951,52 @@ impl World {
             thread::sleep(Duration::from_millis(20));
         }
         let output = child.wait_with_output().map_err(message)?;
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let status = stdout.lines().find_map(|line| line.strip_prefix("status ")).and_then(|status| status.parse::<i32>().ok());
-        let Some(status) = status else {
-            return Err(format!("the attempt didn't finish: {}{}", stdout, String::from_utf8_lossy(&output.stderr)));
-        };
-        let prompts = stdout.lines().filter(|line| line.starts_with("prompt ")).count();
-        Ok(Attempt { unlocked: status == pamharness::PAM_SUCCESS, prompts, log: self.syslog.take() })
+        if !output.status.success() {
+            let said = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+            return Err(format!("the attempt process ended with {}, not exit 0:\n{said}{}", output.status, self.syslog.take()));
+        }
+        Ok(output)
+    }
+
+    /// One round of `a_killed_worker_loses_no_count`, with the PIN armed and no failures yet.
+    /// Returns how many failures were counted: 2 when the killed worker's guess reached the helper.
+    fn kill_a_worker(&self, after: Duration, gently: bool) -> Outcome<usize> {
+        self.arm()?;
+        let mut worker = self.start(&["worker", "kde", USER])?;
+        // Kept open, so the worker waits for more rather than exiting.
+        let mut stdin = worker.stdin.take().expect("piped");
+        writeln!(stdin, "1111").map_err(message)?;
+        thread::sleep(after);
+        if gently {
+            let pid = worker.id().to_string();
+            Command::new("/usr/bin/kill").args(["-s", "TERM", &pid]).status().map_err(message)?;
+            thread::sleep(Duration::from_millis(25));
+        }
+        let _ = worker.kill();
+        let output = worker.wait_with_output().map_err(message)?;
+        drop(stdin);
+        if Answer::all(&output).iter().any(|answer| answer.status == pamharness::PAM_SUCCESS) {
+            return Err(format!("the wrong PIN unlocked: {}", String::from_utf8_lossy(&output.stdout)));
+        }
+        let fresh = self.kde("2222")?;
+        expect(!fresh.unlocked, "the fresh wrong PIN unlocked", &fresh)?;
+        no_helper_left()?;
+        let log = fresh.log + &self.syslog.take();
+        if log.contains("PIN refused:") || log.contains("PIN not armed") {
+            return Err(format!("an attempt got no answer from the helper:\n{log}"));
+        }
+        let counted = log.matches("not the PIN, failure").count();
+        let text = fs::read_to_string(self.state_file()).map_err(message)?;
+        let state = PinState::parse(&text).ok_or_else(|| format!("the state doesn't parse: {text}"))?;
+        let budget = self.budget()?;
+        if !(1..=2).contains(&counted) || state.failures as usize != counted || budget.pending.len() != counted {
+            return Err(format!(
+                "{counted} failures logged, {} in a row in the state, {} pending in the budget; they must agree, at 1 or 2:\n{log}",
+                state.failures,
+                budget.pending.len()
+            ));
+        }
+        Ok(counted)
     }
 
     fn attempt(&self, service: &str, typed: &str) -> Outcome<Attempt> {
@@ -923,6 +1101,37 @@ fn expect_code(output: &std::process::Output, code: u8, what: &str) -> Outcome {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     ))
+}
+
+/// No helper is still running, within the time one whose attempt was killed takes to finish.
+/// Exited helpers nobody has reaped yet don't count.
+fn no_helper_left() -> Outcome {
+    let deadline = Instant::now() + HELPER_LINGER;
+    loop {
+        let running = running_helpers()?;
+        if running.is_empty() {
+            return Ok(());
+        }
+        if Instant::now() > deadline {
+            return Err(format!("helpers still running after {HELPER_LINGER:?}: pids {running:?}"));
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn running_helpers() -> Outcome<Vec<u32>> {
+    let mut running = Vec::new();
+    for entry in fs::read_dir("/proc").map_err(message)? {
+        let Ok(pid) = entry.map_err(message)?.file_name().to_string_lossy().parse::<u32>() else { continue };
+        // "pid (comm) state ...", where comm may itself contain ") ".
+        let Ok(stat) = fs::read_to_string(format!("/proc/{pid}/stat")) else { continue };
+        let (Some(open), Some(close)) = (stat.find('('), stat.rfind(") ")) else { continue };
+        let state = stat[close + 2..].chars().next();
+        if &stat[open + 1..close] == HELPER_COMM && state != Some('Z') {
+            running.push(pid);
+        }
+    }
+    Ok(running)
 }
 
 /// Run the installed `properpin` command as root, `typed` on stdin.
