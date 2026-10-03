@@ -4,7 +4,7 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Args {
     pub mode: Mode,
-    /// The setuid helper that holds the hashes and the counts.
+    /// The setgid helper that holds the hashes and the counts.
     pub helper: PathBuf,
     pub log: Option<PathBuf>,
     pub test_panic: bool,

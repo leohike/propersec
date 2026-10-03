@@ -57,7 +57,7 @@ impl FakeRoot {
             .arg(command)
             .arg("--root")
             .arg(self.dir.path())
-            .args(["--owner", &whoami(), "--account", &whoami()])
+            .args(["--owner", &whoami(), "--helper-group", &group()])
             .arg("--from")
             .arg(built())
             .output()
@@ -161,13 +161,14 @@ fn install_puts_everything_in_place_and_twice_is_harmless() {
         "{command}"
     );
     let mode = |path: &str| fs::metadata(root.path(path)).unwrap().permissions().mode() & 0o7777;
-    assert_eq!(mode("usr/local/libexec/properpin/properpin-helper"), 0o6755, "the helper is setuid and setgid");
+    assert_eq!(mode("usr/local/libexec/properpin/properpin-helper"), 0o2755, "the helper is setgid only");
     assert_eq!(mode("etc/properpin/users"), 0o750);
-    assert_eq!(mode("run/properpin"), 0o700);
+    assert_eq!(mode("run/properpin"), 0o1770);
     let sysusers = fs::read_to_string(root.path("etc/sysusers.d/properpin.conf")).unwrap();
-    assert!(sysusers.contains(&format!("u {} - ", whoami())), "{sysusers}");
+    assert!(sysusers.lines().any(|line| line == format!("g {} -", group())), "{sysusers}");
+    assert!(!sysusers.lines().any(|line| line.starts_with("u ")), "no account: {sysusers}");
     let tmpfiles = fs::read_to_string(root.path("etc/tmpfiles.d/properpin.conf")).unwrap();
-    assert!(tmpfiles.contains(&format!("d /run/properpin 0700 {0} {0} -", whoami())), "{tmpfiles}");
+    assert!(tmpfiles.contains(&format!("d /run/properpin 1770 {} {} -", whoami(), group())), "{tmpfiles}");
     assert_eq!(
         fs::read(root.path("usr/local/lib64/security/pam_properpin.so")).unwrap(),
         fs::read(built().join("libpam_properpin.so")).unwrap()
@@ -193,30 +194,34 @@ fn check_finds_what_is_wrong() {
     let problems = root.refused("check");
     assert!(problems.contains(&format!("users/{}: is 644", group())), "{problems}");
 
-    root.ok("install");
-    fs::set_permissions(&user_file, Permissions::from_mode(0o640)).unwrap();
-    fs::set_permissions(root.path("usr/local/libexec/properpin/properpin-helper"), Permissions::from_mode(0o755)).unwrap();
-    fs::set_permissions(root.path("run/properpin"), Permissions::from_mode(0o755)).unwrap();
-    fs::write(root.path("etc/tmpfiles.d/properpin.conf"), "d /run/properpin 0777 root root -\n").unwrap();
-    let problems = root.refused("check");
-    assert!(problems.contains("properpin-helper: is 755"), "{problems}");
-    assert!(problems.contains("/run/properpin: is 755"), "{problems}");
-    assert!(problems.contains("tmpfiles.d/properpin.conf: not what install.sh writes"), "{problems}");
+    for (helper, run_dir) in [(0o755, 0o755), (0o4755, 0o700), (0o6755, 0o770)] {
+        root.ok("install");
+        fs::set_permissions(&user_file, Permissions::from_mode(0o640)).unwrap();
+        fs::set_permissions(root.path("usr/local/libexec/properpin/properpin-helper"), Permissions::from_mode(helper)).unwrap();
+        fs::set_permissions(root.path("run/properpin"), Permissions::from_mode(run_dir)).unwrap();
+        fs::write(root.path("etc/tmpfiles.d/properpin.conf"), "d /run/properpin 0777 root root -\n").unwrap();
+        fs::write(root.path("etc/sysusers.d/properpin.conf"), "u properpin - \"an account\" - -\n").unwrap();
+        let problems = root.refused("check");
+        assert!(problems.contains(&format!("properpin-helper: is {helper:o}")), "{problems}");
+        assert!(problems.contains(&format!("/run/properpin: is {run_dir:o}")), "{problems}");
+        assert!(problems.contains("tmpfiles.d/properpin.conf: not what install.sh writes"), "{problems}");
+        assert!(problems.contains("sysusers.d/properpin.conf: not what install.sh writes"), "{problems}");
+    }
 }
 
 #[test]
-fn check_wants_the_account() {
+fn check_wants_the_group() {
     let root = FakeRoot::new();
     root.ok("install");
     let output = Command::new("bash")
         .arg(INSTALL_SH)
         .args(["check", "--root"])
         .arg(root.dir.path())
-        .args(["--owner", &whoami(), "--account", "no-such-account-properpin"])
+        .args(["--owner", &whoami(), "--helper-group", "no-such-group-properpin"])
         .output()
         .unwrap();
     assert!(!output.status.success());
-    assert!(says(&output).contains("no account named no-such-account-properpin"), "{}", says(&output));
+    assert!(says(&output).contains("no group named no-such-group-properpin"), "{}", says(&output));
 }
 
 #[test]

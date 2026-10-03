@@ -12,7 +12,7 @@
 //! never from the command line, where other users could see it in the process list.
 //!
 //! The hash file is written readable by the helper's group only, so the user can't read it either:
-//! `status` asks the setuid helper, which is the only program that reads hashes and counts.
+//! `status` asks the setgid helper, which is the only program that reads hashes and counts.
 
 #![forbid(unsafe_code)]
 
@@ -32,7 +32,7 @@ struct Cli {
     /// Where config and users/ live; /etc/properpin once installed
     #[arg(long, value_name = "DIR")]
     etc: PathBuf,
-    /// The setuid helper, which status asks; /usr/local/libexec/properpin/properpin-helper once installed
+    /// The setgid helper, which status asks; /usr/local/libexec/properpin/properpin-helper once installed
     #[arg(long, value_name = "PATH")]
     helper: PathBuf,
     /// Who must own the files under --etc

@@ -1,10 +1,11 @@
-//! The setuid start-up, and syslog. All of the helper's `unsafe` code is in this file.
+//! The setgid start-up, and syslog. All of the helper's `unsafe` code is in this file.
 //!
-//! A setuid program starts in a state its caller chose: open files, ignored or blocked signals, an
-//! environment, a working directory, a umask. Before anything else, `start_clean` puts each back to
-//! a known value, the way `unix_chkpwd` and other setuid helpers do. What the kernel and glibc already
-//! do for a setuid start, and isn't repeated here: the process can't be traced or dumped by its
-//! caller, and the dynamic loader ignores `LD_PRELOAD`, `LD_LIBRARY_PATH` and similar variables.
+//! A setgid program starts in a state its caller chose: open files, ignored or blocked signals, an
+//! environment, a working directory, a umask, resource limits. Before anything else, `start_clean`
+//! puts most of them back to a known value, the way `unix_chkpwd` and other setuid and setgid helpers
+//! do. What the kernel and glibc already do for any elevated start, setgid included, and isn't
+//! repeated here: the process can't be traced or dumped by its caller, and the dynamic loader ignores
+//! `LD_PRELOAD`, `LD_LIBRARY_PATH` and similar variables.
 #![allow(unsafe_code)]
 
 use std::ffi::CString;
@@ -39,7 +40,7 @@ pub fn start_clean() {
         libc::sigprocmask(libc::SIG_SETMASK, &none, std::ptr::null_mut());
         // Nothing the caller set in the environment is read, by this code or by glibc.
         libc::clearenv();
-        // New files are the helper account's alone, and the working directory is nobody's choice.
+        // New files are readable by their owner alone, and the working directory is nobody's choice.
         libc::umask(0o077);
         libc::chdir(c"/".as_ptr());
     }

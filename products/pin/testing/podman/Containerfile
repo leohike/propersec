@@ -24,7 +24,7 @@ RUN cd /tmp \
     && rpm2cpio plasma-workspace-*.rpm | cpio -idm --quiet ./etc/pam.d/kde \
     && install -m 0644 etc/pam.d/kde /etc/pam.d/kde \
     && rm -rf /tmp/* && dnf clean all
-# alice has a PIN; bob is the other user on the machine. install.sh creates the properpin account.
+# alice has a PIN; bob is the other user on the machine. install.sh creates the properpin group.
 RUN useradd -m alice && echo 'alice:correct horse battery staple' | chpasswd && useradd -m bob
 COPY --from=build /out/ /opt/properpin/
 COPY products/pin/packaging /opt/properpin/packaging

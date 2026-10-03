@@ -1,6 +1,6 @@
 # properpin's security, once complete
 
-A short assessment of properpin as it would be with everything planned so far built, written on 2026-10-03. **This version doesn't exist yet**: the setgid helper exists in its account-based form, while the pepper, the repeated-access fix and refusing a PIN equal to the password are still in `docs/plan.md` and `docs/spec-setgid-helper.md`. The question it answers: how much weaker is unlocking with a PIN than typing the full password every time?
+A short assessment of properpin as it would be with everything planned so far built, written on 2026-10-03. **This version doesn't exist yet**: the setgid helper is built, while the pepper, the repeated-access fix and refusing a PIN equal to the password are still in `docs/plan.md`. The question it answers: how much weaker is unlocking with a PIN than typing the full password every time?
 
 ## What "complete" means here
 

@@ -1,6 +1,6 @@
 # properpin plan
 
-What is left to do for properpin, most urgent first. Finished items are removed; the product README and the git history describe them (so far: the installer, the container test, CI with the dependency audit, wiping secrets from memory, the unit tests that pin down the counting order, and the setuid helper that keeps the hashes and counts out of the user's reach). The long tail of smaller open points is in `docs/concerns.md`. Nothing here deploys to the real machine; the "Touches the machine" column says what, if anything, lands outside the repo.
+What is left to do for properpin, most urgent first. Finished items are removed; the product README and the git history describe them (so far: the installer, the container test, CI with the dependency audit, wiping secrets from memory, the unit tests that pin down the counting order, and the setgid helper that keeps the hashes and counts out of the user's reach). The long tail of smaller open points is in `docs/concerns.md`. Nothing here deploys to the real machine; the "Touches the machine" column says what, if anything, lands outside the repo.
 
 | Improvement | What | Why | Touches the machine | Effort | When |
 |---|---|---|---|---|---|

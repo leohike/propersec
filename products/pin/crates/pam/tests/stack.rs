@@ -3,15 +3,15 @@
 //! The PAM files come from a temporary directory (`pam_start_confdir`). The stack is the shipped
 //! `pam/kde-auth.pam` with only three things swapped: the module path points at the freshly built
 //! `.so`, the helper path at a script that runs the freshly built `properpin-helper` against the
-//! sandbox (through its `--dev-*` options, which it accepts here because it isn't setuid), and
+//! sandbox (through its `--dev-*` options, which it accepts here because it isn't setgid), and
 //! `pam_unix` becomes `pam_permit` (the password was right) or `pam_deny` (it was wrong). The
 //! control columns are the shipped ones.
 //!
-//! What this can't show: how the real pam_unix, the real setuid helper and the real greeter
+//! What this can't show: how the real pam_unix, the real setgid helper and the real greeter
 //! behave. The container test covers the first two.
 
 use std::fs::{self, Permissions};
-use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
@@ -40,8 +40,9 @@ impl Sandbox {
         let dir = tempfile::tempdir().unwrap();
         let user = Account::by_uid(current_uid()).unwrap().name;
         let sandbox = Self { dir, user };
-        fs::DirBuilder::new().mode(0o700).create(sandbox.run_dir()).unwrap();
-        fs::set_permissions(sandbox.run_dir(), Permissions::from_mode(0o700)).unwrap();
+        fs::create_dir(sandbox.run_dir()).unwrap();
+        // Set explicitly: the umask would strip the group's write bit from a mkdir mode.
+        fs::set_permissions(sandbox.run_dir(), Permissions::from_mode(0o1770)).unwrap();
         fs::create_dir_all(sandbox.path("etc/users")).unwrap();
         fs::create_dir_all(sandbox.path("pam.d")).unwrap();
         // libpam logs to the journal when a confdir has no "other" fallback service.

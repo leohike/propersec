@@ -16,7 +16,7 @@ mod crypt;
 mod files;
 mod log;
 
-pub use accounts::{Account, current_euid, current_uid, group_by_name};
+pub use accounts::{Account, current_egid, current_euid, current_gid, current_uid, group_by_name};
 pub use clock::BootClock;
 pub use crypt::Yescrypt;
 pub use files::UserFiles;

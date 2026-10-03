@@ -2,6 +2,8 @@
 
 A self-contained spec for one change to properpin, written on 2026-10-03 to be implemented as is. It replaces the `properpin` system account with a `properpin` system group: the helper becomes setgid only and owned by root. Everything an implementer needs is here; the discussion behind it is summarised in Why below.
 
+**Status: implemented on 2026-10-03.** Deviations, each recorded in `docs/concerns.md`: `refuse_old_layout` was removed rather than adapted, since no earlier layout was ever installed; `check` on the real system requires root instead of printing that gshadow wasn't verified; the caller can't change the running helper's resource limits after all (`prlimit` also checks group ids), so that cost in Why doesn't apply; planted lock files are described, with a fix, in `docs/planted-lock-dos.md`.
+
 ## Rules for whoever implements this
 
 - Work in the propersec repo, product `products/pin`. Read `CLAUDE.md` at the repo root first: no numbered headings or lists in markdown, no hard-wrapped prose, commit only when asked and only through the commit skill.

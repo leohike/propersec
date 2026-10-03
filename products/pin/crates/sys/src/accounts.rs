@@ -1,4 +1,4 @@
-use nix::unistd::{Group, Uid, User, geteuid, getuid};
+use nix::unistd::{Group, Uid, User, getegid, geteuid, getgid, getuid};
 use properpin_core::Error;
 
 use crate::system;
@@ -35,6 +35,14 @@ pub fn current_uid() -> u32 {
 
 pub fn current_euid() -> u32 {
     geteuid().as_raw()
+}
+
+pub fn current_gid() -> u32 {
+    getgid().as_raw()
+}
+
+pub fn current_egid() -> u32 {
+    getegid().as_raw()
 }
 
 /// The gid of the group named `name`, or of `name` itself when it is a number.

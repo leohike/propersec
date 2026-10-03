@@ -2,7 +2,7 @@
 
 An open question, written down when the module started wiping its own copies of secrets (2026-10-02).
 
-**Later the same day, the PIN check moved into a setuid helper.** The module still copies what was typed out of libpam, but now writes it into a pipe to `properpin-helper` and drops its copy when the helper answers; the helper reads it into a buffer of fixed size and wipes it on exit, and `arm` passes the password on to `unix_chkpwd` through another pipe. That adds a short-lived copy in a second process, owned by the `properpin` account. The reasoning below still holds for both copies: each lives shorter than libpam's.
+**Later the same day, the PIN check moved into a setuid helper,** setgid only since 2026-10-03. The module still copies what was typed out of libpam, but now writes it into a pipe to `properpin-helper` and drops its copy when the helper answers; the helper reads it into a buffer of fixed size and wipes it on exit, and `arm` passes the password on to `unix_chkpwd` through another pipe. That adds a short-lived copy in a second process, which runs as the user with the `properpin` group added. The reasoning below still holds for both copies: each lives shorter than libpam's.
 
 ## The question
 

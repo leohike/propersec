@@ -1,9 +1,9 @@
 //! The `properpin` command, run as a subprocess against a sandboxed `--etc` owned by whoever runs
 //! the tests, with `--helper` pointing at a script that runs the freshly built `properpin-helper`
-//! against the same sandbox (through its `--dev-*` options, accepted because it isn't setuid).
+//! against the same sandbox (through its `--dev-*` options, accepted because it isn't setgid).
 
 use std::fs::{self, Permissions};
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
@@ -18,8 +18,9 @@ impl Sandbox {
     fn new() -> Self {
         let sandbox = Self(tempfile::tempdir().unwrap());
         let root = sandbox.0.path();
-        fs::DirBuilder::new().mode(0o700).create(root.join("run")).unwrap();
-        fs::set_permissions(root.join("run"), Permissions::from_mode(0o700)).unwrap();
+        fs::create_dir(root.join("run")).unwrap();
+        // Set explicitly: the umask would strip the group's write bit from a mkdir mode.
+        fs::set_permissions(root.join("run"), Permissions::from_mode(0o1770)).unwrap();
         let chkpwd = format!("#!/bin/bash\nIFS= read -r -d '' password\n[[ $password == '{PASSWORD}' ]]\n");
         script(&root.join("unix_chkpwd"), &chkpwd);
         let helper = format!(

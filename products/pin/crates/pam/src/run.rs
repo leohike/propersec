@@ -1,4 +1,4 @@
-//! The module's work, in safe code: hand what was typed to the setuid helper and read its answer.
+//! The module's work, in safe code: hand what was typed to the setgid helper and read its answer.
 //! `pam.rs` turns the result into a PAM return code.
 
 use std::io::Write;

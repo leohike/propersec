@@ -1,8 +1,8 @@
 # Reviewing properpin-helper
 
-A checklist for reviewing the setuid helper: every hazard a setuid program faces, what `properpin-helper` does about it, where in the code, and which test shows it. It is meant to be read next to the code, top to bottom, in one sitting. What is still open is in `docs/concerns.md` at the repo root.
+A checklist for reviewing the setgid helper: every hazard a program with more rights than its caller faces, what `properpin-helper` does about it, where in the code, and which test shows it. It is meant to be read next to the code, top to bottom, in one sitting. What is still open is in `docs/concerns.md` at the repo root.
 
-**The shape, in one paragraph.** The helper is installed `properpin:properpin 6755`: it runs as the `properpin` account and group, with its caller's real uid. It reads the PIN hashes in `/etc/properpin/users` (`root:properpin 0640`, so it can read them and not change them) and keeps every user's counts in `/run/properpin` (its own, `0700`). Its caller is the PAM module, the CLI's `status`, or anything else the user runs, so every caller is treated as hostile. It answers with an exit code; only `status` prints, and only about the caller. The code is `crates/helper`: `main.rs` (the setuid entry point), `secure.rs` (all of its `unsafe` code), `lib.rs` (the decisions, with `#![forbid(unsafe_code)]`) and `chkpwd.rs` (`unix_chkpwd`).
+**The shape, in one paragraph.** The helper is installed `root:properpin 2755`: it runs as its caller, with the `properpin` group added. The group has no members, no account goes with it, and its password is locked, so running the helper is the only way to get it, and only root can change the binary. It reads the PIN hashes in `/etc/properpin/users` (`root:properpin 0640`, so it can read them and not change them) and keeps every user's counts in `/run/properpin` (`root:properpin 1770`: only the group can enter, and the sticky bit lets only a file's owner replace or delete it), each user's files owned by that user. Its caller is the PAM module, the CLI's `status`, or anything else the user runs, so every caller is treated as hostile. It answers with an exit code; only `status` prints, and only about the caller. The code is `crates/helper`: `main.rs` (the setgid entry point), `secure.rs` (all of its `unsafe` code), `lib.rs` (the decisions, with `#![forbid(unsafe_code)]`) and `chkpwd.rs` (`unix_chkpwd`).
 
 ## Who is asking
 
@@ -11,7 +11,7 @@ A checklist for reviewing the setuid helper: every hazard a setuid program faces
 | The caller claims to be someone else | The caller is always the real uid from the kernel (`getuid`), turned into a name through the passwd database. No argument names a user | `main.rs`, `run` | `another_user_gets_nothing` (container): bob passing `alice` is refused |
 | A crafted user name reaches a path | `UserFiles::new` refuses empty names, `.`, `..` and names with `/`; the passwd database is the only source anyway | `sys/src/files.rs` | `a_bad_user_name_is_refused_before_any_file` |
 | Root calls it | Refused: root has no lock screen, and a root caller would have every user's name to choose from | `main.rs`, `run` | `status_shows_your_own_pin` (container), through the CLI and the helper directly |
-| The caller picks the files | Fixed locations. The `--dev-*` options that replace them are accepted only when `AT_SECURE` says the program wasn't started with elevated rights, and then it has no more rights than its caller | `main.rs`, `Options` and `run`; `secure.rs`, `elevated` | `dev_options_are_refused_under_setuid` (container), which fails when the check is disabled |
+| The caller picks the files | Fixed locations. The `--dev-*` options that replace them are accepted only when two independent checks agree the program runs without elevated rights: `AT_SECURE` is clear, and the real and effective user and group ids are equal. Then it has no more rights than its caller | `lib.rs`, `dev_options_allowed`; `main.rs`, `Options` and `run`; `secure.rs`, `elevated` | `dev_options_are_refused_under_setgid` (container), which fails when the `AT_SECURE` check is disabled and still passes with either check alone; `dev_options_need_both_guards_to_agree`, the truth table |
 
 ## What it inherits
 
@@ -20,10 +20,11 @@ A checklist for reviewing the setuid helper: every hazard a setuid program faces
 | Closed stdin, stdout or stderr, so a file it opens lands on 0, 1 or 2 | Each is reopened on `/dev/null` if closed | `secure.rs`, `start_clean` | `a_poisoned_start_changes_nothing` (local and container) |
 | Open files left by the caller | All descriptors from 3 up are closed (`close_range`) | `secure.rs`, `start_clean` | Same; nothing shows it directly, see `docs/concerns.md` |
 | Ignored, caught or blocked signals | Every signal back to its default and none blocked; SIGPIPE ignored, so a closed pipe is an error, not a death | `secure.rs`, `start_clean` | Not directly |
-| The environment (`LD_PRELOAD`, locale, `TZ`, `RUST_BACKTRACE`) | The loader and glibc ignore the dangerous ones in setuid mode; the helper clears the environment, never reads it, starts `unix_chkpwd` with none, and its panic hook aborts without printing (the default one reads `RUST_BACKTRACE`) | `secure.rs`, `start_clean`; `main.rs`, `main`; `chkpwd.rs` | `a_poisoned_start_changes_nothing` (local and container) |
+| The environment (`LD_PRELOAD`, locale, `TZ`, `RUST_BACKTRACE`) | The loader and glibc ignore the dangerous ones in secure-execution mode, which setgid triggers like setuid; the helper clears the environment, never reads it, starts `unix_chkpwd` with none, and its panic hook aborts without printing (the default one reads `RUST_BACKTRACE`) | `secure.rs`, `start_clean`; `main.rs`, `main`; `chkpwd.rs` | `a_poisoned_start_changes_nothing` (local and container) |
 | The umask and the working directory | umask `077`, working directory `/` | `secure.rs`, `start_clean` | Not directly |
-| Resource limits | Not reset. Any limit can only make it fail, and it fails before the hash is checked or after the failure is saved, because the failure is saved first | `core/src/attempt.rs`, `check` | `a_failure_is_saved_before_the_hash_is_checked`; no limit-specific test, see `docs/concerns.md` |
-| Being traced or dumped by the caller | The kernel makes a setuid process non-dumpable and refuses its caller `ptrace` | The kernel | Not tested |
+| Resource limits | Not reset. Limits set before the start are inherited; the caller can't change them on the running helper, because `prlimit` on another process also requires matching group ids, and the helper's effective group differs. Any limit can only make it fail, and it fails before the hash is checked or after the failure is saved, because the failure is saved first | `core/src/attempt.rs`, `check` | `a_failure_is_saved_before_the_hash_is_checked`; no limit-specific test, see `docs/concerns.md` |
+| Being traced or dumped by the caller | The kernel makes a setgid process non-dumpable and refuses its caller `ptrace` | The kernel | Not tested |
+| Signals from the caller | It keeps the caller's uid, so the caller may kill or stop it, as with `unix_chkpwd`. A kill comes after the failure was saved; a stopped helper holds only the caller's own lock | `core/src/attempt.rs`, `check` | `every_check_happens_with_its_attempt_already_counted` |
 
 ## Input and output
 
@@ -42,8 +43,10 @@ A checklist for reviewing the setuid helper: every hazard a setuid program faces
 |---|---|---|---|
 | A symlink or a non-regular file | Opened with `O_NOFOLLOW`, checked on the open file, so the file checked is the file read | `sys/src/files.rs`, `read_regular_file` | `a_symlink_is_never_followed`, `a_symlinked_user_file` (container) |
 | A user file someone else could change or read | Must be owned by root, not writable by group or others, not readable by others | `sys/src/files.rs`, `read_trusted` | `untrusted_files_are_refused`, three container scenarios |
-| A state directory others can reach | Must be a directory owned by the account the helper runs as, mode `0700` | `sys/src/files.rs`, `private_run_dir` | `a_shared_run_dir_is_refused`, `a_run_dir_owned_by_someone_else_is_refused`, `a_shared_runtime_directory` (container) |
-| The user resets or reads their counts | They can't reach `/run/properpin` at all | install.sh; `sys/src/files.rs` | `the_user_cannot_reach_the_files` (container) |
+| A state directory others can reach, or without the sticky bit | Must be a directory, not a symlink, owned by root, with the group the helper runs with, mode exactly `1770`. A helper installed without its setgid bit runs with the caller's group, which doesn't match, and refuses | `sys/src/files.rs`, `trusted_run_dir` | `a_run_dir_with_any_other_mode_is_refused`, `a_run_dir_with_another_owner_or_group_is_refused`, `a_symlinked_run_dir_is_refused`, `a_shared_runtime_directory` (container) |
+| The user resets or reads their counts | They can't enter `/run/properpin` at all | install.sh; `sys/src/files.rs` | `the_user_cannot_reach_the_files` (container) |
+| One user's run of the helper, exploited, touching another's counts | Each user's state and lock files belong to that user, mode `0600`, and the directory is sticky, so another user's process can't read, write, rename or delete them | `sys/src/files.rs`; install.sh | `one_users_helper_cannot_touch_anothers_counts` (container), which fails without the sticky bit |
+| A lock or state file planted in another user's name | The lock file must be a regular file owned by the caller, checked on the open file, or the attempt is refused with a log line naming its owner; a state file not owned by the caller reads as no state, which requires the password. A planted lock file blocks that user's PIN until reboot, see `docs/planted-lock-dos.md` | `sys/src/files.rs`, `lock` and `load_state` | `a_lock_file_planted_by_someone_else_is_refused`, `a_state_file_planted_by_someone_else_reads_as_none`, `planted_counts_are_refused` (container) |
 | A half-written state | Written to a temporary file in the same directory and renamed over, under an exclusive lock with a one-second timeout | `sys/src/files.rs`, `save_state`, `lock` | `state_round_trips_under_the_lock`, `a_held_lock_times_out_instead_of_hanging`, `concurrent_wrong_pins_are_all_counted` (container) |
 | One user's attempts affecting another's | One state file and one lock per uid | `sys/src/files.rs` | `each_user_has_their_own_state`, `each_caller_gets_only_their_own_pin_and_counts` |
 
@@ -53,7 +56,7 @@ A checklist for reviewing the setuid helper: every hazard a setuid program faces
 |---|---|---|---|
 | A guess checked but never counted (a kill at the right moment) | The failure is saved before the hash is checked and taken back on a match | `core/src/attempt.rs`, `check` | `every_check_happens_with_its_attempt_already_counted` |
 | Anything the user runs arming the PIN, to reset the failures | `arm` checks the password through `unix_chkpwd` first, and refuses an empty one | `lib.rs`, `arm_pin`; `chkpwd.rs` | `a_wrong_password_never_arms`, `arming_after_failures_needs_the_password_too`, `arming_checks_the_password_itself` (container, real `unix_chkpwd`), which fails when the check is removed |
-| `unix_chkpwd` answering about someone else | It answers only about the user its caller really is; the helper keeps its caller's real uid, so the two agree | `chkpwd.rs` | `arming_checks_the_password_itself` (container) |
+| `unix_chkpwd` answering about someone else | It answers only about the user its caller really is; the helper keeps its caller's uid, so the two agree | `chkpwd.rs` | `arming_checks_the_password_itself` (container) |
 | The hash compared in a way that leaks timing | libxcrypt hashes; the result is compared in constant time where libxcrypt wrote it | `sys/src/crypt.rs` | `hashes_and_verifies` |
 
 ## The caller's side: the PAM module
@@ -72,7 +75,9 @@ A checklist for reviewing the setuid helper: every hazard a setuid program faces
 
 | Path | Owner and mode | Why |
 |---|---|---|
-| `/usr/local/libexec/properpin/properpin-helper` | `properpin:properpin 6755` | Setuid for the counts, setgid for reading hash files. The account owns its own binary, an open decision in `docs/concerns.md` |
+| `/usr/local/libexec/properpin/properpin-helper` | `root:properpin 2755` | Setgid for reading hash files and keeping counts; only root can change it |
 | `/etc/properpin/users/` | `root:properpin 0750` | The user can't list who has a PIN |
 | `/etc/properpin/users/<user>` | `root:properpin 0640` | Root writes it (`sudo properpin set`), the helper reads it, nobody else |
-| `/run/properpin/` | `properpin:properpin 0700` | The counts, out of every user's reach |
+| `/run/properpin/` | `root:properpin 1770` | The counts, out of every user's reach; sticky, so each file is replaced or deleted only by its owner |
+| `/run/properpin/<uid>.state`, `<uid>.lock` | `<uid>:properpin 0600` | Created by the helper run by that user |
+| The `properpin` group | no members, nobody's primary group, password locked in `/etc/gshadow` | Running the helper is the only way to get it; `check` reads gshadow, so it needs root |

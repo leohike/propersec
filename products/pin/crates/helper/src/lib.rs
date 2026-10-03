@@ -1,9 +1,12 @@
 //! `properpin-helper`: the only program that reads PIN hashes and keeps the failure counts.
 //!
-//! It is installed setuid to the `properpin` account, like `unix_chkpwd` is setuid to root, so the
-//! hash files and the counts can belong to that account and stay out of reach of everything the
-//! user runs. The PAM module and the CLI start it, write what was typed to its stdin, and read its
-//! exit code (`properpin_core::exit`); only `status` prints anything.
+//! It is installed owned by root and setgid to the `properpin` group, like Debian's `unix_chkpwd` is
+//! setgid to `shadow`, so the hash files and the counts can be readable by that group alone and stay
+//! out of reach of everything the user runs. The group has no members: running the helper is the
+//! only way to get it. The helper keeps its caller's user id, so the caller can't change the helper,
+//! and each user's counts file is that user's own. The PAM module and the CLI start it, write what
+//! was typed to its stdin, and read its exit code (`properpin_core::exit`); only `status` prints
+//! anything.
 //!
 //! ```text
 //! properpin-helper check    stdin: what was typed. Exit 0 if it is the PIN and the PIN is armed
@@ -14,10 +17,11 @@
 //!
 //! The caller is always the real user id the kernel reports. The helper never takes a user name or
 //! a path from its caller, except through the `--dev-*` options, which `main.rs` accepts only when
-//! the helper was started without elevated rights, and then it has no more rights than its caller.
+//! [`dev_options_allowed`] says the helper runs without elevated rights, and then it has no more
+//! rights than its caller.
 //!
 //! This library is the decision part, with every location and outside check passed in, so the tests
-//! drive it directly with temporary directories. `main.rs` is the setuid part: a clean start, the
+//! drive it directly with temporary directories. `main.rs` is the setgid part: a clean start, the
 //! fixed locations, and the real caller.
 
 #![forbid(unsafe_code)]
@@ -65,14 +69,26 @@ pub struct Places {
     pub etc_owner: u32,
     /// `/run/properpin` once installed: every user's state, in one directory.
     pub run_dir: PathBuf,
-    /// Who must own `run_dir`: the account the helper runs as.
+    /// Who must own `run_dir`: root once installed.
     pub run_owner: u32,
+    /// The group `run_dir` must have: the one the helper runs with, so a helper installed without
+    /// its setgid bit runs with the caller's group and refuses.
+    pub run_group: u32,
 }
 
 impl Places {
     fn files(&self, caller: &Account) -> Result<UserFiles, Error> {
-        Ok(UserFiles::new(&self.etc, self.etc_owner, &caller.name, caller.uid)?.with_runtime(&self.run_dir, self.run_owner))
+        let files = UserFiles::new(&self.etc, self.etc_owner, &caller.name, caller.uid)?;
+        Ok(files.with_runtime(&self.run_dir, self.run_owner, self.run_group))
     }
+}
+
+/// Whether the `--dev-*` options may be used: only when the helper runs with no more rights than
+/// its caller. Two independent signs must agree: the kernel didn't flag the start as elevated
+/// (`AT_SECURE`), and the real and effective ids are the same, user and group both. A bug has to
+/// defeat both before a caller could point the installed helper at files or a checker of their own.
+pub fn dev_options_allowed(at_secure: bool, uid: u32, euid: u32, gid: u32, egid: u32) -> bool {
+    !at_secure && uid == euid && gid == egid
 }
 
 /// Checks the account password, the way pam_unix does: through `unix_chkpwd` once installed.
@@ -227,9 +243,9 @@ pub fn read_input(input: &mut impl Read) -> std::io::Result<Secret> {
 mod tests {
     use std::cell::RefCell;
     use std::fs::{self, Permissions};
-    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    use std::os::unix::fs::PermissionsExt;
 
-    use properpin_sys::{BootClock, Yescrypt, current_uid};
+    use properpin_sys::{BootClock, Yescrypt, current_egid, current_uid};
 
     use super::*;
 
@@ -245,10 +261,17 @@ mod tests {
     fn sandbox() -> Sandbox {
         let dir = tempfile::tempdir().unwrap();
         let uid = current_uid();
-        let places = Places { etc: dir.path().join("etc"), etc_owner: uid, run_dir: dir.path().join("run"), run_owner: uid };
-        fs::DirBuilder::new().mode(0o700).create(&places.run_dir).unwrap();
-        fs::set_permissions(&places.run_dir, Permissions::from_mode(0o700)).unwrap();
-        let caller = Account { name: "alice".into(), uid: 4242, gid: 4242 };
+        let places = Places {
+            etc: dir.path().join("etc"),
+            etc_owner: uid,
+            run_dir: dir.path().join("run"),
+            run_owner: uid,
+            run_group: current_egid(),
+        };
+        fs::create_dir(&places.run_dir).unwrap();
+        fs::set_permissions(&places.run_dir, Permissions::from_mode(0o1770)).unwrap();
+        // alice is whoever runs the tests: her counts files must be her own, and they are the test's.
+        let caller = Account { name: "alice".into(), uid, gid: current_egid() };
         let sandbox = Sandbox { _dir: dir, places, caller };
         sandbox.write_user_file(&format!("hash = {}\n", Yescrypt.hash(PIN, 4).unwrap()));
         sandbox
@@ -344,7 +367,7 @@ mod tests {
     fn each_caller_gets_only_their_own_pin_and_counts() {
         let sandbox = sandbox();
         sandbox.ask(Request::Arm, PASSWORD);
-        let bob = Account { name: "bob".into(), uid: 4343, gid: 4343 };
+        let bob = Account { name: "bob".into(), uid: sandbox.caller.uid + 1, gid: sandbox.caller.gid };
         let (code, _, log) = sandbox.ask_as(&bob, Request::Check, PIN);
         assert_eq!((code, log.as_str()), (exit::NO, "bob: no PIN is set, refused"));
         for wrong in ["1111", "2222", "3333"] {
@@ -366,13 +389,28 @@ mod tests {
         fs::set_permissions(&sandbox.places.run_dir, Permissions::from_mode(0o755)).unwrap();
         let (code, _, log) = sandbox.ask(Request::Arm, PASSWORD);
         assert_eq!(code, exit::BROKEN);
-        assert!(log.contains("not a private directory"), "{log}");
+        assert!(log.contains("mode 0755, not 1770"), "{log}");
+    }
+
+    #[test]
+    fn dev_options_need_both_guards_to_agree() {
+        let (me, other) = (1000, 1001);
+        assert!(dev_options_allowed(false, me, me, me, me));
+        for (at_secure, uid, euid, gid, egid) in [
+            (true, me, me, me, me),        // the kernel says elevated, the ids don't show it
+            (false, me, other, me, me),    // setuid that AT_SECURE missed
+            (false, me, me, me, other),    // setgid that AT_SECURE missed
+            (false, other, me, other, me), // both
+            (true, me, other, me, other),
+        ] {
+            assert!(!dev_options_allowed(at_secure, uid, euid, gid, egid), "{at_secure} {uid} {euid} {gid} {egid}");
+        }
     }
 
     #[test]
     fn a_bad_user_name_is_refused_before_any_file() {
         let sandbox = sandbox();
-        let sneaky = Account { name: "../alice".into(), uid: 4242, gid: 4242 };
+        let sneaky = Account { name: "../alice".into(), ..sandbox.caller.clone() };
         let (code, _, log) = sandbox.ask_as(&sneaky, Request::Check, PIN);
         assert_eq!(code, exit::BROKEN);
         assert!(log.contains("not a usable user name"), "{log}");

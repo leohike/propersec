@@ -1,26 +1,27 @@
-//! `properpin-helper`, the setuid program. See the library (`lib.rs`) for what it answers.
+//! `properpin-helper`, the setgid program. See the library (`lib.rs`) for what it answers.
 //!
 //! ```text
 //! properpin-helper check|arm|status
 //! ```
 //!
-//! Installed setuid to the `properpin` account, with fixed locations: the hashes in `/etc/properpin`
-//! (owned by root), the counts in `/run/properpin` (owned by the account it runs as), the password
-//! checked by `/usr/sbin/unix_chkpwd`, and logs to syslog.
+//! Installed `root:properpin 2755`, setgid to the `properpin` group, with fixed locations: the
+//! hashes in `/etc/properpin` (owned by root, readable by the group), the counts in `/run/properpin`
+//! (root's, sticky, writable by the group), the password checked by `/usr/sbin/unix_chkpwd`, and logs
+//! to syslog.
 //!
 //! For local tests, and only when started without elevated rights, these options replace them:
 //!
 //! ```text
 //! --dev-etc DIR       instead of /etc/properpin                   required with any --dev option
 //! --dev-run DIR       instead of /run/properpin                   required with any --dev option
-//! --dev-owner UID     who must own the files under --dev-etc      default: the caller
+//! --dev-owner UID     who must own --dev-run and the files under --dev-etc   default: the caller
 //! --dev-chkpwd PATH   instead of /usr/sbin/unix_chkpwd
 //! --dev-log FILE      append log lines here instead of syslog
 //! ```
 //!
-//! Started with elevated rights (setuid, as installed), any `--dev` option is refused outright. Without
-//! elevated rights the helper can do nothing its caller couldn't do directly, so letting the caller
-//! choose the locations gives nothing away.
+//! Started with elevated rights (setgid, as installed), any `--dev` option is refused outright; see
+//! `dev_options_allowed` for the two checks. Without elevated rights the helper can do nothing its
+//! caller couldn't do directly, so letting the caller choose the locations gives nothing away.
 
 use std::ffi::OsString;
 use std::io::{IsTerminal, Write};
@@ -28,8 +29,8 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use properpin_core::{Log, Secret, exit};
-use properpin_helper::{Context, Places, Request, UnixChkpwd, read_input, serve};
-use properpin_sys::{Account, BootClock, FileLog, Yescrypt, current_euid, current_uid};
+use properpin_helper::{Context, Places, Request, UnixChkpwd, dev_options_allowed, read_input, serve};
+use properpin_sys::{Account, BootClock, FileLog, Yescrypt, current_egid, current_euid, current_gid, current_uid};
 
 mod secure;
 
@@ -55,7 +56,7 @@ fn run(args: &[OsString]) -> u8 {
         _ => Box::new(secure::Syslog::open()),
     };
     let uid = current_uid();
-    if options.dev.is_some() && secure::elevated() {
+    if options.dev.is_some() && !dev_options_allowed(secure::elevated(), uid, current_euid(), current_gid(), current_egid()) {
         log.log(&format!("uid {uid}: refused: --dev options while running with elevated rights"));
         return exit::USAGE;
     }
@@ -89,11 +90,23 @@ fn run(args: &[OsString]) -> u8 {
     };
     let (places, password) = match &options.dev {
         None => (
-            Places { etc: "/etc/properpin".into(), etc_owner: 0, run_dir: "/run/properpin".into(), run_owner: current_euid() },
+            Places {
+                etc: "/etc/properpin".into(),
+                etc_owner: 0,
+                run_dir: "/run/properpin".into(),
+                run_owner: 0,
+                run_group: current_egid(),
+            },
             UnixChkpwd::system(),
         ),
         Some(dev) => (
-            Places { etc: dev.etc.clone(), etc_owner: dev.owner.unwrap_or(uid), run_dir: dev.run.clone(), run_owner: current_euid() },
+            Places {
+                etc: dev.etc.clone(),
+                etc_owner: dev.owner.unwrap_or(uid),
+                run_dir: dev.run.clone(),
+                run_owner: dev.owner.unwrap_or(uid),
+                run_group: current_egid(),
+            },
             dev.chkpwd.clone().map_or_else(UnixChkpwd::system, UnixChkpwd),
         ),
     };

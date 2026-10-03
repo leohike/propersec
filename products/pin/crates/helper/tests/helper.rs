@@ -1,10 +1,10 @@
-//! The real `properpin-helper` binary, run as a subprocess without setuid, so its `--dev-*` options
+//! The real `properpin-helper` binary, run as a subprocess without setgid, so its `--dev-*` options
 //! point it at a sandbox owned by whoever runs the tests. `unix_chkpwd` is replaced by a script
-//! that accepts one password. What needs real setuid (the dev options refused, other users kept
+//! that accepts one password. What needs real setgid (the dev options refused, other users kept
 //! out) is in the container test.
 
 use std::fs::{self, Permissions};
-use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -29,8 +29,9 @@ struct Run {
 impl Sandbox {
     fn new() -> Self {
         let sandbox = Self { dir: tempfile::tempdir().unwrap() };
-        fs::DirBuilder::new().mode(0o700).create(sandbox.path("run")).unwrap();
-        fs::set_permissions(sandbox.path("run"), Permissions::from_mode(0o700)).unwrap();
+        fs::create_dir(sandbox.path("run")).unwrap();
+        // Set explicitly: the umask would strip the group's write bit from a mkdir mode.
+        fs::set_permissions(sandbox.path("run"), Permissions::from_mode(0o1770)).unwrap();
         let user = Account::by_uid(current_uid()).unwrap().name;
         let user_file = sandbox.path("etc/users").join(&user);
         fs::create_dir_all(user_file.parent().unwrap()).unwrap();
@@ -84,7 +85,11 @@ impl Sandbox {
 
 fn run(mut command: Command, stdin: &[u8]) -> Run {
     let mut child = command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
-    std::io::Write::write_all(&mut child.stdin.take().unwrap(), stdin).unwrap();
+    // A helper that refuses its arguments exits without reading, so the pipe may already be closed.
+    match std::io::Write::write_all(&mut child.stdin.take().unwrap(), stdin) {
+        Err(error) if error.kind() != std::io::ErrorKind::BrokenPipe => panic!("{error}"),
+        _ => {}
+    }
     let output = child.wait_with_output().unwrap();
     Run { code: output.status.code(), stdout: String::from_utf8_lossy(&output.stdout).into_owned() }
 }
@@ -188,7 +193,7 @@ fn files_it_cannot_trust_are_refused() {
     sandbox.arm();
     fs::set_permissions(sandbox.path("run"), Permissions::from_mode(0o755)).unwrap();
     assert_eq!(sandbox.check(PIN), Some(exit::BROKEN.into()));
-    assert!(sandbox.log().contains("not a private directory"), "{}", sandbox.log());
+    assert!(sandbox.log().contains("mode 0755, not 1770"), "{}", sandbox.log());
 
     let sandbox = Sandbox::new();
     let mut command = sandbox.command(&["check"]);

@@ -27,7 +27,7 @@ lint:
 fmt:
     cargo fmt --all
 
-# The whole lifecycle in a temporary directory, through the real helper binary (not setuid, so its --dev options work): set, refused, armed, unlocked, three failures, refused
+# The whole lifecycle in a temporary directory, through the real helper binary (not setgid, so its --dev options work): set, refused, armed, unlocked, three failures, refused
 demo:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -35,7 +35,7 @@ demo:
     bin="$PWD/target/debug"
     root=$(mktemp -d)
     trap 'rm -rf "$root"' EXIT
-    mkdir -m 700 "$root/run"
+    mkdir "$root/run" && chmod 1770 "$root/run"
     # Stands in for unix_chkpwd: accepts the password "correct horse battery staple".
     printf '#!/bin/bash\nIFS= read -r -d "" p\n[[ $p == "correct horse battery staple" ]]\n' >"$root/unix_chkpwd"
     printf '#!/bin/sh\nexec %s "$@" --dev-etc %s --dev-run %s --dev-chkpwd %s --dev-log %s\n' \

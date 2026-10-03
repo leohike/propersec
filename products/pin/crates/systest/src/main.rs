@@ -1,4 +1,4 @@
-//! properpin's system test: the installed module and its setuid helper in a stock Fedora, through
+//! properpin's system test: the installed module and its setgid helper in a stock Fedora, through
 //! the real `/etc/pam.d`, the real `pam_unix` and its own setuid helper `unix_chkpwd`.
 //!
 //! It runs as root inside the container built from `testing/podman/Containerfile` (run it with
@@ -29,8 +29,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use pamharness::PamClient;
-use properpin_core::{PinState, exit};
-use properpin_sys::{Account, Yescrypt};
+use properpin_core::{Clock, PinState, exit};
+use properpin_sys::{Account, BootClock, Yescrypt, group_by_name};
 
 /// Where the Containerfile puts the build, `packaging/` and `pam/`.
 const PRODUCT: &str = "/opt/properpin";
@@ -39,6 +39,8 @@ const PASSWORD: &str = "correct horse battery staple";
 const PIN: &str = "4859";
 const KDE: &str = "/etc/pam.d/kde";
 const HELPER: &str = "/usr/local/libexec/properpin/properpin-helper";
+/// The group the helper runs with, created by install.sh.
+const HELPER_GROUP: &str = "properpin";
 const RUN_DIR: &str = "/run/properpin";
 /// Where scenarios that play the attacker keep their files; emptied between scenarios.
 const SCRATCH: &str = "/tmp/properpin-scratch";
@@ -101,12 +103,15 @@ fn run() -> ExitCode {
         ("a shared runtime directory is refused", a_shared_runtime_directory),
         ("the user can't read their hash or touch their counts", the_user_cannot_reach_the_files),
         ("another user can't use or spend someone's PIN", another_user_gets_nothing),
-        ("--dev options are refused under setuid", dev_options_are_refused_under_setuid),
+        ("--dev options are refused under setgid", dev_options_are_refused_under_setgid),
         ("a poisoned start changes nothing", a_poisoned_start_changes_nothing),
         ("arming checks the password itself", arming_checks_the_password_itself),
         ("a missing helper fails closed", a_missing_helper_fails_closed),
         ("status shows your own PIN only", status_shows_your_own_pin),
-        ("install refuses user files from an older layout", install_refuses_an_old_layout),
+        ("the helper's group can't change the helper", the_group_cannot_change_the_helper),
+        ("one user's helper can't touch another's counts", one_users_helper_cannot_touch_anothers_counts),
+        ("counts planted in another user's name are refused", planted_counts_are_refused),
+        ("the helper's group stays empty and locked, with no account", the_group_stays_empty_and_locked),
         ("a corrupt state means not armed", a_corrupt_state),
         ("state from an earlier boot is refused", state_from_an_earlier_boot),
         ("an arming time in the future is refused", an_arming_time_in_the_future),
@@ -207,8 +212,8 @@ fn a_hash_in_the_global_config(world: &World) -> Outcome {
 
 fn a_shared_runtime_directory(world: &World) -> Outcome {
     world.arm()?;
-    fs::set_permissions(RUN_DIR, Permissions::from_mode(0o755)).map_err(message)?;
-    world.fails_closed("not a private directory")
+    fs::set_permissions(RUN_DIR, Permissions::from_mode(0o1777)).map_err(message)?;
+    world.fails_closed("mode 1777, not 1770")
 }
 
 /// The point of the helper: nothing the user runs can read the hash, or reset the counts.
@@ -254,8 +259,8 @@ fn another_user_gets_nothing(world: &World) -> Outcome {
 }
 
 /// The attack the --dev options would allow: point the helper at files the caller made, holding a
-/// hash of a PIN they chose. Under setuid it must refuse before reading anything.
-fn dev_options_are_refused_under_setuid(world: &World) -> Outcome {
+/// hash of a PIN they chose. Under setgid it must refuse before reading anything.
+fn dev_options_are_refused_under_setgid(world: &World) -> Outcome {
     let user = &world.user;
     let fake = Path::new(SCRATCH);
     fs::create_dir_all(fake.join("etc/users")).map_err(message)?;
@@ -282,9 +287,9 @@ fn dev_options_are_refused_under_setuid(world: &World) -> Outcome {
         "/usr/bin/true",
     ];
     let arm = world.as_user(USER, &[&[HELPER, "arm"][..], &dev].concat(), b"anything")?;
-    expect_code(&arm, exit::USAGE, "arm with --dev options under setuid")?;
+    expect_code(&arm, exit::USAGE, "arm with --dev options under setgid")?;
     let check = world.as_user(USER, &[&[HELPER, "check"][..], &dev].concat(), b"0000")?;
-    expect_code(&check, exit::USAGE, "check with --dev options under setuid")?;
+    expect_code(&check, exit::USAGE, "check with --dev options under setgid")?;
     let log = world.syslog.take();
     if !log.contains("refused: --dev options while running with elevated rights") {
         return Err(format!("the refusal wasn't logged:\n{log}"));
@@ -356,18 +361,111 @@ fn status_shows_your_own_pin(world: &World) -> Outcome {
     expect_code(&helper, exit::USAGE, "the helper run by root")
 }
 
-/// A user file readable by the user's own group, as before the helper, is refused, not converted.
-fn install_refuses_an_old_layout(world: &World) -> Outcome {
-    let bob = Account::by_name("bob").map_err(message)?;
-    let old = Path::new("/etc/properpin/users/bob");
-    write_file(old, &String::from_utf8_lossy(&world.pin_file), 0, bob.gid, 0o640)?;
-    let refused = install_sh(&["install"]);
-    fs::remove_file(old).map_err(message)?;
-    match refused {
-        Err(said) if said.contains("is from an older properpin") => {}
-        other => return Err(format!("install accepted an old user file: {other:?}")),
+/// bob with the helper's group stands in for bob having exploited a bug in the helper: whatever he
+/// then does, the helper itself stays root's, unchanged.
+fn the_group_cannot_change_the_helper(world: &World) -> Outcome {
+    let before = fs::read(HELPER).map_err(message)?;
+    for (what, script) in [
+        ("append to the helper", format!("echo evil >> {HELPER}")),
+        ("chmod the helper", format!("chmod 777 {HELPER}")),
+        ("rename the helper", format!("mv {HELPER} {HELPER}.moved")),
+        ("delete the helper", format!("rm -f {HELPER}")),
+        ("replace the helper", format!("cp /usr/bin/true {HELPER}")),
+    ] {
+        let output = world.as_helper_group("bob", &["sh", "-c", &script])?;
+        if output.status.success() {
+            return Err(format!("bob with group {HELPER_GROUP} could {what}"));
+        }
     }
-    install_sh(&["install"])?;
+    if fs::read(HELPER).map_err(message)? != before {
+        return Err("the helper's bytes changed".into());
+    }
+    install_sh(&["check"]).map(drop)
+}
+
+/// Each user's counts file is that user's own, in a sticky directory: bob running the helper, or
+/// exploiting it, can't read, change, delete or replace alice's.
+fn one_users_helper_cannot_touch_anothers_counts(world: &World) -> Outcome {
+    world.arm()?;
+    world.pin_refused("1111", "not the PIN, failure 1 of 3")?;
+    let state = world.state_file().display().to_string();
+    for (what, script) in [
+        ("read alice's counts", format!("cat {state}")),
+        ("overwrite alice's counts", format!("echo garbage > {state}")),
+        ("delete alice's counts", format!("rm -f {state}")),
+        ("rename alice's counts", format!("mv {state} {RUN_DIR}/stolen")),
+        ("replace alice's counts", format!("echo garbage > {RUN_DIR}/mine && mv -f {RUN_DIR}/mine {state}")),
+    ] {
+        let output = world.as_helper_group("bob", &["sh", "-c", &script])?;
+        if output.status.success() {
+            return Err(format!("bob with group {HELPER_GROUP} could {what}"));
+        }
+    }
+    let _ = fs::remove_file(format!("{RUN_DIR}/mine"));
+    world.pin_refused("2222", "not the PIN, failure 2 of 3")
+}
+
+/// Before alice's first attempt of the boot, bob with the helper's group creates her lock file,
+/// writable by anyone, and a state that says her PIN is armed. Her PIN is refused, and the log says
+/// whose lock file it is. The password still works.
+fn planted_counts_are_refused(world: &World) -> Outcome {
+    let bob = Account::by_name("bob").map_err(message)?;
+    let armed = PinState::armed(&BootClock.boot_id().map_err(message)?, BootClock.now().map_err(message)?);
+    let lock = format!("{RUN_DIR}/{}.lock", world.user.uid);
+    let script = format!("umask 0 && touch {lock} && chmod 666 {lock} && cat > {}", world.state_file().display());
+    let planted = world.as_identity(bob.uid, world.helper_gid, &["sh", "-c", &script], armed.format().as_bytes())?;
+    if !planted.status.success() {
+        return Err(format!("couldn't plant the files: {}", String::from_utf8_lossy(&planted.stderr)));
+    }
+    // With fs.protected_regular=2 the kernel refuses alice's open of bob's lock file even sooner.
+    let protected = fs::read_to_string("/proc/sys/fs/protected_regular").map_err(message)?.trim() == "2";
+    let attempt = world.kde(PIN)?;
+    let why = format!("owned by uid {}, not {}", bob.uid, world.user.uid);
+    let refused = attempt.log.contains(&why) || (protected && attempt.log.contains("Permission denied"));
+    expect(!attempt.unlocked && refused, &format!("the PIN wasn't refused with {why:?}"), &attempt)?;
+    world.password_unlocks()
+}
+
+/// Anyone with the helper's group can read every hash and change every count, so install.sh check
+/// insists nobody has it: no members, and a locked password so newgrp can't give it. No account.
+fn the_group_stays_empty_and_locked(_world: &World) -> Outcome {
+    if Account::by_name(HELPER_GROUP).is_ok() {
+        return Err(format!("a user named {HELPER_GROUP} exists"));
+    }
+    install_sh(&["check"])?;
+    let (group, gshadow) = (fs::read("/etc/group").map_err(message)?, fs::read("/etc/gshadow").map_err(message)?);
+    let result = (|| {
+        let added = Command::new("usermod").args(["-aG", HELPER_GROUP, "bob"]).status().map_err(message)?;
+        if !added.success() {
+            return Err("usermod failed".to_owned());
+        }
+        match install_sh(&["check"]) {
+            Err(said) if said.contains("has members (bob)") => {}
+            other => return Err(format!("check accepted a member: {other:?}")),
+        }
+        fs::write("/etc/group", &group).map_err(message)?;
+        fs::write("/etc/gshadow", &gshadow).map_err(message)?;
+        install_sh(&["check"])?;
+        // gshadow is name:password:admins:members; an empty password lets members use newgrp.
+        let unlocked: String = String::from_utf8_lossy(&gshadow)
+            .lines()
+            .map(|line| {
+                let mut fields: Vec<&str> = line.split(':').collect();
+                if fields[0] == HELPER_GROUP && fields.len() > 1 {
+                    fields[1] = "";
+                }
+                fields.join(":") + "\n"
+            })
+            .collect();
+        fs::write("/etc/gshadow", unlocked).map_err(message)?;
+        match install_sh(&["check"]) {
+            Err(said) if said.contains("isn't locked") => Ok(()),
+            other => Err(format!("check accepted an empty group password: {other:?}")),
+        }
+    })();
+    fs::write("/etc/group", &group).map_err(message)?;
+    fs::write("/etc/gshadow", &gshadow).map_err(message)?;
+    result?;
     install_sh(&["check"]).map(drop)
 }
 
@@ -394,7 +492,7 @@ fn an_arming_time_in_the_future(world: &World) -> Outcome {
 fn an_expired_pin(world: &World) -> Outcome {
     // 0.01 hours is 36 seconds; the PIN was armed a minute ago.
     let user_file = format!("{}expiry_hours = 0.01\n", String::from_utf8_lossy(&world.pin_file));
-    write_file(&world.user_file(), &user_file, 0, world.helper.gid, 0o640)?;
+    write_file(&world.user_file(), &user_file, 0, world.helper_gid, 0o640)?;
     world.arm()?;
     world.edit_state(|state| state.armed_at = state.armed_at.saturating_sub(60))?;
     world.pin_refused(PIN, "the last password unlock was 0h01m ago")
@@ -445,15 +543,19 @@ fn disable_and_uninstall(world: &World) -> Outcome {
     if !world.user_file().exists() {
         return Err("uninstall deleted the user's PIN file".into());
     }
-    Account::by_name("properpin").map(drop).map_err(|_| "uninstall removed the account the kept PIN files belong to".into())
+    group_by_name(HELPER_GROUP).map_err(|_| "uninstall removed the group the kept PIN files belong to")?;
+    if Account::by_name(HELPER_GROUP).is_ok() {
+        return Err(format!("a user named {HELPER_GROUP} exists"));
+    }
+    Ok(())
 }
 
 // --- the world the scenarios run in
 
 struct World {
     user: Account,
-    /// The account the helper runs as, created by install.sh.
-    helper: Account,
+    /// The group the helper runs with.
+    helper_gid: u32,
     syslog: Syslog,
     /// `/etc/pam.d/kde` before enable.
     stock_kde: String,
@@ -482,7 +584,7 @@ impl World {
 
         install_sh(&["install"])?;
         install_sh(&["enable", "--yes"])?;
-        let helper = Account::by_name("properpin").map_err(message)?;
+        let helper_gid = group_by_name(HELPER_GROUP).map_err(message)?;
 
         let set = Command::new("/usr/local/bin/properpin")
             .args(["set", "--user", USER])
@@ -503,7 +605,7 @@ impl World {
             return Err(format!("install.sh check after set:\n{checked}"));
         }
         let pin_file = fs::read(format!("/etc/properpin/users/{USER}")).map_err(message)?;
-        Ok(Self { user, helper, syslog, stock_kde, pin_file })
+        Ok(Self { user, helper_gid, syslog, stock_kde, pin_file })
     }
 
     fn user_file(&self) -> PathBuf {
@@ -528,9 +630,9 @@ impl World {
             }
         }
         let _ = fs::remove_file(self.user_file());
-        write_file(&self.user_file(), &String::from_utf8_lossy(&self.pin_file), 0, self.helper.gid, 0o640)?;
-        chown(RUN_DIR, Some(self.helper.uid), Some(self.helper.gid)).map_err(message)?;
-        fs::set_permissions(RUN_DIR, Permissions::from_mode(0o700)).map_err(message)?;
+        write_file(&self.user_file(), &String::from_utf8_lossy(&self.pin_file), 0, self.helper_gid, 0o640)?;
+        chown(RUN_DIR, Some(0), Some(self.helper_gid)).map_err(message)?;
+        fs::set_permissions(RUN_DIR, Permissions::from_mode(0o1770)).map_err(message)?;
         let _ = fs::remove_dir_all(SCRATCH);
         self.syslog.take();
         Ok(())
@@ -540,10 +642,20 @@ impl World {
     /// environment, `typed` on stdin.
     fn as_user(&self, user: &str, argv: &[&str], typed: &[u8]) -> Outcome<std::process::Output> {
         let account = Account::by_name(user).map_err(message)?;
+        self.as_identity(account.uid, account.gid, argv, typed)
+    }
+
+    /// Run `argv` as `user` with the helper's group: what an exploited helper started by `user` could do.
+    fn as_helper_group(&self, user: &str, argv: &[&str]) -> Outcome<std::process::Output> {
+        let account = Account::by_name(user).map_err(message)?;
+        self.as_identity(account.uid, self.helper_gid, argv, b"")
+    }
+
+    fn as_identity(&self, uid: u32, gid: u32, argv: &[&str], typed: &[u8]) -> Outcome<std::process::Output> {
         let mut child = Command::new(argv[0])
             .args(&argv[1..])
-            .uid(account.uid)
-            .gid(account.gid)
+            .uid(uid)
+            .gid(gid)
             .env_clear()
             .env("PATH", "/usr/bin")
             .current_dir("/")

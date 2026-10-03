@@ -9,7 +9,7 @@
 //! ```
 //!
 //! It decides nothing itself. The hashes and the counts belong to the `properpin` account, out of
-//! the user's reach, and only the setuid helper `properpin-helper` reads them: the module hands it
+//! the user's reach, and only the setgid helper `properpin-helper` reads them: the module hands it
 //! what was typed through a pipe and reads its exit code, the way pam_unix uses `unix_chkpwd`.
 //!
 //! Arguments, all spelled out in the PAM line so nothing falls back to a real path by accident:

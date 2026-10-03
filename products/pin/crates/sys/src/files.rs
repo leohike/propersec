@@ -20,15 +20,17 @@ const LOCK_TIMEOUT: Duration = Duration::from_secs(1);
 /// ```text
 /// <etc>/config               global settings, optional            owner-only writable
 /// <etc>/users/<user>         the user's settings and hash         owner:<helper group> 0640
-/// <run_dir>/<uid>.state      a PinState                           the helper account's, on tmpfs
-/// <run_dir>/<uid>.lock       serialises concurrent attempts       the helper account's
+/// <run_dir>/                 every user's state                   owner:<helper group> 1770
+/// <run_dir>/<uid>.state      a PinState                           <uid>:<helper group> 0600
+/// <run_dir>/<uid>.lock       serialises concurrent attempts       <uid>:<helper group> 0600
 /// ```
 ///
 /// The settings and the hash must belong to `etc_owner`, so nobody else can change them: root once
-/// installed, the test's own uid in tests. The state lives in one directory for all users, owned by
-/// `run_owner`, the account the setuid helper runs as, so a user can neither read nor reset their
-/// counts. `properpin set` and `remove` need only the `etc` side; [`UserFiles::with_runtime`] adds
-/// the state, which only the helper uses.
+/// installed, the test's own uid in tests. The state lives in one directory for all users, which
+/// only the helper's group can enter, so a user can neither read nor reset their counts. The
+/// directory is sticky, and each user's state and lock files must belong to that user, so one
+/// user's run of the helper can't read, replace or plant another's. `properpin set` and `remove`
+/// need only the `etc` side; [`UserFiles::with_runtime`] adds the state, which only the helper uses.
 #[derive(Debug, Clone)]
 pub struct UserFiles {
     etc: PathBuf,
@@ -42,6 +44,7 @@ pub struct UserFiles {
 struct Runtime {
     dir: PathBuf,
     owner: u32,
+    group: u32,
 }
 
 impl UserFiles {
@@ -52,9 +55,9 @@ impl UserFiles {
         Ok(Self { etc: etc.into(), etc_owner, runtime: None, user: user.into(), uid })
     }
 
-    /// The same files, plus the per-boot state in `dir`, which must belong to `owner`.
-    pub fn with_runtime(self, dir: impl Into<PathBuf>, owner: u32) -> Self {
-        Self { runtime: Some(Runtime { dir: dir.into(), owner }), ..self }
+    /// The same files, plus the per-boot state in `dir`, which must belong to `owner` and `group`.
+    pub fn with_runtime(self, dir: impl Into<PathBuf>, owner: u32, group: u32) -> Self {
+        Self { runtime: Some(Runtime { dir: dir.into(), owner, group }), ..self }
     }
 
     pub fn user(&self) -> &str {
@@ -144,12 +147,25 @@ impl UserFiles {
 
     // --- the helper's side: per-boot state
 
-    /// Refuse a runtime directory that isn't the helper account's own private one.
-    fn private_run_dir(&self) -> Result<&Path, Error> {
+    /// Refuse a runtime directory that isn't exactly as installed: a directory, not a symlink,
+    /// owned by the owner and the helper's group, mode 1770. Without the group's write bit the
+    /// helper can't keep state; without the sticky bit one user's run could delete or replace
+    /// another's files; any bit for others would let users in.
+    fn trusted_run_dir(&self) -> Result<&Path, Error> {
         let runtime = self.runtime()?;
         let info = fs::symlink_metadata(&runtime.dir).map_err(|error| system(runtime.dir.display(), error))?;
-        if !info.is_dir() || info.uid() != runtime.owner || info.mode() & 0o077 != 0 {
-            return Err(Error::System(format!("{} is not a private directory owned by uid {}", runtime.dir.display(), runtime.owner)));
+        let refuse = |why: String| Err(Error::System(format!("run directory {}: {why}", runtime.dir.display())));
+        if !info.is_dir() {
+            return refuse("not a directory".into());
+        }
+        if info.uid() != runtime.owner {
+            return refuse(format!("owned by uid {}, not {}", info.uid(), runtime.owner));
+        }
+        if info.gid() != runtime.group {
+            return refuse(format!("group {}, not {}", info.gid(), runtime.group));
+        }
+        if info.mode() & 0o7777 != 0o1770 {
+            return refuse(format!("mode {:04o}, not 1770", info.mode() & 0o7777));
         }
         Ok(&runtime.dir)
     }
@@ -166,10 +182,19 @@ impl Store for UserFiles {
         Ok(settings)
     }
 
+    /// Every write of the state happens under this lock, so checking here that the lock file is the
+    /// user's own refuses a lock or state file planted in their name by someone else's run.
     fn lock(&self) -> Result<Flock<File>, Error> {
-        let path = self.private_run_dir()?.join(format!("{}.lock", self.uid));
+        let path = self.trusted_run_dir()?.join(format!("{}.lock", self.uid));
         let open = OpenOptions::new().read(true).write(true).create(true).mode(0o600).custom_flags(O_NOFOLLOW).open(&path);
         let mut file = open.map_err(|error| system(path.display(), error))?;
+        let info = file.metadata().map_err(|error| system(path.display(), error))?;
+        if !info.is_file() {
+            return Err(Error::System(format!("{}: not a regular file", path.display())));
+        }
+        if info.uid() != self.uid {
+            return Err(Error::System(format!("{}: owned by uid {}, not {}", path.display(), info.uid(), self.uid)));
+        }
         let deadline = Instant::now() + LOCK_TIMEOUT;
         loop {
             match Flock::lock(file, FlockArg::LockExclusiveNonblock) {
@@ -181,13 +206,17 @@ impl Store for UserFiles {
         }
     }
 
+    /// A state file that isn't the user's own reads as no state, which requires the password.
     fn load_state(&self) -> Option<PinState> {
-        let (_, text) = read_regular_file(&self.state_file()?).ok()?;
+        let (info, text) = read_regular_file(&self.state_file()?).ok()?;
+        if info.uid() != self.uid {
+            return None;
+        }
         PinState::parse(&text)
     }
 
     fn save_state(&self, state: &PinState) -> Result<(), Error> {
-        let dir = self.private_run_dir()?;
+        let dir = self.trusted_run_dir()?;
         let path = dir.join(format!("{}.state", self.uid));
         let write = || -> std::io::Result<()> {
             let mut file = tempfile::Builder::new().prefix(&format!(".{}.", self.uid)).tempfile_in(dir)?;
@@ -220,7 +249,7 @@ mod tests {
     use std::os::unix::fs::symlink;
 
     use super::*;
-    use crate::current_uid;
+    use crate::{current_egid, current_uid};
 
     /// A scratch `etc` and `run` owned by whoever runs the tests.
     struct Scratch {
@@ -232,9 +261,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let uid = current_uid();
         let run_dir = dir.path().join("run");
-        fs::DirBuilder::new().mode(0o700).create(&run_dir).unwrap();
-        fs::set_permissions(&run_dir, Permissions::from_mode(0o700)).unwrap();
-        let files = UserFiles::new(dir.path().join("etc"), uid, "tester", uid).unwrap().with_runtime(run_dir, uid);
+        fs::create_dir(&run_dir).unwrap();
+        // Set explicitly: the umask would strip the group's write bit from a mkdir mode.
+        fs::set_permissions(&run_dir, Permissions::from_mode(0o1770)).unwrap();
+        let files = UserFiles::new(dir.path().join("etc"), uid, "tester", uid).unwrap().with_runtime(run_dir, uid, current_egid());
         Scratch { _dir: dir, files }
     }
 
@@ -297,18 +327,65 @@ mod tests {
     }
 
     #[test]
-    fn a_shared_run_dir_is_refused() {
+    fn a_run_dir_with_any_other_mode_is_refused() {
         let Scratch { files, .. } = &scratch();
-        fs::set_permissions(files.state_file().unwrap().parent().unwrap(), Permissions::from_mode(0o755)).unwrap();
-        assert!(files.lock().unwrap_err().to_string().contains("not a private directory"));
+        let dir = files.state_file().unwrap().parent().unwrap().to_path_buf();
+        for mode in [0o700, 0o770, 0o1777, 0o1775, 0o3770] {
+            fs::set_permissions(&dir, Permissions::from_mode(mode)).unwrap();
+            let error = files.lock().unwrap_err().to_string();
+            assert!(error.contains(&format!("mode {mode:04o}, not 1770")), "{error}");
+            assert!(files.save_state(&PinState { boot_id: "b".into(), armed_at: 7, failures: 0 }).is_err());
+        }
+        fs::set_permissions(&dir, Permissions::from_mode(0o1770)).unwrap();
+        assert!(files.lock().is_ok());
     }
 
     #[test]
-    fn a_run_dir_owned_by_someone_else_is_refused() {
+    fn a_run_dir_with_another_owner_or_group_is_refused() {
         let Scratch { files, .. } = &scratch();
         let runtime = files.runtime.clone().unwrap();
-        let theirs = files.clone().with_runtime(runtime.dir, runtime.owner + 1);
-        assert!(theirs.lock().unwrap_err().to_string().contains("not a private directory owned by uid"));
+        let theirs = files.clone().with_runtime(&runtime.dir, runtime.owner + 1, runtime.group);
+        assert!(theirs.lock().unwrap_err().to_string().contains("owned by uid"));
+        let theirs = files.clone().with_runtime(&runtime.dir, runtime.owner, runtime.group + 1);
+        assert!(theirs.lock().unwrap_err().to_string().contains(&format!("group {}, not {}", runtime.group, runtime.group + 1)));
+    }
+
+    #[test]
+    fn a_symlinked_run_dir_is_refused() {
+        let Scratch { files, _dir } = &scratch();
+        let runtime = files.runtime.clone().unwrap();
+        let link = _dir.path().join("link");
+        symlink(&runtime.dir, &link).unwrap();
+        let linked = files.clone().with_runtime(link, runtime.owner, runtime.group);
+        assert!(linked.lock().unwrap_err().to_string().contains("not a directory"));
+    }
+
+    /// A test can't make files owned by someone else, so it plays the other side: the files are
+    /// built for another uid, and the files the test creates stand in for planted ones.
+    #[test]
+    fn a_lock_file_planted_by_someone_else_is_refused() {
+        let Scratch { files, .. } = &scratch();
+        let runtime = files.runtime.clone().unwrap();
+        let victim = UserFiles::new(files.etc.clone(), files.etc_owner, "victim", files.uid + 1).unwrap().with_runtime(
+            &runtime.dir,
+            runtime.owner,
+            runtime.group,
+        );
+        let error = victim.lock().unwrap_err().to_string();
+        assert!(error.contains(&format!("owned by uid {}, not {}", files.uid, files.uid + 1)), "{error}");
+    }
+
+    #[test]
+    fn a_state_file_planted_by_someone_else_reads_as_none() {
+        let Scratch { files, .. } = &scratch();
+        let runtime = files.runtime.clone().unwrap();
+        let victim = UserFiles::new(files.etc.clone(), files.etc_owner, "victim", files.uid + 1).unwrap().with_runtime(
+            &runtime.dir,
+            runtime.owner,
+            runtime.group,
+        );
+        write(&victim.state_file().unwrap(), &PinState { boot_id: "b".into(), armed_at: 7, failures: 0 }.format(), 0o600);
+        assert_eq!(victim.load_state(), None);
     }
 
     #[test]
@@ -323,8 +400,11 @@ mod tests {
     fn each_user_has_their_own_state() {
         let Scratch { files, .. } = &scratch();
         let runtime = files.runtime.clone().unwrap();
-        let other =
-            UserFiles::new(files.etc.clone(), files.etc_owner, "other", files.uid + 1).unwrap().with_runtime(runtime.dir, runtime.owner);
+        let other = UserFiles::new(files.etc.clone(), files.etc_owner, "other", files.uid + 1).unwrap().with_runtime(
+            runtime.dir,
+            runtime.owner,
+            runtime.group,
+        );
         let state = PinState { boot_id: "b".into(), armed_at: 7, failures: 1 };
         files.save_state(&state).unwrap();
         assert_eq!(other.load_state(), None);
