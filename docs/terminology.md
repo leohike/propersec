@@ -1,31 +1,33 @@
 # Terminology
 
-The words for when the PIN works, fixed on 2026-10-16. Before that the code and the docs said the PIN was "armed" after a password unlock and "disarmed" by a refusal. That metaphor points the wrong way for a security reader: an armed alarm means more protection, but an "armed" PIN means one more way in, so "disarming" sounded like lowering security exactly when it went up. Older notes, the dated ones and everything in `docs/chaotic/`, still use the old words.
+The words for the PIN's states, fixed on 2026-10-16 when the pepper, the expiry and the password after every boot were dropped (`docs/security-target.md` says why). Earlier the same day, and before, the code and the docs said the lock screen was "accepting the PIN" after a password unlock, and "password required" otherwise; before that, that the PIN was "armed" and "disarmed". With the PIN working from boot on, nothing starts accepting it any more, so the words now describe the PIN itself. Older notes, the dated ones and everything in `docs/chaotic/`, still use the old words.
 
-## The two states
+## The three states
 
-- **Accepting the PIN:** the lock screen takes the PIN as well as the password. It starts with a password unlock at the lock screen (or `properpin set`), and lasts until `expiry_hours` have passed, `max_failures` failures in a row, a refusal for any other reason, or a reboot. The pepper is in memory only during this state.
-- **Password required:** everything else. The PIN is refused without being checked, and the password works as always. The PIN's own refusal message says it: "PIN refused, password required: …".
+- **Enabled:** the normal state, from the moment `properpin set` writes the PIN, and right after a reboot too. The lock screen takes the PIN as well as the password.
+- **Paused (password required):** after `max_failures` (3) consecutive failures. The PIN is refused without being checked, and the next password unlock at the lock screen unpauses it. The count is in the budget on disk, so a reboot doesn't unpause it.
+- **Disabled:** after too many concerning failures, the ones nothing forgave in time (10 within 24 hours, 25 within 7 days, 60 since the PIN was set). The PIN is refused without being checked, the password doesn't bring it back, and only `sudo properpin enable` (the same PIN, after asking) or `sudo properpin set` (a fresh budget) does.
+
+A paused or disabled PIN records nothing: the input isn't checked, so it isn't a guess.
 
 ## The words for each part of speech
 
-- Verb, on: **start accepting the PIN**. `start_accepting_pin_after_password_unlock` in `properpin-core`, the pinchecker request and PAM argument `start-accepting-pin`, `Request::StartAcceptingPin` and `Mode::StartAcceptingPin`.
-- Verb, off: **stop accepting the PIN**, which makes the password required. `stop_accepting_pin` wipes the pepper.
-- State, on: **accepting the PIN**, as in "the lock screen is accepting the PIN" and the status line "accepting the PIN for another 7h59m".
-- State, off: **password required**, as in the status line "right now  password required: 3 failures in a row".
-- Since when: **accepting_pin_since**, the field of `PinState` and the key in the per-boot state file.
+- State: **enabled**, **paused**, **disabled**, as in the status line "right now  enabled, 1 of 3 consecutive failures so far".
+- Verbs: a failure **pauses** the PIN, a password unlock **unpauses** it, the budget **disables** it, `properpin enable` **enables** it again.
+- The count: **consecutive failures**, the field `consecutive` of `Budget` and the key in the budget file. The settings keep their names, so the limit is still `max_failures`.
+- After a password unlock: the **housekeeping**, `housekeeping_after_password_unlock` in `properpin-core`, the pinchecker request and PAM argument `housekeeping`, `Request::Housekeeping` and `Mode::Housekeeping`. It forgives the user's own recent failures and starts the consecutive count over.
 - An attempt: **try to unlock with the PIN**, `try_unlock_with_pin`, which returns an `UnlockAttemptOutcome`.
-- The log, after a password unlock: "password correct, accepting the PIN for the next 8h"; "password correct, but the PIN stays disabled after …; sudo properpin enable turns it back on"; "wrong password, nothing changed"; and "can't start accepting the PIN: …" when something is broken. "Correct" rather than "accepted" for the password, so "accepted" means one thing only in a log line, and the state is named rather than what didn't happen.
+- The program that holds the hashes and counts: the **pinchecker**, `properpin-pinchecker`, a setgid helper in the style of `unix_chkpwd`. It was called the helper until 2026-10-16; the other PAM helpers check one secret and keep nothing, while this one keeps the counts and decides, so the word undersold it.
+- The log: "not the PIN, consecutive failure 2 of 3"; "not the PIN, consecutive failure 3 of 3; PIN paused, password required"; "PIN paused after 3 consecutive failures, password required"; "PIN disabled after 10 concerning failures within 24 hours, password required"; "password correct, PIN enabled"; "password correct, but the PIN stays disabled after …; sudo properpin enable or set turns it back on"; "wrong password, nothing changed"; and "housekeeping failed: …" when something is broken.
 
 ## Words to avoid
 
-- **"The PIN is accepted"** or **"PIN accepted":** this already means "the typed PIN matched", so use the "-ing" form for the state. For the password, logs say "password correct".
-- **Armed, disarmed, re-armed:** retired, for the reason above.
-- **No longer accepting the PIN,** for a correct password while the PIN is disabled: the lock screen already wasn't accepting it, since the PIN was disabled at an earlier attempt, so "no longer" would send a reader of the log looking for a cause in the wrong place.
-- **Window,** for the state: the word already means the 45 and 90 second forgiveness windows and the 24-hour and 7-day budget windows.
-- **Sufficient,** for the state: `sufficient` is a PAM control flag.
-- **Enabled and disabled,** for the state: they mean the budget, which disables the PIN after too many concerning failures until `sudo properpin enable`. A disabled PIN is refused even right after a password unlock.
+- **Accepting the PIN, start accepting, armed, disarmed:** retired, for the reason above.
+- **Locked,** for the paused or disabled PIN: the lock screen is what is locked.
+- **Window,** for a state: the word means the 45 and 90 second forgiveness windows and the 24-hour and 7-day budget windows.
+- **In a row:** the old name of the consecutive count.
+- **Sufficient:** a PAM control flag.
 
 ## Upgrading an old install
 
-The PAM line used to end in `arm`, which the module now rejects as an unknown argument, so an old `/etc/pam.d/kde` keeps working with the password but never starts accepting the PIN. `sudo ./install.sh disable` followed by `sudo ./install.sh enable` rewrites the line. The per-boot state file's old key `armed_at` reads as no state, which means password required until the next password unlock, so nothing else needs migrating.
+`install.sh install` removes what versions with a pepper left: their PINs, which can't be converted without the PIN itself, every budget from then, and `/run/properpin`, and it warns when `/etc/properpin/config` still sets `expiry_hours` or `seal_cost`, which now refuse the PIN until taken out. The PAM line used to end in `start-accepting-pin` (earlier, `arm`), which the module now rejects as an unknown argument, so the old line keeps the password working but never does the housekeeping: `sudo ./install.sh disable` followed by `sudo ./install.sh enable` rewrites it. Then each user sets a new PIN.

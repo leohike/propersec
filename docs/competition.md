@@ -4,7 +4,7 @@ What else gives a Linux desktop a PIN, and how properpin compares, written on 20
 
 ## The short answer
 
-Nothing else does what properpin does: a PIN for the lock screen only, accepted only after a password unlock and only for a while, never after a reboot, with the user's own typos forgiven and other people's failures limited over days and in total, and a hash that can't be cracked offline without the password. The closest projects either limit attempts well but let the PIN work everywhere and forever (pinpam, libpamtpmpin), or work at the lock screen with a timed lockout but nothing that makes the password required again and then lets it start accepting the PIN (pam_pinlock). The hand-made `pam_pwdfile` recipe has none of it. Upstream desktops have the plumbing for switchable authenticators, but no PIN.
+Nothing else does what properpin does: a PIN for the lock screen only, paused after three consecutive failures until a password unlock, with the user's own typos forgiven, other people's failures limited over days and in total, and the hash out of reach of everything the user runs. The closest projects either limit attempts well but let the PIN work everywhere (pinpam, libpamtpmpin), or work at the lock screen with a timed lockout but nothing that brings the password back in (pam_pinlock). Until 2026-10-16 properpin also refused the PIN after every reboot and after 8 hours, and peppered its hash; `docs/security-target.md` says why those went. The hand-made `pam_pwdfile` recipe has none of it. Upstream desktops have the plumbing for switchable authenticators, but no PIN.
 
 ## The hand-made recipe: pam_pwdfile
 
@@ -41,7 +41,7 @@ github.com/RazeLighter777/pinpam. The most visible competitor: a Show HN post ab
 
 ## libpamtpmpin
 
-github.com/0xr0bert/libpamtpmpin. Also Rust and TPM2, unrelated to pinpam: two NV indexes per user (a counter, and the PIN behind a PolicyNV), 5 tries by default, a `tpmpin` admin tool and a setuid `tpmpin-unblock-self` pinchecker. Its `unblock_on_success` option resets the counter after a successful login by other means, which is close to properpin's accepting the PIN only after a password unlock, and its own README warns that it weakens the lockout. On the AUR; 1 star.
+github.com/0xr0bert/libpamtpmpin. Also Rust and TPM2, unrelated to pinpam: two NV indexes per user (a counter, and the PIN behind a PolicyNV), 5 tries by default, a `tpmpin` admin tool and a setuid `tpmpin-unblock-self` pinchecker. Its `unblock_on_success` option resets the counter after a successful login by other means, which is close to properpin's password unlock unpausing the PIN, and its own README warns that it weakens the lockout. On the AUR; 1 star.
 
 ## pam_pinlock
 
@@ -49,7 +49,7 @@ github.com/saltnpepper97/pam_pinlock. C, MIT, release 1.2.1 in June 2026, with a
 
 - **An Argon2id hash** in `~/.pinlock`, or root-managed in `/var/lib/pinlock`. In the user's home, anything the user runs can read the hash, the insider leak `docs/threat-insider-hash-leak.md` describes.
 - **Rate limiting and an optional timed lockout** (`max_attempts`, `rate_limit_window`, `lockout_duration=900`), cleared by time or `pinlockctl unlock`, with a fallback to the password.
-- **No sign of the password restarting acceptance of the PIN,** no expiry, and nothing on reboots: since it returns before `pam_unix` runs, a password success probably never reaches it. Inferred from the README.
+- **No sign of the password resetting the PIN's failures,** no expiry, and nothing on reboots: since it returns before `pam_unix` runs, a password success probably never reaches it. Inferred from the README.
 - **Documented for hyprlock and KDE,** and usable with any PAM locker.
 
 ## Upstream desktops
@@ -65,11 +65,11 @@ github.com/saltnpepper97/pam_pinlock. C, MIT, release 1.2.1 in June 2026, with a
 | | properpin | pinpam | libpamtpmpin | pam_pinlock | pam_pwdfile recipe |
 |---|---|---|---|---|---|
 | Where the PIN works | The lock screen only | Any service configured, sudo included | Any service configured | Any service configured | Any service configured |
-| After a reboot | Refused until the password | Works | Works | Works | Works |
-| Accepted again after a password unlock | Yes, for 8 hours | No | Optional, weakens the lockout | No, as far as the README says | Not applicable |
-| Failure limits | 3 in a row, then the password; your own typos forgiven; 10 a day, 20 a week, 100 per PIN disable it | 5, then locked until root clears the PIN | 5 by default | Rate limit, optional timed lockout | None |
+| After a reboot | Works | Works | Works | Works | Works |
+| A password unlock resets the failures | Yes, the consecutive ones; never the budget | No | Optional, weakens the lockout | No, as far as the README says | Not applicable |
+| Failure limits | 3 consecutive, then the password; your own typos forgiven; 10 a day, 25 a week, 60 per PIN disable it | 5, then locked until root clears the PIN | 5 by default | Rate limit, optional timed lockout | None |
 | Who holds the counter | A setgid pinchecker's group; root can reset it | The TPM; root can't, short of clearing it | The TPM | A file | Nobody |
-| A stolen hash | Useless without the password (the pepper) | Inside the TPM | Inside the TPM | Argon2id, crackable for short PINs | Fast crypt, falls in moments |
+| A stolen hash | Out of reach of everything the user runs; a copy falls in seconds for a short PIN | Inside the TPM | Inside the TPM | Argon2id, crackable for short PINs | Fast crypt, falls in moments |
 | Needs a TPM | No | Yes | Yes | No | No |
 | Unlocks KWallet | No | Experimental | No | No | No |
 | Packaged | Not yet | AUR, NixOS | AUR | AUR | Distribution packages of `pam_pwdfile` |

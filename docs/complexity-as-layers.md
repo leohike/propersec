@@ -21,7 +21,7 @@ A bug has to get through all of them to matter. That works in properpin because 
 ## Conditions, or the layering is an illusion
 
 - **Independence.** No shared parsing, state or code path between the layers beyond the lock, so one bug can't break two at once.
-- **One small place decides.** The pinchecker's exit code, the PAM control flags and the check that the lock screen is accepting the PIN: if any single place says "unlock" without asking every layer, all of them are bypassed. Keep it a few lines long, and test that removing any one layer still refuses, the way the product README's "broken on purpose" checks already work.
+- **One small place decides.** The pinchecker's exit code, the PAM control flags and the check that the PIN is enabled: if any single place says "unlock" without asking every layer, all of them are bypassed. Keep it a few lines long, and test that removing any one layer still refuses, the way the product README's "broken on purpose" checks already work.
 - **Count before checking,** in every layer, as the existing counting order requires; the TPM does it by itself.
 - **No secret escapes.** The layers limit guessing, not the use of a known PIN, so a leak bypasses all of them. For the TPM code that means:
   - salted sessions, with the TPM's key checked against the one recorded at `set`;
@@ -29,7 +29,7 @@ A bug has to get through all of them to matter. That works in properpin because 
   - authorisation values and session keys wiped, and no buffers in logs;
   - policies proved by tests on swtpm that must fail: unseal without the PIN, reset without the password, read with a wrong PIN.
 - **No downgrade.** Once a user is enrolled with the TPM, a missing, busy or failing TPM refuses the PIN; it never falls back to the software checks alone.
-- **No crackable copy.** On a machine enrolled with the TPM, the yescrypt hash must not stay on disk as a fallback: hash plus pepper can be cracked offline, past every layer. The fallback without a TPM is the password, not a software PIN hash.
+- **No crackable copy.** On a machine enrolled with the TPM, the yescrypt hash must not stay on disk as a fallback: it can be cracked offline, past every layer. The fallback without a TPM is the password, not a software PIN hash.
 - **Every refusal names its layer** in the log, so a wrong "no" can be traced.
 
 ## What no layer covers

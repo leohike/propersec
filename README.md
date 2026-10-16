@@ -4,7 +4,7 @@ Here, a PIN means a short alphanumeric password. On its own it has too little en
 
 ## How it works
 
-At the KDE lock screen, you can unlock your Linux session with your PIN. Three failures in a row disable the PIN for a while, and you (or an attacker at your keyboard) are back to your long, random account password. A lot of effort goes into making this approach no less secure than using the long password alone.
+At the KDE lock screen, you can unlock your Linux session with your PIN. Three consecutive failures pause the PIN, and you (or an attacker at your keyboard) are back to your long, random account password until you type it once. A lot of effort goes into making this approach no less secure than using the long password alone.
 
 ## Why
 
