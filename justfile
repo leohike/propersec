@@ -1,3 +1,16 @@
-# propersec: one module per product. `just --list properpin` shows its recipes.
+# propersec. Only properpin for now, so its recipes work both directly (`just test`) and under its
+# namespace (`just properpin test`); `just --list` shows them all.
 
-mod properpin "products/pin/properpin.just"
+# List the recipes
+[private]
+default:
+    @just --justfile {{ justfile() }} --list
+
+import "products/pin/properpin.just"
+mod properpin "products/pin/module.just"
+
+# Format all Rust code in the workspace
+fmt:
+    cargo fmt --all
+
+alias format := fmt

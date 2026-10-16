@@ -3,8 +3,7 @@
 # target/, a temporary directory, or a podman container. packaging/install.sh is the installer,
 # and no recipe runs it outside a fake root or a container.
 
-# Recipes run at the workspace root, where Cargo.toml and target/ are.
-set working-directory := "../.."
+# Imported by the root justfile, so recipes run at the workspace root, where Cargo.toml and target/ are.
 
 # Build the properpin command, the setuid helper and pam_properpin.so
 build:
@@ -26,10 +25,6 @@ lint:
 # Mutation testing of core and sys, slow (CI runs it weekly): each change to the code that no test notices is listed in mutants.out/missed.txt. Needs cargo-mutants, and stays on half the CPUs
 mutants:
     CARGO_BUILD_JOBS=2 taskset -c 0-$(( $(nproc) / 2 - 1 )) nice -n 10 cargo mutants --package properpin-core --package properpin-sys --test-package properpin-core --test-package properpin-sys --test-package properpin-helper --jobs 2
-
-# Format everything
-fmt:
-    cargo fmt --all
 
 # The whole lifecycle in a temporary directory, through the real helper binary (not setgid, so its --dev options work): set and armed, a reboot, refused, armed again by the password, three failures, refused
 demo:

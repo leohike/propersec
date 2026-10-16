@@ -24,6 +24,7 @@ pub trait Store {
     /// The failures that outlive a boot: an empty budget when there is none yet, an error when it
     /// can't be trusted, since reading a damaged budget as empty would hand out a fresh one.
     fn load_budget(&self) -> Result<Budget, Error>;
+
     /// Replace the budget atomically, and durably: it must survive a power cut.
     fn save_budget(&self, budget: &Budget) -> Result<(), Error>;
 }

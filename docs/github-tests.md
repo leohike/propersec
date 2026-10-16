@@ -22,7 +22,7 @@ A brief for adding GitHub Actions CI to propersec, written so an agent (or a per
 
 ## The repo
 
-- **Workspace:** a Cargo workspace at the root, edition 2024, `rust-version = "1.98"`, members `products/*/crates/*`, with `Cargo.lock` committed. The just recipes live in `products/pin/properpin.just`, included from the root `justfile` as `mod properpin`.
+- **Workspace:** a Cargo workspace at the root, edition 2024, `rust-version = "1.98"`, members `products/*/crates/*`, with `Cargo.lock` committed. The just recipes live in `products/pin/properpin.just`, imported into the root `justfile` both directly and as the `properpin` module (through `products/pin/module.just`).
 - **Build needs:**
   - Rust 1.98 and a C linker (gcc);
   - libxcrypt with its development symlink `libcrypt.so` (Fedora `libxcrypt-devel`, Debian/Ubuntu `libcrypt-dev`);
