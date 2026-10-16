@@ -15,13 +15,13 @@ A bug has to get through all of them to matter. That works in properpin because 
 ## What each layer survives
 
 - **Logic bugs** in any one counter (a wrong comparison, a window off by one, forgiveness forgiving too much): the other layers still refuse. Rust prevents memory bugs, not logic bugs, so mutation testing should run on each layer separately.
-- **Code running inside the helper,** through an exploit: every software layer falls at once, since they all run in the process the attacker now controls. Only the TPM survives, and only if the PIN can be checked nowhere but in the TPM. This is what makes the TPM worth more than a third counter.
+- **Code running inside the pinchecker,** through an exploit: every software layer falls at once, since they all run in the process the attacker now controls. Only the TPM survives, and only if the PIN can be checked nowhere but in the TPM. This is what makes the TPM worth more than a third counter.
 - **Without a TPM,** the two software layers still hold against logic bugs, as properpin does today.
 
 ## Conditions, or the layering is an illusion
 
 - **Independence.** No shared parsing, state or code path between the layers beyond the lock, so one bug can't break two at once.
-- **One small place decides.** The helper's exit code, the PAM control flags and the check that the lock screen is accepting the PIN: if any single place says "unlock" without asking every layer, all of them are bypassed. Keep it a few lines long, and test that removing any one layer still refuses, the way the product README's "broken on purpose" checks already work.
+- **One small place decides.** The pinchecker's exit code, the PAM control flags and the check that the lock screen is accepting the PIN: if any single place says "unlock" without asking every layer, all of them are bypassed. Keep it a few lines long, and test that removing any one layer still refuses, the way the product README's "broken on purpose" checks already work.
 - **Count before checking,** in every layer, as the existing counting order requires; the TPM does it by itself.
 - **No secret escapes.** The layers limit guessing, not the use of a known PIN, so a leak bypasses all of them. For the TPM code that means:
   - salted sessions, with the TPM's key checked against the one recorded at `set`;
@@ -38,4 +38,4 @@ A PIN captured as it is typed, by malware running as the user or by someone watc
 
 ## When
 
-The lock-screen PIN ships without a TPM. The simple total limit is cheap and could come first, on its own merits. The TPM layer belongs with the PIN for `sudo`: there a compromised helper would otherwise be a way to root, which is exactly the case only the TPM survives. Implementation notes, if it is built: pure Rust is possible through `tpm2-protocol` (by the Linux kernel's TPM maintainer) with RustCrypto for the session cryptography, tested against swtpm in CI; for `sudo`, the PAM module runs as root inside `sudo` and can check the PIN itself, as pam_unix does there, so the helper plays no part in that decision.
+The lock-screen PIN ships without a TPM. The simple total limit is cheap and could come first, on its own merits. The TPM layer belongs with the PIN for `sudo`: there a compromised pinchecker would otherwise be a way to root, which is exactly the case only the TPM survives. Implementation notes, if it is built: pure Rust is possible through `tpm2-protocol` (by the Linux kernel's TPM maintainer) with RustCrypto for the session cryptography, tested against swtpm in CI; for `sudo`, the PAM module runs as root inside `sudo` and can check the PIN itself, as pam_unix does there, so the pinchecker plays no part in that decision.

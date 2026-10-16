@@ -6,7 +6,7 @@
 //!   sealing the pepper with a key derived from the password;
 //! - [`UnixChkpwd`]: the account password, checked the way pam_unix checks it;
 //! - [`BootClock`]: this boot's id, the seconds since boot, and the wall clock;
-//! - [`FileLog`]: log lines to a file, for tests and the helper's `--dev-log`.
+//! - [`FileLog`]: log lines to a file, for tests and the pinchecker's `--dev-log`.
 //!
 //! Nothing here names `/etc` or `/run`: every location comes in through [`UserFiles::new`] and
 //! [`UserFiles::with_runtime`].

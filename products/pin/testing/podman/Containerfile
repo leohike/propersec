@@ -10,9 +10,9 @@ COPY Cargo.toml Cargo.lock rustfmt.toml ./
 COPY products products
 RUN --mount=type=cache,target=/root/.cargo/registry \
     --mount=type=cache,target=/src/target \
-    cargo build --release --locked -p pam_properpin -p properpin-helper -p properpin-cli -p properpin-systest \
+    cargo build --release --locked -p pam_properpin -p properpin-pinchecker -p properpin-cli -p properpin-systest \
     && mkdir -p /out/build \
-    && cp target/release/libpam_properpin.so target/release/properpin-helper target/release/properpin /out/build/ \
+    && cp target/release/libpam_properpin.so target/release/properpin-pinchecker target/release/properpin /out/build/ \
     && cp target/release/properpin-systest /out/
 # The deliberately broken variants the uninstall cases install, built after the real ones.
 RUN --mount=type=cache,target=/root/.cargo/registry \

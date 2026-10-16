@@ -2,7 +2,7 @@
 //!
 //! The PAM files come from a temporary directory (`pam_start_confdir`). The stack is the shipped
 //! `pam/kde-auth.pam` with only three things swapped: the module path points at the freshly built
-//! `.so`, the helper path at a script that runs the freshly built `properpin-helper` against the
+//! `.so`, the pinchecker path at a script that runs the freshly built `properpin-pinchecker` against the
 //! sandbox (through its `--dev-*` options, which it accepts here because it isn't setgid), and
 //! `pam_unix` becomes `pam_permit` (the password was right) or `pam_deny` (it was wrong). The
 //! control columns are the shipped ones.
@@ -12,7 +12,7 @@
 //! SIGCHLD, each in a process of its own, since SIGCHLD is one setting for the whole process
 //! (docs/harness-closer-to-kscreenlocker.md).
 //!
-//! What this can't show: how the real pam_unix, the real setgid helper and the real greeter
+//! What this can't show: how the real pam_unix, the real setgid pinchecker and the real greeter
 //! behave. The container test covers the first two.
 
 use std::fs::{self, Permissions};
@@ -47,7 +47,7 @@ struct Sandbox {
 
 impl Sandbox {
     /// A sandboxed `/etc/properpin` with a PIN set for the current user, an empty runtime dir, a
-    /// helper that uses them, a stand-in for `unix_chkpwd`, and a PAM config dir.
+    /// pinchecker that uses them, a stand-in for `unix_chkpwd`, and a PAM config dir.
     fn new() -> Self {
         let dir = tempfile::tempdir().unwrap();
         let user = Account::by_uid(current_uid()).unwrap().name;
@@ -67,25 +67,25 @@ impl Sandbox {
         // unix_chkpwd's protocol: the password on stdin, ending in a NUL; exit 0 for a match.
         let chkpwd = format!("#!/bin/bash\nIFS= read -r -d '' password\n[[ $1 == \"$(id -un)\" && $password == '{PASSWORD}' ]]\n");
         sandbox.script("unix_chkpwd", &chkpwd);
-        sandbox.helper("");
+        sandbox.pinchecker("");
         // The two services sessions use, written once, so threads can open sessions at will.
         sandbox.stack_as("kde-right", Password::Right, "");
         sandbox.stack_as("kde-wrong", Password::Wrong, "");
         sandbox
     }
 
-    /// The helper: a script that runs `first` and then the built helper against the sandbox.
-    fn helper(&self, first: &str) {
-        let helper = format!(
+    /// The pinchecker: a script that runs `first` and then the built pinchecker against the sandbox.
+    fn pinchecker(&self, first: &str) {
+        let pinchecker = format!(
             "#!/bin/sh\n{first}\nexec {} \"$@\" --dev-etc {} --dev-run {} --dev-budget {} --dev-chkpwd {} --dev-log {}\n",
-            built().join("properpin-helper").display(),
+            built().join("properpin-pinchecker").display(),
             self.path("etc").display(),
             self.run_dir().display(),
             self.path("var").display(),
             self.path("unix_chkpwd").display(),
             self.path("log").display()
         );
-        self.script("helper", &helper);
+        self.script("pinchecker", &pinchecker);
     }
 
     fn path(&self, relative: &str) -> PathBuf {
@@ -112,7 +112,7 @@ impl Sandbox {
 
     fn stack_as(&self, service: &str, password: Password, extra: &str) {
         let module = format!("{} {extra}", built().join("libpam_properpin.so").display());
-        let helper = format!("helper={} log={}", self.path("helper").display(), self.path("log").display());
+        let pinchecker = format!("pinchecker={} log={}", self.path("pinchecker").display(), self.path("log").display());
         let config = format!("config={}", self.path("etc/config").display());
         let unix = match password {
             Password::Right => "pam_permit.so",
@@ -121,7 +121,7 @@ impl Sandbox {
         let mut text = SHIPPED.to_owned();
         for (old, new) in [
             ("/usr/local/lib64/security/pam_properpin.so", module.as_str()),
-            ("helper=/usr/local/libexec/properpin/properpin-helper", helper.as_str()),
+            ("pinchecker=/usr/local/libexec/properpin/properpin-pinchecker", pinchecker.as_str()),
             ("config=/etc/properpin/config", config.as_str()),
             ("pam_unix.so use_first_pass", unix),
         ] {
@@ -159,7 +159,7 @@ impl Sandbox {
     }
 }
 
-/// The directory with a fresh `pam_properpin.so` and `properpin-helper`. `cargo test` rebuilds this
+/// The directory with a fresh `pam_properpin.so` and `properpin-pinchecker`. `cargo test` rebuilds this
 /// crate's rlib for the tests but not its cdylib, so build both here, once per test run, or the
 /// tests would load a stale module.
 fn built() -> PathBuf {
@@ -174,14 +174,14 @@ fn built() -> PathBuf {
                 "--package",
                 "pam_properpin",
                 "--package",
-                "properpin-helper",
+                "properpin-pinchecker",
                 "--manifest-path",
                 concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"),
             ]);
             if profile_dir.ends_with("release") {
                 cargo.arg("--release");
             }
-            assert!(cargo.status().unwrap().success(), "building pam_properpin and properpin-helper failed");
+            assert!(cargo.status().unwrap().success(), "building pam_properpin and properpin-pinchecker failed");
             profile_dir
         })
         .clone()
@@ -264,10 +264,10 @@ fn survives_many_loads_and_unloads_across_threads() {
     });
 }
 
-/// Whatever goes wrong with the helper, the PIN is refused and the password still works.
+/// Whatever goes wrong with the pinchecker, the PIN is refused and the password still works.
 #[test]
-fn a_broken_helper_fails_closed() {
-    for (name, helper) in [
+fn a_broken_pinchecker_fails_closed() {
+    for (name, pinchecker) in [
         ("missing", None),
         ("exits with an odd code", Some("#!/bin/sh\nexit 3\n")),
         ("killed by a signal", Some("#!/bin/sh\nkill -9 $$\n")),
@@ -275,11 +275,11 @@ fn a_broken_helper_fails_closed() {
     ] {
         let sandbox = Sandbox::new();
         sandbox.unlock_with_password();
-        match helper {
-            None => fs::remove_file(sandbox.path("helper")).unwrap(),
-            Some(text) => sandbox.script("helper", text),
+        match pinchecker {
+            None => fs::remove_file(sandbox.path("pinchecker")).unwrap(),
+            Some(text) => sandbox.script("pinchecker", text),
         }
-        // "quits without reading" exits 0, a yes: the module trusts the helper's answer, so that
+        // "quits without reading" exits 0, a yes: the module trusts the pinchecker's answer, so that
         // one unlocks. The point there is that writing to it raises no SIGPIPE in the host.
         let unlocked = sandbox.attempt(Password::Wrong, PIN).unlocked();
         assert_eq!(unlocked, name == "quits without reading", "{name}: {}", sandbox.log());
@@ -369,8 +369,8 @@ fn the_usual_answers(sandbox: &Sandbox) {
     assert!(pin.authenticate(PIN).unlocked(), "{}", sandbox.log());
 }
 
-/// With SIGCHLD ignored, the kernel would reap the helper and throw its answer away; the module
-/// sets the default while the helper runs, and puts "ignore" back.
+/// With SIGCHLD ignored, the kernel would reap the pinchecker and throw its answer away; the module
+/// sets the default while the pinchecker runs, and puts "ignore" back.
 #[test]
 fn a_host_that_ignores_sigchld_still_gets_answers() {
     if in_own_process("a_host_that_ignores_sigchld_still_gets_answers").is_some() {
@@ -383,7 +383,7 @@ fn a_host_that_ignores_sigchld_still_gets_answers() {
 }
 
 /// A handler that reaps every child can't run while the module has SIGCHLD at its default, so it
-/// never takes the helper, and it is back afterwards.
+/// never takes the pinchecker, and it is back afterwards.
 #[test]
 fn a_host_that_reaps_every_child_still_gets_answers() {
     if in_own_process("a_host_that_reaps_every_child_still_gets_answers").is_some() {
@@ -393,10 +393,10 @@ fn a_host_that_reaps_every_child_still_gets_answers() {
     let handler = host::reap_on_sigchld();
     the_usual_answers(&sandbox);
     assert_eq!(host::sigchld(), handler);
-    assert_eq!(host::reaped(), 0, "the host's handler reaped a helper");
+    assert_eq!(host::reaped(), 0, "the host's handler reaped a pinchecker");
 }
 
-/// A host thread looping on `waitpid(-1)` takes the helper's exit status whatever SIGCHLD is set
+/// A host thread looping on `waitpid(-1)` takes the pinchecker's exit status whatever SIGCHLD is set
 /// to. The module then has no answer and refuses: the PIN may fail, a wrong PIN never unlocks, and
 /// the password still works. A known limit, documented here rather than fixed.
 #[test]
@@ -445,8 +445,8 @@ fn the_hosts_own_children_survive_an_attempt() {
     let sandbox = Sandbox::new();
     let handler = host::notice_sigchld();
     assert!(sandbox.session(Password::Right).authenticate(PASSWORD).unlocked());
-    // The helper starts late, so the host's child exits while the module is waiting for it.
-    sandbox.helper("sleep 0.3");
+    // The pinchecker starts late, so the host's child exits while the module is waiting for it.
+    sandbox.pinchecker("sleep 0.3");
     let mut own = Command::new("sh").args(["-c", "sleep 0.1; exit 7"]).spawn().unwrap();
     assert!(sandbox.session(Password::Wrong).authenticate(PIN).unlocked(), "{}", sandbox.log());
     assert_eq!(own.wait().unwrap().code(), Some(7), "the host lost its own child's exit status");

@@ -11,7 +11,7 @@
 //! This crate decides and does nothing else: no files, no clock, no hashing, no PAM. Those come
 //! in through the [`Store`], [`Clock`], [`Hasher`] and [`Log`] traits, which `properpin-sys`
 //! implements for the real machine and the tests implement in memory. It also holds what the
-//! setgid helper and its callers must agree on: the [`exit`] codes and [`MAX_INPUT_BYTES`].
+//! setgid pinchecker and its callers must agree on: the [`exit`] codes and [`MAX_INPUT_BYTES`].
 
 // Stricter checks for shipped code (docs/plan-tools.md): every unsafe block explains why it is
 // sound, nothing indexes or slices without a bounds check, and no cast silently drops bits.
@@ -67,19 +67,19 @@ pub const ENCRYPTED_PEPPER_SETTING: &str = "encrypted_pepper";
 /// The settings only a user's own file may hold: what `set` writes for a new PIN.
 pub const USER_ONLY: &[&str] = &[HASH_SETTING, CLEARTEXT_SALT_FOR_DERIVING_PEPPER_DECRYPTION_KEY_SETTING, ENCRYPTED_PEPPER_SETTING];
 
-/// The setgid helper's exit codes, which are all it answers: the PAM module and the CLI read them.
+/// The setgid pinchecker's exit codes, which are all it answers: the PAM module and the CLI read them.
 pub mod exit {
     /// `check`: the PIN unlocks. `start-accepting-pin`: accepting the PIN from now. `status`: printed.
     pub const YES: u8 = 0;
     /// `check`: not unlocked. `start-accepting-pin`: a wrong password, or a disabled PIN. A clean "no",
-    /// logged by the helper.
+    /// logged by the pinchecker.
     pub const NO: u8 = 1;
     /// Bad arguments, or a refused environment: run as root, a terminal on stdin, `--dev-*` options
     /// under setgid.
     pub const USAGE: u8 = 2;
-    /// Something is broken: a file, the clock, libxcrypt, `unix_chkpwd`. Logged by the helper.
+    /// Something is broken: a file, the clock, libxcrypt, `unix_chkpwd`. Logged by the pinchecker.
     pub const BROKEN: u8 = 3;
 }
 
-/// The most the helper reads from stdin: libpam passes at most `PAM_MAX_RESP_SIZE` (512) bytes.
+/// The most the pinchecker reads from stdin: libpam passes at most `PAM_MAX_RESP_SIZE` (512) bytes.
 pub const MAX_INPUT_BYTES: usize = 512;

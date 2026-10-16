@@ -1,6 +1,6 @@
 [package]
 name = "brokenpin"
-description = "Test-only: deliberately broken stand-ins for pam_properpin.so and properpin-helper, for testing the uninstaller."
+description = "Test-only: deliberately broken stand-ins for pam_properpin.so and properpin-pinchecker, for testing the uninstaller."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

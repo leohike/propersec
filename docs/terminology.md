@@ -9,7 +9,7 @@ The words for when the PIN works, fixed on 2026-10-16. Before that the code and 
 
 ## The words for each part of speech
 
-- Verb, on: **start accepting the PIN**. `start_accepting_pin_after_password_unlock` in `properpin-core`, the helper request and PAM argument `start-accepting-pin`, `Request::StartAcceptingPin` and `Mode::StartAcceptingPin`.
+- Verb, on: **start accepting the PIN**. `start_accepting_pin_after_password_unlock` in `properpin-core`, the pinchecker request and PAM argument `start-accepting-pin`, `Request::StartAcceptingPin` and `Mode::StartAcceptingPin`.
 - Verb, off: **stop accepting the PIN**, which makes the password required. `stop_accepting_pin` wipes the pepper.
 - State, on: **accepting the PIN**, as in "the lock screen is accepting the PIN" and the status line "accepting the PIN for another 7h59m".
 - State, off: **password required**, as in the status line "right now  password required: 3 failures in a row".

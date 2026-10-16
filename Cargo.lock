@@ -373,7 +373,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "properpin-helper"
+name = "properpin-pinchecker"
 version = "0.1.0"
 dependencies = [
  "libc",

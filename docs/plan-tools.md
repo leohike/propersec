@@ -17,7 +17,7 @@ One gap: **clippy and rustfmt didn't run in CI,** so nothing stopped a commit th
   - `indexing_slicing`: flags `a[i]` and `&a[x..y]`, which panic when out of range. It would flag `decode_hash`, for example.
   - `arithmetic_side_effects`: flags arithmetic that can overflow.
   - `cast_possible_truncation`: flags casts that can silently lose bits, such as `bits as u8` in the decoder.
-  - `unwrap_used` and `expect_used`: flag calls that panic. A panic in the PAM module is caught, and in the helper it aborts, but each one should be deliberate.
+  - `unwrap_used` and `expect_used`: flag calls that panic. A panic in the PAM module is caught, and in the pinchecker it aborts, but each one should be deliberate.
 - **`clippy::pedantic`:** a stricter style group, noisier, best turned on with a list of exceptions.
 - **Semgrep:** custom pattern rules across the code, such as "never log a variable named pin or password", which clippy can't express.
 
@@ -42,7 +42,7 @@ One gap: **clippy and rustfmt didn't run in CI,** so nothing stopped a commit th
 ## The recommended order
 
 - **First, clippy and rustfmt in CI.** Trivial, and it closes a real gap. Done.
-- **Then a handful of restriction lints:** `undocumented_unsafe_blocks`, `indexing_slicing` and `cast_possible_truncation`, at least for properpin-sys and the helper. Expect a short round of fixes or justified exceptions. Done, for all the shipped crates.
+- **Then a handful of restriction lints:** `undocumented_unsafe_blocks`, `indexing_slicing` and `cast_possible_truncation`, at least for properpin-sys and the pinchecker. Expect a short round of fixes or justified exceptions. Done, for all the shipped crates.
 - **Then cargo-mutants in CI,** as `docs/plan.md` already plans. Done, weekly and report only.
 - **Then cargo-fuzz targets** for the parsers and `decode_hash`, in CI.
 - **Later, Kani proofs** for `decode_hash`, the hex and XOR functions, and perhaps the budget.

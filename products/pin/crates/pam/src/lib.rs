@@ -13,13 +13,13 @@
 //! ```
 //!
 //! It decides nothing itself. The hashes and the counts belong to the `properpin` group, out of
-//! the user's reach, and only the setgid helper `properpin-helper` reads them: the module hands it
+//! the user's reach, and only the setgid pinchecker `properpin-pinchecker` reads them: the module hands it
 //! what was typed through a pipe and reads its exit code, the way pam_unix uses `unix_chkpwd`.
 //!
 //! Arguments, all spelled out in the PAM line so nothing falls back to a real path by accident:
 //!
 //! ```text
-//! helper=PATH    the helper (/usr/local/libexec/properpin/properpin-helper)   required
+//! pinchecker=PATH    the pinchecker (/usr/local/libexec/properpin/properpin-pinchecker)   required
 //! config=PATH    the global config (/etc/properpin/config), for how long a     required with check,
 //!                correct PIN takes at least                                    refused with start-accepting-pin
 //! log=FILE       append the module's own log lines here instead of syslog (tests)
@@ -28,7 +28,7 @@
 //! ```
 //!
 //! It runs inside the lock screen, as the locked user, never as root. Refusal is the default:
-//! every error, panic or refusal ends in PAM_IGNORE, and only the helper's yes returns success.
+//! every error, panic or refusal ends in PAM_IGNORE, and only the pinchecker's yes returns success.
 
 // Stricter checks for shipped code (docs/plan-tools.md): every unsafe block explains why it is
 // sound, nothing indexes or slices without a bounds check, and no cast silently drops bits.

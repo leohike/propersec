@@ -1,6 +1,6 @@
 [package]
-name = "properpin-helper"
-description = "properpin-helper: the setgid program that holds the PIN hashes and counts, and answers yes or no."
+name = "properpin-pinchecker"
+description = "properpin-pinchecker: the setgid program that holds the PIN hashes and counts, and answers yes or no."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,7 +8,7 @@ publish.workspace = true
 license.workspace = true
 
 [[bin]]
-name = "properpin-helper"
+name = "properpin-pinchecker"
 path = "src/main.rs"
 
 [dependencies]

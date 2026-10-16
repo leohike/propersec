@@ -1,4 +1,4 @@
-//! properpin's system test: the installed module and its setgid helper in a stock Fedora, through
+//! properpin's system test: the installed module and its setgid pinchecker in a stock Fedora, through
 //! the real `/etc/pam.d`, the real `pam_unix` and its own setuid helper `unix_chkpwd`.
 //!
 //! It runs as root inside the container built from `testing/podman/Containerfile` (run it with
@@ -17,7 +17,7 @@
 //! as the locked user, and checks that the process exited cleanly. `worker` stands in for
 //! kscreenlocker 6.8's `kscreenlocker_worker`: one session for many attempts, killed when the greeter
 //! cancels. `run` listens on `/dev/log` itself, so what the module and `pam_unix` log through syslog
-//! comes back to the scenario that caused it. After every scenario no helper may still be running.
+//! comes back to the scenario that caused it. After every scenario no pinchecker may still be running.
 //!
 //! The uninstall cases (`uninstall.rs`) each run in a fresh container: they install a deliberately
 //! broken properpin and check that `install.sh uninstall` puts the system back as it was.
@@ -48,8 +48,8 @@ const USER: &str = "alice";
 const PASSWORD: &str = "correct horse battery staple";
 const PIN: &str = "4859";
 const KDE: &str = "/etc/pam.d/kde";
-const HELPER: &str = "/usr/local/libexec/properpin/properpin-helper";
-/// The group the helper runs with, created by install.sh.
+const HELPER: &str = "/usr/local/libexec/properpin/properpin-pinchecker";
+/// The group the pinchecker runs with, created by install.sh.
 const HELPER_GROUP: &str = "properpin";
 const RUN_DIR: &str = "/run/properpin";
 const BUDGET_DIR: &str = "/var/lib/properpin";
@@ -58,10 +58,10 @@ const SCRATCH: &str = "/tmp/properpin-scratch";
 const SYSLOG: &str = "/dev/log";
 /// Longer than any attempt takes, failure delays included; a hung attempt is killed after this.
 const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(60);
-/// A helper whose attempt was killed finishes on its own: at most a second waiting for the lock,
+/// A pinchecker whose attempt was killed finishes on its own: at most a second waiting for the lock,
 /// then a hash or `unix_chkpwd`. Still running after this, it is a bug.
 const HELPER_LINGER: Duration = Duration::from_secs(5);
-/// What the kernel calls the helper: its name cut to 15 bytes.
+/// What the kernel calls the pinchecker: its name cut to 15 bytes.
 const HELPER_COMM: &str = "properpin-helpe";
 
 type Outcome<T = ()> = Result<T, String>;
@@ -146,12 +146,12 @@ fn run() -> ExitCode {
         ("--dev options are refused under setgid", dev_options_are_refused_under_setgid),
         ("a poisoned start changes nothing", a_poisoned_start_changes_nothing),
         ("starting to accept the PIN checks the password itself", starting_to_accept_the_pin_checks_the_password_itself),
-        ("a missing helper fails closed", a_missing_helper_fails_closed),
+        ("a missing pinchecker fails closed", a_missing_pinchecker_fails_closed),
         ("status shows your own PIN only", status_shows_your_own_pin),
-        ("the helper's group can't change the helper", the_group_cannot_change_the_helper),
-        ("one user's helper can't touch another's counts", one_users_helper_cannot_touch_anothers_counts),
+        ("the pinchecker's group can't change the pinchecker", the_group_cannot_change_the_pinchecker),
+        ("one user's pinchecker can't touch another's counts", one_users_pinchecker_cannot_touch_anothers_counts),
         ("counts planted in another user's name are refused", planted_counts_are_refused),
-        ("the helper's group stays empty and locked, with no account", the_group_stays_empty_and_locked),
+        ("the pinchecker's group stays empty and locked, with no account", the_group_stays_empty_and_locked),
         ("typos followed by the PIN or the password are forgiven", typos_are_forgiven),
         ("the slow attack: a guess, the user's PIN much later, again", the_slow_attack_is_stopped),
         ("guesses nobody forgives disable the PIN, across a reboot", unforgiven_guesses_disable_the_pin),
@@ -169,7 +169,7 @@ fn run() -> ExitCode {
     ];
     let mut failed = 0;
     for (name, scenario) in scenarios {
-        match world.reset().and_then(|()| scenario(&world)).and_then(|()| no_helper_left()) {
+        match world.reset().and_then(|()| scenario(&world)).and_then(|()| no_pinchecker_left()) {
             Ok(()) => println!("ok      {name}"),
             Err(error) => {
                 failed += 1;
@@ -231,7 +231,7 @@ fn set_checks_the_password_and_accepts_the_pin_at_once(world: &World) -> Outcome
     let lock = PathBuf::from(format!("{RUN_DIR}/{}.lock", world.user.uid));
     for path in [world.state_file(), lock] {
         let info = fs::metadata(&path).map_err(message)?;
-        if (info.uid(), info.gid(), info.mode() & 0o7777) != (world.user.uid, world.helper_gid, 0o600) {
+        if (info.uid(), info.gid(), info.mode() & 0o7777) != (world.user.uid, world.pinchecker_gid, 0o600) {
             return Err(format!("{}: {}:{} {:o}, not alice's", path.display(), info.uid(), info.gid(), info.mode() & 0o7777));
         }
     }
@@ -266,10 +266,10 @@ fn a_damaged_encrypted_pepper(world: &World) -> Outcome {
     let original = String::from_utf8_lossy(&world.pin_file).into_owned();
     let line = original.lines().find(|line| line.starts_with("encrypted_pepper = ")).ok_or("no encrypted_pepper line")?;
     let flipped = format!("{}{}", &line[..line.len() - 1], if line.ends_with('0') { '1' } else { '0' });
-    write_file(&world.user_file(), &original.replace(line, &flipped), 0, world.helper_gid, 0o640)?;
+    write_file(&world.user_file(), &original.replace(line, &flipped), 0, world.pinchecker_gid, 0o640)?;
     world.start_accepting_pin()?;
     world.pin_refused(PIN, "not the PIN, failure 1 of 3")?;
-    write_file(&world.user_file(), &original.replace(line, &line[..line.len() - 2]), 0, world.helper_gid, 0o640)?;
+    write_file(&world.user_file(), &original.replace(line, &line[..line.len() - 2]), 0, world.pinchecker_gid, 0o640)?;
     let password = world.kde(PASSWORD)?;
     expect(
         password.unlocked && password.log.contains("can't start accepting the PIN") && password.log.contains("not 64 hex digits"),
@@ -286,7 +286,7 @@ fn the_pin_works_at_the_lock_screen_only(world: &World) -> Outcome {
         let pin = world.attempt(service, PIN)?;
         expect(!pin.unlocked, &format!("the PIN unlocked {service}"), &pin)?;
         expect(!pin.log.contains("pam_properpin"), &format!("{service} loaded pam_properpin"), &pin)?;
-        expect(!pin.log.contains("properpin-helper"), &format!("{service} ran the helper"), &pin)?;
+        expect(!pin.log.contains("properpin-pinchecker"), &format!("{service} ran the pinchecker"), &pin)?;
     }
     for service in ["sudo", "su", "login"] {
         let password = world.attempt(service, PASSWORD)?;
@@ -334,7 +334,7 @@ fn a_shared_runtime_directory(world: &World) -> Outcome {
     world.fails_closed("mode 1777, not 1770")
 }
 
-/// The point of the helper: nothing the user runs can read the hash, or reset the counts.
+/// The point of the pinchecker: nothing the user runs can read the hash, or reset the counts.
 fn the_user_cannot_reach_the_files(world: &World) -> Outcome {
     world.start_accepting_pin()?;
     for wrong in ["1111", "2222", "3333"] {
@@ -371,12 +371,12 @@ fn another_user_gets_nothing(world: &World) -> Outcome {
     expect_code(&bob, exit::NO, "bob's wrong PIN")?;
     let log = world.syslog.take();
     if !log.contains("bob: no PIN is set, refused") {
-        return Err(format!("the helper didn't answer for bob:\n{log}"));
+        return Err(format!("the pinchecker didn't answer for bob:\n{log}"));
     }
     world.pin_unlocks()
 }
 
-/// The attack the --dev options would allow: point the helper at files the caller made, holding a
+/// The attack the --dev options would allow: point the pinchecker at files the caller made, holding a
 /// hash of a PIN they chose. Under setgid it must refuse before reading anything.
 fn dev_options_are_refused_under_setgid(world: &World) -> Outcome {
     let user = &world.user;
@@ -419,7 +419,7 @@ fn dev_options_are_refused_under_setgid(world: &World) -> Outcome {
 }
 
 /// Closed stdout and stderr, an extra open file, and a hostile environment, including a preloaded
-/// library that would hijack an ordinary program: the helper answers as always.
+/// library that would hijack an ordinary program: the pinchecker answers as always.
 fn a_poisoned_start_changes_nothing(world: &World) -> Outcome {
     world.start_accepting_pin()?;
     let script = format!(
@@ -438,7 +438,7 @@ fn a_poisoned_start_changes_nothing(world: &World) -> Outcome {
     Ok(())
 }
 
-/// Anything the user runs can ask the helper to start accepting the PIN; only the real password does it, checked by the
+/// Anything the user runs can ask the pinchecker to start accepting the PIN; only the real password does it, checked by the
 /// real unix_chkpwd.
 fn starting_to_accept_the_pin_checks_the_password_itself(world: &World) -> Outcome {
     for wrong in ["", "wrong", "correct horse battery stapl"] {
@@ -451,14 +451,14 @@ fn starting_to_accept_the_pin_checks_the_password_itself(world: &World) -> Outco
     world.pin_unlocks()
 }
 
-fn a_missing_helper_fails_closed(world: &World) -> Outcome {
+fn a_missing_pinchecker_fails_closed(world: &World) -> Outcome {
     world.start_accepting_pin()?;
     fs::rename(HELPER, format!("{HELPER}.away")).map_err(message)?;
     let pin = world.kde(PIN);
     let password = world.kde(PASSWORD);
     fs::rename(format!("{HELPER}.away"), HELPER).map_err(message)?;
     let (pin, password) = (pin?, password?);
-    expect(!pin.unlocked && pin.log.contains("PIN refused:"), "the PIN worked without the helper", &pin)?;
+    expect(!pin.unlocked && pin.log.contains("PIN refused:"), "the PIN worked without the pinchecker", &pin)?;
     expect(password.unlocked && password.log.contains("can't start accepting the PIN:"), "the password didn't unlock", &password)
 }
 
@@ -477,36 +477,36 @@ fn status_shows_your_own_pin(world: &World) -> Outcome {
     if root.status.success() {
         return Err("status ran as root".into());
     }
-    // The helper itself refuses root too, whoever calls it.
-    let helper = Command::new(HELPER).arg("status").stdin(Stdio::null()).output().map_err(message)?;
-    expect_code(&helper, exit::USAGE, "the helper run by root")
+    // The pinchecker itself refuses root too, whoever calls it.
+    let pinchecker = Command::new(HELPER).arg("status").stdin(Stdio::null()).output().map_err(message)?;
+    expect_code(&pinchecker, exit::USAGE, "the pinchecker run by root")
 }
 
-/// bob with the helper's group stands in for bob having exploited a bug in the helper: whatever he
-/// then does, the helper itself stays root's, unchanged.
-fn the_group_cannot_change_the_helper(world: &World) -> Outcome {
+/// bob with the pinchecker's group stands in for bob having exploited a bug in the pinchecker: whatever he
+/// then does, the pinchecker itself stays root's, unchanged.
+fn the_group_cannot_change_the_pinchecker(world: &World) -> Outcome {
     let before = fs::read(HELPER).map_err(message)?;
     for (what, script) in [
-        ("append to the helper", format!("echo evil >> {HELPER}")),
-        ("chmod the helper", format!("chmod 777 {HELPER}")),
-        ("rename the helper", format!("mv {HELPER} {HELPER}.moved")),
-        ("delete the helper", format!("rm -f {HELPER}")),
-        ("replace the helper", format!("cp /usr/bin/true {HELPER}")),
+        ("append to the pinchecker", format!("echo evil >> {HELPER}")),
+        ("chmod the pinchecker", format!("chmod 777 {HELPER}")),
+        ("rename the pinchecker", format!("mv {HELPER} {HELPER}.moved")),
+        ("delete the pinchecker", format!("rm -f {HELPER}")),
+        ("replace the pinchecker", format!("cp /usr/bin/true {HELPER}")),
     ] {
-        let output = world.as_helper_group("bob", &["sh", "-c", &script])?;
+        let output = world.as_pinchecker_group("bob", &["sh", "-c", &script])?;
         if output.status.success() {
             return Err(format!("bob with group {HELPER_GROUP} could {what}"));
         }
     }
     if fs::read(HELPER).map_err(message)? != before {
-        return Err("the helper's bytes changed".into());
+        return Err("the pinchecker's bytes changed".into());
     }
     install_sh(&["check"]).map(drop)
 }
 
-/// Each user's counts file is that user's own, in a sticky directory: bob running the helper, or
+/// Each user's counts file is that user's own, in a sticky directory: bob running the pinchecker, or
 /// exploiting it, can't read, change, delete or replace alice's.
-fn one_users_helper_cannot_touch_anothers_counts(world: &World) -> Outcome {
+fn one_users_pinchecker_cannot_touch_anothers_counts(world: &World) -> Outcome {
     world.start_accepting_pin()?;
     world.pin_refused("1111", "not the PIN, failure 1 of 3")?;
     let state = world.state_file().display().to_string();
@@ -517,7 +517,7 @@ fn one_users_helper_cannot_touch_anothers_counts(world: &World) -> Outcome {
         ("rename alice's counts", format!("mv {state} {RUN_DIR}/stolen")),
         ("replace alice's counts", format!("echo garbage > {RUN_DIR}/mine && mv -f {RUN_DIR}/mine {state}")),
     ] {
-        let output = world.as_helper_group("bob", &["sh", "-c", &script])?;
+        let output = world.as_pinchecker_group("bob", &["sh", "-c", &script])?;
         if output.status.success() {
             return Err(format!("bob with group {HELPER_GROUP} could {what}"));
         }
@@ -526,7 +526,7 @@ fn one_users_helper_cannot_touch_anothers_counts(world: &World) -> Outcome {
     world.pin_refused("2222", "not the PIN, failure 2 of 3")
 }
 
-/// Before alice's first attempt of the boot, bob with the helper's group creates her lock file,
+/// Before alice's first attempt of the boot, bob with the pinchecker's group creates her lock file,
 /// writable by anyone, and a state that says the lock screen is accepting her PIN. Her PIN is refused, and the log says
 /// whose lock file it is. The password still works.
 fn planted_counts_are_refused(world: &World) -> Outcome {
@@ -535,7 +535,7 @@ fn planted_counts_are_refused(world: &World) -> Outcome {
     let accepting = PinState::accepting_pin_from(&BootClock.boot_id().map_err(message)?, BootClock.now().map_err(message)?, pepper);
     let lock = format!("{RUN_DIR}/{}.lock", world.user.uid);
     let script = format!("umask 0 && touch {lock} && chmod 666 {lock} && cat > {}", world.state_file().display());
-    let planted = world.as_identity(bob.uid, world.helper_gid, &["sh", "-c", &script], accepting.format().as_bytes())?;
+    let planted = world.as_identity(bob.uid, world.pinchecker_gid, &["sh", "-c", &script], accepting.format().as_bytes())?;
     if !planted.status.success() {
         return Err(format!("couldn't plant the files: {}", String::from_utf8_lossy(&planted.stderr)));
     }
@@ -548,7 +548,7 @@ fn planted_counts_are_refused(world: &World) -> Outcome {
     world.password_unlocks()
 }
 
-/// Anyone with the helper's group can read every hash and change every count, so install.sh check
+/// Anyone with the pinchecker's group can read every hash and change every count, so install.sh check
 /// insists nobody has it: no members, and a locked password so newgrp can't give it. No account.
 fn the_group_stays_empty_and_locked(_world: &World) -> Outcome {
     if Account::by_name(HELPER_GROUP).is_ok() {
@@ -677,11 +677,11 @@ fn a_damaged_or_planted_budget(world: &World) -> Outcome {
     world.start_accepting_pin()?;
     overwrite(&world.budget_file(), "garbage\n")?;
     world.fails_closed("not a valid budget")?;
-    // Planted by bob's helper: private to bob, it can't even be opened; readable, its owner is wrong.
+    // Planted by bob's pinchecker: private to bob, it can't even be opened; readable, its owner is wrong.
     let bob = Account::by_name("bob").map_err(message)?;
-    write_file(&world.budget_file(), &Budget::default().format(), bob.uid, world.helper_gid, 0o600)?;
+    write_file(&world.budget_file(), &Budget::default().format(), bob.uid, world.pinchecker_gid, 0o600)?;
     world.fails_closed(&format!("{}: Permission denied", world.budget_file().display()))?;
-    write_file(&world.budget_file(), &Budget::default().format(), bob.uid, world.helper_gid, 0o644)?;
+    write_file(&world.budget_file(), &Budget::default().format(), bob.uid, world.pinchecker_gid, 0o644)?;
     world.fails_closed(&format!("owned by uid {}, not {}", bob.uid, world.user.uid))
 }
 
@@ -708,7 +708,7 @@ fn accepting_the_pin_since_a_time_in_the_future(world: &World) -> Outcome {
 fn an_expired_pin(world: &World) -> Outcome {
     // 0.01 hours is 36 seconds; the lock screen started accepting the PIN a minute ago.
     let user_file = format!("{}expiry_hours = 0.01\n", String::from_utf8_lossy(&world.pin_file));
-    write_file(&world.user_file(), &user_file, 0, world.helper_gid, 0o640)?;
+    write_file(&world.user_file(), &user_file, 0, world.pinchecker_gid, 0o640)?;
     world.start_accepting_pin()?;
     world.edit_state(|state| state.accepting_pin_since = state.accepting_pin_since.saturating_sub(60))?;
     world.pin_refused(PIN, "the last password unlock was 0h01m ago")
@@ -775,8 +775,8 @@ fn one_session_serves_many_attempts(world: &World) -> Outcome {
 
 /// With `min_milliseconds_before_pin_unlock` raised to a second, a correct PIN takes at least that
 /// through the real stack. Killed while it waits, as the 6.8 greeter cancels, the worker unlocks
-/// nothing; the helper had already taken the PIN, so the failures in a row are reset as after any
-/// correct PIN, its helper is gone, and the PIN unlocks again afterwards.
+/// nothing; the pinchecker had already taken the PIN, so the failures in a row are reset as after any
+/// correct PIN, its pinchecker is gone, and the PIN unlocks again afterwards.
 fn a_correct_pin_waits_out_the_minimum(world: &World) -> Outcome {
     write_file(&world.config(), "min_milliseconds_before_pin_unlock = 1000\n", 0, 0, 0o644)?;
     world.start_accepting_pin()?;
@@ -799,18 +799,18 @@ fn a_correct_pin_waits_out_the_minimum(world: &World) -> Outcome {
     if !Answer::all(&output).is_empty() {
         return Err(format!("the killed worker answered: {}", String::from_utf8_lossy(&output.stdout)));
     }
-    no_helper_left()?;
+    no_pinchecker_left()?;
     let log = world.syslog.take();
     let text = fs::read_to_string(world.state_file()).map_err(message)?;
     let state = PinState::parse(&text).ok_or_else(|| format!("the state doesn't parse: {text}"))?;
     if !log.contains("unlocked with the PIN") || state.failures != 0 {
-        return Err(format!("the helper should have taken the PIN and reset the failures, {} in a row now:\n{log}", state.failures));
+        return Err(format!("the pinchecker should have taken the PIN and reset the failures, {} in a row now:\n{log}", state.failures));
     }
     world.pin_unlocks()
 }
 
 /// The 6.8 greeter cancels by killing its worker: SIGTERM and SIGKILL 25 ms later, or SIGKILL at
-/// once. A wrong PIN typed into a worker killed at chosen and random moments: no unlock, the helper
+/// once. A wrong PIN typed into a worker killed at chosen and random moments: no unlock, the pinchecker
 /// finishes on its own and its count is kept, a fresh attempt right after gets the lock and is
 /// counted, and the counts and the budget agree.
 fn a_killed_worker_loses_no_count(world: &World) -> Outcome {
@@ -833,7 +833,7 @@ fn a_killed_worker_loses_no_count(world: &World) -> Outcome {
         })?;
         reached += usize::from(counted == 2);
     }
-    println!("        note: the killed worker's guess reached the helper, and was counted, in {reached} of 16 rounds");
+    println!("        note: the killed worker's guess reached the pinchecker, and was counted, in {reached} of 16 rounds");
     Ok(())
 }
 
@@ -877,8 +877,8 @@ fn disable_and_uninstall(world: &World) -> Outcome {
 
 struct World {
     user: Account,
-    /// The group the helper runs with.
-    helper_gid: u32,
+    /// The group the pinchecker runs with.
+    pinchecker_gid: u32,
     syslog: Syslog,
     /// `/etc/pam.d/kde` before enable.
     stock_kde: String,
@@ -934,7 +934,7 @@ impl World {
 
         install_sh(&["install"])?;
         install_sh(&["enable", "--yes"])?;
-        let helper_gid = group_by_name(HELPER_GROUP).map_err(message)?;
+        let pinchecker_gid = group_by_name(HELPER_GROUP).map_err(message)?;
 
         properpin_as_root(&["set", "--user", USER], &format!("{PIN}\n{PIN}\n{PASSWORD}\n"))?;
         let checked = install_sh(&["check"])?;
@@ -942,7 +942,7 @@ impl World {
             return Err(format!("install.sh check after set:\n{checked}"));
         }
         let pin_file = fs::read(format!("/etc/properpin/users/{USER}")).map_err(message)?;
-        Ok(Self { user, helper_gid, syslog, stock_kde, pin_file })
+        Ok(Self { user, pinchecker_gid, syslog, stock_kde, pin_file })
     }
 
     fn user_file(&self) -> PathBuf {
@@ -990,9 +990,9 @@ impl World {
             }
         }
         let _ = fs::remove_file(self.user_file());
-        write_file(&self.user_file(), &String::from_utf8_lossy(&self.pin_file), 0, self.helper_gid, 0o640)?;
+        write_file(&self.user_file(), &String::from_utf8_lossy(&self.pin_file), 0, self.pinchecker_gid, 0o640)?;
         for dir in [RUN_DIR, BUDGET_DIR] {
-            chown(dir, Some(0), Some(self.helper_gid)).map_err(message)?;
+            chown(dir, Some(0), Some(self.pinchecker_gid)).map_err(message)?;
             fs::set_permissions(dir, Permissions::from_mode(0o1770)).map_err(message)?;
         }
         let _ = fs::remove_dir_all(SCRATCH);
@@ -1007,10 +1007,10 @@ impl World {
         self.as_identity(account.uid, account.gid, argv, typed)
     }
 
-    /// Run `argv` as `user` with the helper's group: what an exploited helper started by `user` could do.
-    fn as_helper_group(&self, user: &str, argv: &[&str]) -> Outcome<std::process::Output> {
+    /// Run `argv` as `user` with the pinchecker's group: what an exploited pinchecker started by `user` could do.
+    fn as_pinchecker_group(&self, user: &str, argv: &[&str]) -> Outcome<std::process::Output> {
         let account = Account::by_name(user).map_err(message)?;
-        self.as_identity(account.uid, self.helper_gid, argv, b"")
+        self.as_identity(account.uid, self.pinchecker_gid, argv, b"")
     }
 
     fn as_identity(&self, uid: u32, gid: u32, argv: &[&str], typed: &[u8]) -> Outcome<std::process::Output> {
@@ -1086,7 +1086,7 @@ impl World {
     }
 
     /// One round of `a_killed_worker_loses_no_count`, with the lock screen accepting the PIN and no failures yet.
-    /// Returns how many failures were counted: 2 when the killed worker's guess reached the helper.
+    /// Returns how many failures were counted: 2 when the killed worker's guess reached the pinchecker.
     fn kill_a_worker(&self, after: Duration, gently: bool) -> Outcome<usize> {
         self.start_accepting_pin()?;
         let mut worker = self.start(&["worker", "kde", USER])?;
@@ -1107,10 +1107,10 @@ impl World {
         }
         let fresh = self.kde("2222")?;
         expect(!fresh.unlocked, "the fresh wrong PIN unlocked", &fresh)?;
-        no_helper_left()?;
+        no_pinchecker_left()?;
         let log = fresh.log + &self.syslog.take();
         if log.contains("PIN refused:") || log.contains("can't start accepting the PIN") {
-            return Err(format!("an attempt got no answer from the helper:\n{log}"));
+            return Err(format!("an attempt got no answer from the pinchecker:\n{log}"));
         }
         let counted = log.matches("not the PIN, failure").count();
         let text = fs::read_to_string(self.state_file()).map_err(message)?;
@@ -1263,23 +1263,23 @@ fn expect_code(output: &std::process::Output, code: u8, what: &str) -> Outcome {
     ))
 }
 
-/// No helper is still running, within the time one whose attempt was killed takes to finish.
-/// Exited helpers nobody has reaped yet don't count.
-fn no_helper_left() -> Outcome {
+/// No pinchecker is still running, within the time one whose attempt was killed takes to finish.
+/// Exited pincheckers nobody has reaped yet don't count.
+fn no_pinchecker_left() -> Outcome {
     let deadline = Instant::now() + HELPER_LINGER;
     loop {
-        let running = running_helpers()?;
+        let running = running_pincheckers()?;
         if running.is_empty() {
             return Ok(());
         }
         if Instant::now() > deadline {
-            return Err(format!("helpers still running after {HELPER_LINGER:?}: pids {running:?}"));
+            return Err(format!("pincheckers still running after {HELPER_LINGER:?}: pids {running:?}"));
         }
         thread::sleep(Duration::from_millis(10));
     }
 }
 
-fn running_helpers() -> Outcome<Vec<u32>> {
+fn running_pincheckers() -> Outcome<Vec<u32>> {
     let mut running = Vec::new();
     for entry in fs::read_dir("/proc").map_err(message)? {
         let Ok(pid) = entry.map_err(message)?.file_name().to_string_lossy().parse::<u32>() else { continue };

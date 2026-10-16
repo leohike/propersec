@@ -1,5 +1,5 @@
 //! The `properpin` command, run as a subprocess against a sandboxed `--etc` owned by whoever runs
-//! the tests, with `--helper` pointing at a script that runs the freshly built `properpin-helper`
+//! the tests, with `--pinchecker` pointing at a script that runs the freshly built `properpin-pinchecker`
 //! against the same sandbox (through its `--dev-*` options, accepted because it isn't setgid).
 
 use std::fs::{self, Permissions};
@@ -26,12 +26,12 @@ impl Sandbox {
         }
         let chkpwd = format!("#!/bin/bash\nIFS= read -r -d '' password\n[[ $password == '{PASSWORD}' ]]\n");
         script(&root.join("unix_chkpwd"), &chkpwd);
-        let helper = format!(
+        let pinchecker = format!(
             "#!/bin/sh\nexec {} \"$@\" --dev-etc {root}/etc --dev-run {root}/run --dev-budget {root}/var --dev-chkpwd {root}/unix_chkpwd --dev-log {root}/log\n",
-            built_helper().display(),
+            built_pinchecker().display(),
             root = root.display()
         );
-        script(&root.join("helper"), &helper);
+        script(&root.join("pinchecker"), &pinchecker);
         sandbox
     }
 
@@ -41,10 +41,10 @@ impl Sandbox {
             .unwrap()
             .env_remove("SUDO_USER")
             .env_remove("PKEXEC_UID")
-            .args(["--etc", root.join("etc").to_str().unwrap(), "--helper", root.join("helper").to_str().unwrap()])
+            .args(["--etc", root.join("etc").to_str().unwrap(), "--pinchecker", root.join("pinchecker").to_str().unwrap()])
             .args(["--budget", root.join("var").to_str().unwrap(), "--run", root.join("run").to_str().unwrap()])
             .args(["--chkpwd", root.join("unix_chkpwd").to_str().unwrap()])
-            .args(["--owner", &current_uid().to_string(), "--group", &helper_gid().to_string()])
+            .args(["--owner", &current_uid().to_string(), "--group", &pinchecker_gid().to_string()])
             .args(args)
             .write_stdin(stdin)
             .assert()
@@ -56,7 +56,7 @@ impl Sandbox {
     }
 
     fn try_start_accepting_pin(&self) -> bool {
-        let status = std::process::Command::new(self.0.path().join("helper"))
+        let status = std::process::Command::new(self.0.path().join("pinchecker"))
             .arg("start-accepting-pin")
             .stdin(std::process::Stdio::piped())
             .spawn()
@@ -68,7 +68,7 @@ impl Sandbox {
         status.success()
     }
 
-    /// Replace the user's budget with `budget`, the way the helper would have written it.
+    /// Replace the user's budget with `budget`, the way the pinchecker would have written it.
     fn write_budget(&self, budget: &Budget) {
         let path = self.0.path().join(format!("var/{}.budget", current_uid()));
         fs::write(&path, budget.format()).unwrap();
@@ -88,7 +88,7 @@ fn new_pin(pin: &str, again: &str) -> String {
 /// What the lock screen's PIN line does: whether `pin` unlocks right now.
 fn unlocks(sandbox: &Sandbox, pin: &str) -> bool {
     let mut child =
-        std::process::Command::new(sandbox.0.path().join("helper")).arg("check").stdin(std::process::Stdio::piped()).spawn().unwrap();
+        std::process::Command::new(sandbox.0.path().join("pinchecker")).arg("check").stdin(std::process::Stdio::piped()).spawn().unwrap();
     std::io::Write::write_all(&mut child.stdin.take().unwrap(), pin.as_bytes()).unwrap();
     child.wait().unwrap().success()
 }
@@ -102,13 +102,13 @@ fn script(path: &Path, text: &str) {
     fs::set_permissions(path, Permissions::from_mode(0o755)).unwrap();
 }
 
-/// The test user's primary group, which stands in for the helper's.
-fn helper_gid() -> u32 {
+/// The test user's primary group, which stands in for the pinchecker's.
+fn pinchecker_gid() -> u32 {
     properpin_sys::Account::by_uid(current_uid()).unwrap().gid
 }
 
-/// The directory with a fresh `properpin-helper`, built once per test run.
-fn built_helper() -> &'static Path {
+/// The directory with a fresh `properpin-pinchecker`, built once per test run.
+fn built_pinchecker() -> &'static Path {
     static BUILT: OnceLock<PathBuf> = OnceLock::new();
     BUILT.get_or_init(|| {
         let profile_dir = std::env::current_exe().unwrap().parent().and_then(Path::parent).unwrap().to_path_buf();
@@ -117,15 +117,15 @@ fn built_helper() -> &'static Path {
             "build",
             "--quiet",
             "--package",
-            "properpin-helper",
+            "properpin-pinchecker",
             "--manifest-path",
             concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"),
         ]);
         if profile_dir.ends_with("release") {
             cargo.arg("--release");
         }
-        assert!(cargo.status().unwrap().success(), "building properpin-helper failed");
-        profile_dir.join("properpin-helper")
+        assert!(cargo.status().unwrap().success(), "building properpin-pinchecker failed");
+        profile_dir.join("properpin-pinchecker")
     })
 }
 
@@ -135,7 +135,7 @@ fn set_then_status_then_remove() {
     sandbox.properpin(&["set"], &new_pin("4859", "4859")).success();
     let [file] = &sandbox.user_files()[..] else { panic!("expected one user file") };
     assert_eq!(fs::metadata(file).unwrap().mode() & 0o777, 0o640);
-    assert_eq!(fs::metadata(file).unwrap().gid(), helper_gid(), "readable by the helper's group");
+    assert_eq!(fs::metadata(file).unwrap().gid(), pinchecker_gid(), "readable by the pinchecker's group");
     let text = fs::read_to_string(file).unwrap();
     assert!(
         text.starts_with("hash = $y$")
@@ -195,25 +195,25 @@ fn a_set_pin_survives_a_reboot_through_the_password() {
 }
 
 #[test]
-fn status_shows_what_the_helper_sees() {
+fn status_shows_what_the_pinchecker_sees() {
     let sandbox = Sandbox::new();
     sandbox.properpin(&["set"], &new_pin("4859", "4859")).success();
     sandbox.start_accepting_pin();
     let status = stdout(&sandbox.properpin(&["status"], "").success());
     assert!(status.contains("accepting the PIN for another"), "{status}");
-    fs::remove_file(sandbox.0.path().join("helper")).unwrap();
-    says(&sandbox.properpin(&["status"], "").failure(), "helper");
+    fs::remove_file(sandbox.0.path().join("pinchecker")).unwrap();
+    says(&sandbox.properpin(&["status"], "").failure(), "pinchecker");
 }
 
 #[test]
-fn set_needs_the_helper_group_to_exist() {
+fn set_needs_the_pinchecker_group_to_exist() {
     let sandbox = Sandbox::new();
     let assert = Command::cargo_bin("properpin")
         .unwrap()
         .args([
             "--etc",
             sandbox.0.path().join("etc").to_str().unwrap(),
-            "--helper",
+            "--pinchecker",
             "/nonexistent",
             "--budget",
             "/nonexistent",

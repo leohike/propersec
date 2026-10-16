@@ -13,8 +13,8 @@
 //! to plant a PIN they know. The PIN is read from the terminal, or from stdin when it isn't one,
 //! never from the command line, where other users could see it in the process list.
 //!
-//! The hash file is written readable by the helper's group only, so the user can't read it either:
-//! `status` asks the setgid helper, which is the only program that reads hashes and counts.
+//! The hash file is written readable by the pinchecker's group only, so the user can't read it either:
+//! `status` asks the setgid pinchecker, which is the only program that reads hashes and counts.
 //!
 //! `set` also asks for the user's password, checks it through `unix_chkpwd`, and seals a fresh
 //! random pepper with a key derived from it (`docs/pepper-terminology.md`). The PIN is hashed with
@@ -55,13 +55,13 @@ struct Cli {
     /// The password checker set asks
     #[arg(long, value_name = "PATH", default_value = "/usr/sbin/unix_chkpwd")]
     chkpwd: PathBuf,
-    /// The setgid helper, which status asks; /usr/local/libexec/properpin/properpin-helper once installed
+    /// The setgid pinchecker, which status asks; /usr/local/libexec/properpin/properpin-pinchecker once installed
     #[arg(long, value_name = "PATH")]
-    helper: PathBuf,
+    pinchecker: PathBuf,
     /// Who must own the files under --etc, and the --budget directory
     #[arg(long, value_name = "UID", default_value_t = 0)]
     owner: u32,
-    /// The helper's group, the only one that may read hash files
+    /// The pinchecker's group, the only one that may read hash files
     #[arg(long, value_name = "GROUP", default_value = "properpin")]
     group: String,
     #[command(subcommand)]
@@ -211,20 +211,20 @@ fn remove(cli: &Cli, account: &Account) -> Result<()> {
     Ok(())
 }
 
-/// The helper prints the status: only it can read the hash file and the counts.
+/// The pinchecker prints the status: only it can read the hash file and the counts.
 fn status(cli: &Cli) -> Result<bool> {
     if current_uid() == 0 {
         bail!("status shows your own PIN; run it as yourself, without sudo");
     }
-    let output = Command::new(&cli.helper)
+    let output = Command::new(&cli.pinchecker)
         .arg("status")
         .stdin(Stdio::null())
         .output()
-        .with_context(|| format!("running {}", cli.helper.display()))?;
+        .with_context(|| format!("running {}", cli.pinchecker.display()))?;
     print!("{}", String::from_utf8_lossy(&output.stdout));
     match output.status.code().and_then(|code| u8::try_from(code).ok()) {
         Some(exit::YES) => Ok(true),
-        _ => bail!("{} failed ({}); the system log says why", cli.helper.display(), output.status),
+        _ => bail!("{} failed ({}); the system log says why", cli.pinchecker.display(), output.status),
     }
 }
 

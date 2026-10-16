@@ -1,7 +1,7 @@
-//! `properpin-helper`, the setgid program. See the library (`lib.rs`) for what it answers.
+//! `properpin-pinchecker`, the setgid program. See the library (`lib.rs`) for what it answers.
 //!
 //! ```text
-//! properpin-helper check|start-accepting-pin|status
+//! properpin-pinchecker check|start-accepting-pin|status
 //! ```
 //!
 //! Installed `root:properpin 2755`, setgid to the `properpin` group, with fixed locations: the
@@ -21,7 +21,7 @@
 //! ```
 //!
 //! Started with elevated rights (setgid, as installed), any `--dev` option is refused outright; see
-//! `dev_options_allowed` for the two checks. Without elevated rights the helper can do nothing its
+//! `dev_options_allowed` for the two checks. Without elevated rights the pinchecker can do nothing its
 //! caller couldn't do directly, so letting the caller choose the locations gives nothing away.
 
 // Stricter checks for shipped code (docs/plan-tools.md): every unsafe block explains why it is
@@ -33,7 +33,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use properpin_core::{Log, Secret, exit};
-use properpin_helper::{Context, Places, Request, UnixChkpwd, dev_options_allowed, read_input, serve};
+use properpin_pinchecker::{Context, Places, Request, UnixChkpwd, dev_options_allowed, read_input, serve};
 use properpin_sys::{Account, BootClock, FileLog, Yescrypt, current_egid, current_euid, current_gid, current_uid};
 
 mod secure;

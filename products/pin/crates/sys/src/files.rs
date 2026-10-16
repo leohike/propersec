@@ -21,23 +21,23 @@ const LOCK_TIMEOUT: Duration = Duration::from_secs(1);
 ///
 /// ```text
 /// <etc>/config               global settings, optional            owner-only writable
-/// <etc>/users/<user>         the user's settings, hash and        owner:<helper group> 0640
+/// <etc>/users/<user>         the user's settings, hash and        owner:<pinchecker group> 0640
 ///                            encrypted pepper
-/// <run_dir>/                 every user's state                   owner:<helper group> 1770
-/// <run_dir>/<uid>.state      a PinState, with the clear pepper    <uid>:<helper group> 0600
-/// <run_dir>/<uid>.lock       serialises concurrent attempts       <uid>:<helper group> 0600
-/// <budget_dir>/              every user's budget, on disk         owner:<helper group> 1770
-/// <budget_dir>/<uid>.budget  a Budget                             <uid>:<helper group> 0600
+/// <run_dir>/                 every user's state                   owner:<pinchecker group> 1770
+/// <run_dir>/<uid>.state      a PinState, with the clear pepper    <uid>:<pinchecker group> 0600
+/// <run_dir>/<uid>.lock       serialises concurrent attempts       <uid>:<pinchecker group> 0600
+/// <budget_dir>/              every user's budget, on disk         owner:<pinchecker group> 1770
+/// <budget_dir>/<uid>.budget  a Budget                             <uid>:<pinchecker group> 0600
 /// ```
 ///
 /// The settings and the hash must belong to `etc_owner`, so nobody else can change them: root once
 /// installed, the test's own uid in tests. The state lives in one directory for all users, which
-/// only the helper's group can enter, so a user can neither read nor reset their counts. The
+/// only the pinchecker's group can enter, so a user can neither read nor reset their counts. The
 /// directory is sticky, and each user's state and lock files must belong to that user, so one
-/// user's run of the helper can't read, replace or plant another's. The budget follows the same
+/// user's run of the pinchecker can't read, replace or plant another's. The budget follows the same
 /// rules in a directory on disk, so it survives a reboot; the run directory's lock covers it.
 /// `properpin enable` needs the `etc` side and the budget; [`UserFiles::with_runtime`] adds the
-/// state, which the helper keeps, `properpin set` starts accepting the PIN with, and `properpin remove` deletes. Whoever
+/// state, which the pinchecker keeps, `properpin set` starts accepting the PIN with, and `properpin remove` deletes. Whoever
 /// writes the state or creates the lock file, the user or root, gives it to the user.
 #[derive(Debug, Clone)]
 pub struct UserFiles {
@@ -49,7 +49,7 @@ pub struct UserFiles {
     uid: u32,
 }
 
-/// A directory every user's files share: owned by `owner`, with the helper's `group`.
+/// A directory every user's files share: owned by `owner`, with the pinchecker's `group`.
 #[derive(Debug, Clone)]
 struct SharedDir {
     path: PathBuf,
@@ -112,7 +112,7 @@ impl UserFiles {
     }
 
     /// Atomically write a new PIN's settings (its hash and encrypted pepper) into the user's file:
-    /// owned by the owner, readable by `group` (the helper's), mode 0640. The user's other settings
+    /// owned by the owner, readable by `group` (the pinchecker's), mode 0640. The user's other settings
     /// in the file are kept as they are.
     pub fn save_pin(&self, new: &[(&str, &str)], group: u32) -> Result<(), Error> {
         let path = self.user_file();
@@ -168,10 +168,10 @@ impl UserFiles {
         statfs(&self.runtime.as_ref()?.path).ok().map(|info| info.filesystem_type() == TMPFS_MAGIC)
     }
 
-    // --- the helper's side: per-boot state, and the budget
+    // --- the pinchecker's side: per-boot state, and the budget
 
     fn trusted_run_dir(&self) -> Result<&Path, Error> {
-        let runtime = self.runtime.as_ref().ok_or_else(|| Error::System("no runtime directory: only the helper keeps state".into()))?;
+        let runtime = self.runtime.as_ref().ok_or_else(|| Error::System("no runtime directory: only the pinchecker keeps state".into()))?;
         trusted_dir(runtime, "run directory")
     }
 
@@ -182,7 +182,7 @@ impl UserFiles {
 }
 
 /// Refuse a shared directory that isn't exactly as installed: a directory, not a symlink, owned by
-/// the owner and the helper's group, mode 1770. Without the group's write bit the helper can't
+/// the owner and the pinchecker's group, mode 1770. Without the group's write bit the pinchecker can't
 /// keep its files; without the sticky bit one user's run could delete or replace another's files;
 /// any bit for others would let users in.
 fn trusted_dir<'a>(dir: &'a SharedDir, what: &str) -> Result<&'a Path, Error> {
@@ -271,7 +271,7 @@ impl Store for UserFiles {
         PinState::parse(&text)
     }
 
-    /// Written for the user and the helper's group whoever writes it: the helper, as the user, or
+    /// Written for the user and the pinchecker's group whoever writes it: the pinchecker, as the user, or
     /// `properpin set`, as root. Owner-only, since it may hold the pepper.
     fn save_state(&self, state: &PinState) -> Result<(), Error> {
         let dir = self.trusted_run_dir()?;
@@ -306,7 +306,7 @@ impl Store for UserFiles {
         Budget::parse(&text).map_or_else(|| refuse("not a valid budget"), Ok)
     }
 
-    /// Written for the user and the helper's group whoever writes it: the helper, as the user, or
+    /// Written for the user and the pinchecker's group whoever writes it: the pinchecker, as the user, or
     /// `properpin enable`, as root. Synced, file and directory, since it must survive a power cut.
     fn save_budget(&self, budget: &Budget) -> Result<(), Error> {
         let dir = self.trusted_budget_dir()?;

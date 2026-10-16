@@ -75,7 +75,7 @@ pub unsafe extern "C" fn pam_sm_setcred(_pamh: *mut PamHandle, _flags: c_int, _a
     PAM_IGNORE
 }
 
-/// The helper logs every answer itself; the module logs only what went wrong on its side. A
+/// The pinchecker logs every answer itself; the module logs only what went wrong on its side. A
 /// correct PIN waits out the minimum before unlocking; nothing else waits.
 fn run_and_log(pam: &Pam, args: &Args, started: Instant, log: &impl Log) -> bool {
     let yes = run(pam, args).unwrap_or_else(|error| {
@@ -103,7 +103,7 @@ unsafe fn arguments(argc: c_int, argv: *const *const c_char) -> Vec<String> {
 }
 
 /// SIGCHLD set to its default action for as long as this lives, and then put back as it was. Like
-/// pam_unix around `unix_chkpwd`: a host that ignores SIGCHLD would have the helper's exit status
+/// pam_unix around `unix_chkpwd`: a host that ignores SIGCHLD would have the pinchecker's exit status
 /// discarded by the kernel, and the module couldn't read the answer.
 ///
 /// The setting is process-wide. Two threads saving and restoring it at once can lose the host's

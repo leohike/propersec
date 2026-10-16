@@ -1,4 +1,4 @@
-//! The real `properpin-helper` binary, run as a subprocess without setgid, so its `--dev-*` options
+//! The real `properpin-pinchecker` binary, run as a subprocess without setgid, so its `--dev-*` options
 //! point it at a sandbox owned by whoever runs the tests. `unix_chkpwd` is replaced by a script
 //! that accepts one password. What needs real setgid (the dev options refused, other users kept
 //! out) is in the container test.
@@ -11,7 +11,7 @@ use std::process::{Command, Stdio};
 use properpin_core::{MAX_INPUT_BYTES, exit};
 use properpin_sys::{Account, Yescrypt, current_uid};
 
-const HELPER: &str = env!("CARGO_BIN_EXE_properpin-helper");
+const HELPER: &str = env!("CARGO_BIN_EXE_properpin-pinchecker");
 const PIN: &str = "4859";
 const PASSWORD: &str = "correct horse battery staple";
 
@@ -19,7 +19,7 @@ struct Sandbox {
     dir: tempfile::TempDir,
 }
 
-/// What one run of the helper came to.
+/// What one run of the pinchecker came to.
 #[derive(Debug)]
 struct Run {
     code: Option<i32>,
@@ -89,7 +89,7 @@ impl Sandbox {
 
 fn run(mut command: Command, stdin: &[u8]) -> Run {
     let mut child = command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
-    // A helper that refuses its arguments exits without reading, so the pipe may already be closed.
+    // A pinchecker that refuses its arguments exits without reading, so the pipe may already be closed.
     match std::io::Write::write_all(&mut child.stdin.take().unwrap(), stdin) {
         Err(error) if error.kind() != std::io::ErrorKind::BrokenPipe => panic!("{error}"),
         _ => {}

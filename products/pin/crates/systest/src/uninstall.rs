@@ -25,7 +25,7 @@ use super::*;
 const BROKEN: &str = "/opt/properpin/broken";
 /// An attempt still running after this is dead: the lock screen would hang on it.
 const DEAD_AFTER: Duration = Duration::from_secs(30);
-/// The module waits ten seconds for a helper before killing it.
+/// The module waits ten seconds for a pinchecker before killing it.
 const HELPER_TIMEOUT: Duration = Duration::from_secs(10);
 /// Kept by uninstall on purpose, with the PINs and the budgets.
 const KEPT: [&str; 2] = ["/etc/properpin", "/var/lib/properpin"];
@@ -41,7 +41,7 @@ enum Breaks {
     Hangs,
     /// A wrong password unlocks the lock screen.
     LetsAnyoneIn,
-    /// The right password unlocks, but only after the module's helper timeout, twice over.
+    /// The right password unlocks, but only after the module's pinchecker timeout, twice over.
     Slows,
     /// The right password is refused.
     LocksOut,
@@ -70,8 +70,8 @@ const CASES: &[Case] = &[
     Case { name: "module-missing-symbol", variant: Some("module-missing-symbol"), damage: no_damage, breaks: &[Breaks::LocksOut] },
     Case { name: "module-garbage", variant: Some("module-garbage"), damage: no_damage, breaks: &[Breaks::LocksOut] },
     Case { name: "module-deleted", variant: None, damage: delete_the_module, breaks: &[Breaks::LocksOut] },
-    Case { name: "helper-says-yes", variant: Some("helper-says-yes"), damage: no_damage, breaks: &[Breaks::LetsAnyoneIn] },
-    Case { name: "helper-sleeps", variant: Some("helper-sleeps"), damage: no_damage, breaks: &[Breaks::Slows] },
+    Case { name: "pinchecker-says-yes", variant: Some("pinchecker-says-yes"), damage: no_damage, breaks: &[Breaks::LetsAnyoneIn] },
+    Case { name: "pinchecker-sleeps", variant: Some("pinchecker-sleeps"), damage: no_damage, breaks: &[Breaks::Slows] },
     Case { name: "kde-end-marker-deleted", variant: None, damage: delete_the_end_marker, breaks: &[Breaks::DisableGivesUp] },
     Case { name: "kde-block-twice", variant: None, damage: repeat_the_block, breaks: &[Breaks::DisableGivesUp] },
     Case { name: "kde-markers-stripped", variant: None, damage: strip_the_markers, breaks: &[Breaks::DisableGivesUp] },
@@ -193,7 +193,7 @@ impl Bench {
         self.is_broken(case).map_err(|error| format!("the broken install didn't break as expected: {error}"))?;
 
         let said = install_sh(&["uninstall", "--yes"]).map_err(|error| format!("uninstall failed: {error}"))?;
-        no_helper_left()?;
+        no_pinchecker_left()?;
         self.matches(&before, "after uninstall").map_err(|error| format!("{error}\nuninstall said:\n{said}"))?;
 
         install_sh(&["uninstall", "--yes"]).map_err(|error| format!("a second uninstall failed: {error}"))?;
@@ -229,7 +229,7 @@ impl Bench {
                 Breaks::Slows => {
                     let probe = self.probe("kde", PASSWORD)?;
                     if probe.ran != Ran::Unlocked || probe.took < HELPER_TIMEOUT * 2 {
-                        return Err(format!("the right password should unlock after two helper timeouts: {probe:?}"));
+                        return Err(format!("the right password should unlock after two pinchecker timeouts: {probe:?}"));
                     }
                 }
                 Breaks::LocksOut => self.expect("kde", PASSWORD, &Ran::Refused, "the right password")?,

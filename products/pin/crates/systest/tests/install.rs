@@ -57,7 +57,7 @@ impl FakeRoot {
             .arg(command)
             .arg("--root")
             .arg(self.dir.path())
-            .args(["--owner", &whoami(), "--helper-group", &group()])
+            .args(["--owner", &whoami(), "--pinchecker-group", &group()])
             .arg("--from")
             .arg(built())
             .output()
@@ -99,11 +99,11 @@ fn built() -> &'static Path {
     BUILT.get_or_init(|| {
         let manifest = concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml");
         let status = Command::new(env!("CARGO"))
-            .args(["build", "--quiet", "--package", "pam_properpin", "--package", "properpin-helper", "--package", "properpin-cli"])
+            .args(["build", "--quiet", "--package", "pam_properpin", "--package", "properpin-pinchecker", "--package", "properpin-cli"])
             .args(["--manifest-path", manifest])
             .status()
             .unwrap();
-        assert!(status.success(), "building the module, the helper and the command failed");
+        assert!(status.success(), "building the module, the pinchecker and the command failed");
         std::env::current_exe().unwrap().parent().and_then(Path::parent).unwrap().to_path_buf()
     })
 }
@@ -119,7 +119,10 @@ fn install_enable_disable_uninstall_leaves_pam_as_it_was() {
     let enabled = fs::read_to_string(root.kde()).unwrap();
     let lines: Vec<&str> = enabled.lines().collect();
     assert!(lines[0].starts_with("# properpin begin"), "{enabled}");
-    assert!(lines[1].contains("pam_properpin.so check helper=/usr/local/libexec/properpin/properpin-helper config=/etc/properpin/config"));
+    assert!(
+        lines[1]
+            .contains("pam_properpin.so check pinchecker=/usr/local/libexec/properpin/properpin-pinchecker config=/etc/properpin/config")
+    );
     assert!(lines[2].contains("pam_unix.so use_first_pass"));
     assert!(lines[3].contains("pam_properpin.so start-accepting-pin"));
     assert_eq!(lines[4], "# properpin end");
@@ -161,12 +164,12 @@ fn install_puts_everything_in_place_and_twice_is_harmless() {
     let command = fs::read_to_string(root.path("usr/local/bin/properpin")).unwrap();
     assert!(
         command.contains(
-            "exec /usr/local/libexec/properpin/properpin --etc /etc/properpin --budget /var/lib/properpin --run /run/properpin --helper /usr/local/libexec/properpin/properpin-helper \"$@\""
+            "exec /usr/local/libexec/properpin/properpin --etc /etc/properpin --budget /var/lib/properpin --run /run/properpin --pinchecker /usr/local/libexec/properpin/properpin-pinchecker \"$@\""
         ),
         "{command}"
     );
     let mode = |path: &str| fs::metadata(root.path(path)).unwrap().permissions().mode() & 0o7777;
-    assert_eq!(mode("usr/local/libexec/properpin/properpin-helper"), 0o2755, "the helper is setgid only");
+    assert_eq!(mode("usr/local/libexec/properpin/properpin-pinchecker"), 0o2755, "the pinchecker is setgid only");
     assert_eq!(mode("etc/properpin/users"), 0o750);
     assert_eq!(mode("run/properpin"), 0o1770);
     assert_eq!(mode("var/lib/properpin"), 0o1770);
@@ -201,16 +204,16 @@ fn check_finds_what_is_wrong() {
     let problems = root.refused("check");
     assert!(problems.contains(&format!("users/{}: is 644", group())), "{problems}");
 
-    for (helper, run_dir) in [(0o755, 0o755), (0o4755, 0o700), (0o6755, 0o770)] {
+    for (pinchecker, run_dir) in [(0o755, 0o755), (0o4755, 0o700), (0o6755, 0o770)] {
         root.ok("install");
         fs::set_permissions(&user_file, Permissions::from_mode(0o640)).unwrap();
-        fs::set_permissions(root.path("usr/local/libexec/properpin/properpin-helper"), Permissions::from_mode(helper)).unwrap();
+        fs::set_permissions(root.path("usr/local/libexec/properpin/properpin-pinchecker"), Permissions::from_mode(pinchecker)).unwrap();
         fs::set_permissions(root.path("run/properpin"), Permissions::from_mode(run_dir)).unwrap();
         fs::set_permissions(root.path("var/lib/properpin"), Permissions::from_mode(0o1777)).unwrap();
         fs::write(root.path("etc/tmpfiles.d/properpin.conf"), "d /run/properpin 0777 root root -\n").unwrap();
         fs::write(root.path("etc/sysusers.d/properpin.conf"), "u properpin - \"an account\" - -\n").unwrap();
         let problems = root.refused("check");
-        assert!(problems.contains(&format!("properpin-helper: is {helper:o}")), "{problems}");
+        assert!(problems.contains(&format!("properpin-pinchecker: is {pinchecker:o}")), "{problems}");
         assert!(problems.contains(&format!("/run/properpin: is {run_dir:o}")), "{problems}");
         assert!(problems.contains("/var/lib/properpin: is 1777"), "{problems}");
         assert!(problems.contains("tmpfiles.d/properpin.conf: not what install.sh writes"), "{problems}");
@@ -226,7 +229,7 @@ fn check_wants_the_group() {
         .arg(INSTALL_SH)
         .args(["check", "--root"])
         .arg(root.dir.path())
-        .args(["--owner", &whoami(), "--helper-group", "no-such-group-properpin"])
+        .args(["--owner", &whoami(), "--pinchecker-group", "no-such-group-properpin"])
         .output()
         .unwrap();
     assert!(!output.status.success());

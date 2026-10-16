@@ -1,26 +1,26 @@
-//! `properpin-helper`: the only program that reads PIN hashes and keeps the failure counts.
+//! `properpin-pinchecker`: the only program that reads PIN hashes and keeps the failure counts.
 //!
 //! It is installed owned by root and setgid to the `properpin` group, like Debian's `unix_chkpwd` is
 //! setgid to `shadow`, so the hash files and the counts can be readable by that group alone and stay
-//! out of reach of everything the user runs. The group has no members: running the helper is the
-//! only way to get it. The helper keeps its caller's user id, so the caller can't change the helper,
+//! out of reach of everything the user runs. The group has no members: running the pinchecker is the
+//! only way to get it. The pinchecker keeps its caller's user id, so the caller can't change the pinchecker,
 //! and each user's counts file is that user's own. The PAM module and the CLI start it, write what
 //! was typed to its stdin, and read its exit code (`properpin_core::exit`); only `status` prints
 //! anything.
 //!
 //! ```text
-//! properpin-helper check                stdin: what was typed. Exit 0 if it is the PIN and the lock
+//! properpin-pinchecker check                stdin: what was typed. Exit 0 if it is the PIN and the lock
 //!                                       screen is accepting the PIN
-//! properpin-helper start-accepting-pin  stdin: the password, just accepted by pam_unix. Checked
+//! properpin-pinchecker start-accepting-pin  stdin: the password, just accepted by pam_unix. Checked
 //!                                       again through unix_chkpwd, then it decrypts the pepper and
 //!                                       the lock screen starts accepting the PIN
-//! properpin-helper status               prints the caller's PIN settings, and whether the lock
+//! properpin-pinchecker status               prints the caller's PIN settings, and whether the lock
 //!                                       screen is accepting the PIN or the password is required
 //! ```
 //!
-//! The caller is always the real user id the kernel reports. The helper never takes a user name or
+//! The caller is always the real user id the kernel reports. The pinchecker never takes a user name or
 //! a path from its caller, except through the `--dev-*` options, which `main.rs` accepts only when
-//! [`dev_options_allowed`] says the helper runs without elevated rights, and then it has no more
+//! [`dev_options_allowed`] says the pinchecker runs without elevated rights, and then it has no more
 //! rights than its caller.
 //!
 //! This library is the decision part, with every location and outside check passed in, so the tests
@@ -78,7 +78,7 @@ pub struct Places {
     pub run_dir: PathBuf,
     /// Who must own `run_dir`: root once installed.
     pub run_owner: u32,
-    /// The group `run_dir` must have: the one the helper runs with, so a helper installed without
+    /// The group `run_dir` must have: the one the pinchecker runs with, so a pinchecker installed without
     /// its setgid bit runs with the caller's group and refuses.
     pub run_group: u32,
     /// `/var/lib/properpin` once installed: every user's budget, on disk. Same owner and group as
@@ -93,15 +93,15 @@ impl Places {
     }
 }
 
-/// Whether the `--dev-*` options may be used: only when the helper runs with no more rights than
+/// Whether the `--dev-*` options may be used: only when the pinchecker runs with no more rights than
 /// its caller. Two independent signs must agree: the kernel didn't flag the start as elevated
 /// (`AT_SECURE`), and the real and effective ids are the same, user and group both. A bug has to
-/// defeat both before a caller could point the installed helper at files or a checker of their own.
+/// defeat both before a caller could point the installed pinchecker at files or a checker of their own.
 pub fn dev_options_allowed(at_secure: bool, uid: u32, euid: u32, gid: u32, egid: u32) -> bool {
     !at_secure && uid == euid && gid == egid
 }
 
-/// What the helper answers: an exit code from `properpin_core::exit`, and for `status` some text.
+/// What the pinchecker answers: an exit code from `properpin_core::exit`, and for `status` some text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Reply {
     pub code: u8,

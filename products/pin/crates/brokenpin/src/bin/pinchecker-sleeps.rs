@@ -1,4 +1,4 @@
-//! Test-only: a `properpin-helper` that sleeps for ten hours, so every attempt waits for the
+//! Test-only: a `properpin-pinchecker` that sleeps for ten hours, so every attempt waits for the
 //! module's own timeout.
 
 fn main() {

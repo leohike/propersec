@@ -41,7 +41,7 @@ github.com/RazeLighter777/pinpam. The most visible competitor: a Show HN post ab
 
 ## libpamtpmpin
 
-github.com/0xr0bert/libpamtpmpin. Also Rust and TPM2, unrelated to pinpam: two NV indexes per user (a counter, and the PIN behind a PolicyNV), 5 tries by default, a `tpmpin` admin tool and a setuid `tpmpin-unblock-self` helper. Its `unblock_on_success` option resets the counter after a successful login by other means, which is close to properpin's accepting the PIN only after a password unlock, and its own README warns that it weakens the lockout. On the AUR; 1 star.
+github.com/0xr0bert/libpamtpmpin. Also Rust and TPM2, unrelated to pinpam: two NV indexes per user (a counter, and the PIN behind a PolicyNV), 5 tries by default, a `tpmpin` admin tool and a setuid `tpmpin-unblock-self` pinchecker. Its `unblock_on_success` option resets the counter after a successful login by other means, which is close to properpin's accepting the PIN only after a password unlock, and its own README warns that it weakens the lockout. On the AUR; 1 star.
 
 ## pam_pinlock
 
@@ -68,7 +68,7 @@ github.com/saltnpepper97/pam_pinlock. C, MIT, release 1.2.1 in June 2026, with a
 | After a reboot | Refused until the password | Works | Works | Works | Works |
 | Accepted again after a password unlock | Yes, for 8 hours | No | Optional, weakens the lockout | No, as far as the README says | Not applicable |
 | Failure limits | 3 in a row, then the password; your own typos forgiven; 10 a day, 20 a week, 100 per PIN disable it | 5, then locked until root clears the PIN | 5 by default | Rate limit, optional timed lockout | None |
-| Who holds the counter | A setgid helper's group; root can reset it | The TPM; root can't, short of clearing it | The TPM | A file | Nobody |
+| Who holds the counter | A setgid pinchecker's group; root can reset it | The TPM; root can't, short of clearing it | The TPM | A file | Nobody |
 | A stolen hash | Useless without the password (the pepper) | Inside the TPM | Inside the TPM | Argon2id, crackable for short PINs | Fast crypt, falls in moments |
 | Needs a TPM | No | Yes | Yes | No | No |
 | Unlocks KWallet | No | Experimental | No | No | No |

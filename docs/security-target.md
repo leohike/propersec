@@ -1,10 +1,10 @@
 # properpin's security, once complete
 
-A short assessment of properpin as it would be with everything planned so far built, written on 2026-10-03. The setgid helper, the failure budget, the pepper and refusing a PIN equal to the password are built; the pepper differs from the description below in the details listed in `docs/pepper-issues.md`. The question it answers: how much weaker is unlocking with a PIN than typing the full password every time?
+A short assessment of properpin as it would be with everything planned so far built, written on 2026-10-03. The setgid pinchecker, the failure budget, the pepper and refusing a PIN equal to the password are built; the pepper differs from the description below in the details listed in `docs/pepper-issues.md`. The question it answers: how much weaker is unlocking with a PIN than typing the full password every time?
 
 ## What "complete" means here
 
-- **The setgid helper** (`docs/spec-setgid-helper.md`): hashes `root:properpin 0640`, counts in `/run/properpin`, a root-owned helper setgid to a group with no members. Nothing the user runs can read a hash or reset a count.
+- **The setgid pinchecker** (`docs/spec-setgid-helper.md`): hashes `root:properpin 0640`, counts in `/run/properpin`, a root-owned pinchecker setgid to a group with no members. Nothing the user runs can read a hash or reset a count.
 - **The pepper** (built): a random secret mixed into the PIN hash, in clear text only in RAM (`/run/properpin`) while the lock screen is accepting the PIN, and on disk only encrypted under a key derived from the password (`docs/pepper-terminology.md`). A stolen hash and encrypted pepper can't be cracked without guessing the password first. `/run/properpin` not being a memory filesystem is warned about, not refused.
 - **The failure budget** (built): every failure nobody forgave counts across reboots, and 10 a day, 20 a week or 100 per PIN disable it until root turns it back on.
 - **PIN equal to the password refused** at `properpin set`.
@@ -32,5 +32,5 @@ What remains is the trade properpin was built to make: someone at the locked key
 
 - **Disk swap without encryption, or unencrypted hibernation**: the pepper could reach the disk, and with it a crackable hash.
 - **A weak PIN**: digits fall to a few lucky guesses far sooner than words; the per-boot cap bounds it, it doesn't remove it.
-- **A bug in the helper**: it reads every hash and holds every pepper while it runs. That is why it is small, runs with a group that owns nothing else, and has its own review checklist (`products/pin/docs/helper-review.md`).
+- **A bug in the pinchecker**: it reads every hash and holds every pepper while it runs. That is why it is small, runs with a group that owns nothing else, and has its own review checklist (`products/pin/docs/pinchecker-review.md`).
 - **Reusing the PIN elsewhere**: a PIN watched at the lock screen then works on the phone or card that shares it.

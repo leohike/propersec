@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Run in the Containerfile's build stage, after the real build: one directory per broken variant
-# under /out/broken, each holding libpam_properpin.so, properpin-helper and properpin under exactly
+# under /out/broken, each holding libpam_properpin.so, properpin-pinchecker and properpin under exactly
 # the real names, so install.sh --from installs it exactly as it installs the real thing. Each
 # variant is the real build with one part swapped for a broken one from crates/brokenpin.
 # crates/systest's uninstall cases install them and check that install.sh uninstall repairs the
@@ -12,7 +12,7 @@ release=target/release
 
 variant() {
     mkdir -p "/out/broken/$1"
-    cp "$release/libpam_properpin.so" "$release/properpin-helper" "$release/properpin" "/out/broken/$1/"
+    cp "$release/libpam_properpin.so" "$release/properpin-pinchecker" "$release/properpin" "/out/broken/$1/"
 }
 
 for feature in panics segfaults sleeps says-yes; do
@@ -29,7 +29,7 @@ cp "$release/libbrokenpin.so" /out/broken/module-missing-symbol/libpam_properpin
 variant module-garbage
 echo "this is not a shared library" >/out/broken/module-garbage/libpam_properpin.so
 
-for helper in helper-says-yes helper-sleeps; do
-    variant "$helper"
-    cp "$release/$helper" "/out/broken/$helper/properpin-helper"
+for pinchecker in pinchecker-says-yes pinchecker-sleeps; do
+    variant "$pinchecker"
+    cp "$release/$pinchecker" "/out/broken/$pinchecker/properpin-pinchecker"
 done
