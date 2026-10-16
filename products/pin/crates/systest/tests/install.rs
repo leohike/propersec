@@ -124,7 +124,7 @@ fn install_enable_disable_uninstall_leaves_pam_as_it_was() {
             .contains("pam_properpin.so check pinchecker=/usr/local/libexec/properpin/properpin-pinchecker config=/etc/properpin/config")
     );
     assert!(lines[2].contains("pam_unix.so use_first_pass"));
-    assert!(lines[3].contains("pam_properpin.so start-accepting-pin"));
+    assert!(lines[3].contains("pam_properpin.so housekeeping"));
     assert_eq!(lines[4], "# properpin end");
     assert!(enabled.ends_with(STOCK_KDE), "everything stock stays, below the block");
     assert!(root.ok("check").contains("has properpin's lines"));
@@ -141,7 +141,6 @@ fn install_enable_disable_uninstall_leaves_pam_as_it_was() {
         "usr/local/bin/properpin",
         "etc/sysusers.d/properpin.conf",
         "etc/tmpfiles.d/properpin.conf",
-        "run/properpin",
     ] {
         assert!(!root.path(gone).exists(), "{gone} is still there");
     }
@@ -164,21 +163,21 @@ fn install_puts_everything_in_place_and_twice_is_harmless() {
     let command = fs::read_to_string(root.path("usr/local/bin/properpin")).unwrap();
     assert!(
         command.contains(
-            "exec /usr/local/libexec/properpin/properpin --etc /etc/properpin --budget /var/lib/properpin --run /run/properpin --pinchecker /usr/local/libexec/properpin/properpin-pinchecker \"$@\""
+            "exec /usr/local/libexec/properpin/properpin --etc /etc/properpin --budget /var/lib/properpin --pinchecker /usr/local/libexec/properpin/properpin-pinchecker \"$@\""
         ),
         "{command}"
     );
     let mode = |path: &str| fs::metadata(root.path(path)).unwrap().permissions().mode() & 0o7777;
     assert_eq!(mode("usr/local/libexec/properpin/properpin-pinchecker"), 0o2755, "the pinchecker is setgid only");
     assert_eq!(mode("etc/properpin/users"), 0o750);
-    assert_eq!(mode("run/properpin"), 0o1770);
+    assert!(!root.path("run").exists(), "nothing in /run any more");
     assert_eq!(mode("var/lib/properpin"), 0o1770);
     let sysusers = fs::read_to_string(root.path("etc/sysusers.d/properpin.conf")).unwrap();
     assert!(sysusers.lines().any(|line| line == format!("g {} -", group())), "{sysusers}");
     assert!(!sysusers.lines().any(|line| line.starts_with("u ")), "no account: {sysusers}");
     let tmpfiles = fs::read_to_string(root.path("etc/tmpfiles.d/properpin.conf")).unwrap();
-    assert!(tmpfiles.contains(&format!("d /run/properpin 1770 {} {} -", whoami(), group())), "{tmpfiles}");
     assert!(tmpfiles.contains(&format!("d /var/lib/properpin 1770 {} {} -", whoami(), group())), "{tmpfiles}");
+    assert!(!tmpfiles.contains("/run"), "{tmpfiles}");
     assert_eq!(
         fs::read(root.path("usr/local/lib64/security/pam_properpin.so")).unwrap(),
         fs::read(built().join("libpam_properpin.so")).unwrap()
@@ -204,21 +203,41 @@ fn check_finds_what_is_wrong() {
     let problems = root.refused("check");
     assert!(problems.contains(&format!("users/{}: is 644", group())), "{problems}");
 
-    for (pinchecker, run_dir) in [(0o755, 0o755), (0o4755, 0o700), (0o6755, 0o770)] {
+    for (pinchecker, budget_dir) in [(0o755, 0o755), (0o4755, 0o700), (0o6755, 0o1777)] {
         root.ok("install");
         fs::set_permissions(&user_file, Permissions::from_mode(0o640)).unwrap();
         fs::set_permissions(root.path("usr/local/libexec/properpin/properpin-pinchecker"), Permissions::from_mode(pinchecker)).unwrap();
-        fs::set_permissions(root.path("run/properpin"), Permissions::from_mode(run_dir)).unwrap();
-        fs::set_permissions(root.path("var/lib/properpin"), Permissions::from_mode(0o1777)).unwrap();
-        fs::write(root.path("etc/tmpfiles.d/properpin.conf"), "d /run/properpin 0777 root root -\n").unwrap();
+        fs::set_permissions(root.path("var/lib/properpin"), Permissions::from_mode(budget_dir)).unwrap();
+        fs::write(root.path("etc/tmpfiles.d/properpin.conf"), "d /var/lib/properpin 0777 root root -\n").unwrap();
         fs::write(root.path("etc/sysusers.d/properpin.conf"), "u properpin - \"an account\" - -\n").unwrap();
         let problems = root.refused("check");
         assert!(problems.contains(&format!("properpin-pinchecker: is {pinchecker:o}")), "{problems}");
-        assert!(problems.contains(&format!("/run/properpin: is {run_dir:o}")), "{problems}");
-        assert!(problems.contains("/var/lib/properpin: is 1777"), "{problems}");
+        assert!(problems.contains(&format!("/var/lib/properpin: is {budget_dir:o}")), "{problems}");
         assert!(problems.contains("tmpfiles.d/properpin.conf: not what install.sh writes"), "{problems}");
         assert!(problems.contains("sysusers.d/properpin.conf: not what install.sh writes"), "{problems}");
     }
+}
+
+/// PINs set while properpin had a pepper can't be converted, so install removes them, and every
+/// budget from then, and the per-boot directory those versions kept.
+#[test]
+fn install_removes_what_versions_with_a_pepper_left() {
+    let root = FakeRoot::new();
+    root.ok("install");
+    let users = root.path("etc/properpin/users");
+    fs::write(users.join("old"), "hash = $y$x\ncleartext_salt_for_deriving_pepper_decryption_key = $y$s\nencrypted_pepper = 00\n").unwrap();
+    fs::write(users.join("new"), "hash = $y$x\n").unwrap();
+    let budgets = root.path("var/lib/properpin");
+    fs::write(budgets.join("1000.budget"), "pending = none\nconcerning = none\ntotal = 0\ndisabled = no\n").unwrap();
+    fs::write(budgets.join("1001.budget"), "consecutive = 0\npending = none\nconcerning = none\ntotal = 0\ndisabled = no\n").unwrap();
+    fs::create_dir_all(root.path("run/properpin")).unwrap();
+    fs::write(root.path("etc/properpin/config"), "expiry_hours = 4\n").unwrap();
+    let said = root.ok("install");
+    assert!(said.contains("removed the PIN of old") && said.contains("sudo properpin set"), "{said}");
+    assert!(said.contains("sets expiry_hours or seal_cost, which no longer exist"), "{said}");
+    assert!(!users.join("old").exists() && users.join("new").exists());
+    assert!(!budgets.join("1000.budget").exists() && budgets.join("1001.budget").exists());
+    assert!(!root.path("run/properpin").exists());
 }
 
 #[test]

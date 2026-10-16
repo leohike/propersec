@@ -46,23 +46,21 @@ struct Sandbox {
 }
 
 impl Sandbox {
-    /// A sandboxed `/etc/properpin` with a PIN set for the current user, an empty runtime dir, a
+    /// A sandboxed `/etc/properpin` with a PIN set for the current user, an empty budget dir, a
     /// pinchecker that uses them, a stand-in for `unix_chkpwd`, and a PAM config dir.
     fn new() -> Self {
         let dir = tempfile::tempdir().unwrap();
         let user = Account::by_uid(current_uid()).unwrap().name;
         let sandbox = Self { dir, user };
-        for shared in [sandbox.run_dir(), sandbox.path("var")] {
-            fs::create_dir(&shared).unwrap();
-            // Set explicitly: the umask would strip the group's write bit from a mkdir mode.
-            fs::set_permissions(&shared, Permissions::from_mode(0o1770)).unwrap();
-        }
+        fs::create_dir(sandbox.path("var")).unwrap();
+        // Set explicitly: the umask would strip the group's write bit from a mkdir mode.
+        fs::set_permissions(sandbox.path("var"), Permissions::from_mode(0o1770)).unwrap();
         fs::create_dir_all(sandbox.path("etc/users")).unwrap();
         fs::create_dir_all(sandbox.path("pam.d")).unwrap();
         // libpam logs to the journal when a confdir has no "other" fallback service.
         fs::write(sandbox.path("pam.d/other"), "auth required pam_deny.so\n").unwrap();
         let user_file = sandbox.path("etc/users").join(&sandbox.user);
-        fs::write(&user_file, Yescrypt.new_pin(PIN, PASSWORD.as_bytes(), 4, 1).unwrap().lines()).unwrap();
+        fs::write(&user_file, format!("hash = {}\n", Yescrypt.hash(PIN, 4).unwrap())).unwrap();
         fs::set_permissions(&user_file, Permissions::from_mode(0o640)).unwrap();
         // unix_chkpwd's protocol: the password on stdin, ending in a NUL; exit 0 for a match.
         let chkpwd = format!("#!/bin/bash\nIFS= read -r -d '' password\n[[ $1 == \"$(id -un)\" && $password == '{PASSWORD}' ]]\n");
@@ -77,10 +75,9 @@ impl Sandbox {
     /// The pinchecker: a script that runs `first` and then the built pinchecker against the sandbox.
     fn pinchecker(&self, first: &str) {
         let pinchecker = format!(
-            "#!/bin/sh\n{first}\nexec {} \"$@\" --dev-etc {} --dev-run {} --dev-budget {} --dev-chkpwd {} --dev-log {}\n",
+            "#!/bin/sh\n{first}\nexec {} \"$@\" --dev-etc {} --dev-budget {} --dev-chkpwd {} --dev-log {}\n",
             built().join("properpin-pinchecker").display(),
             self.path("etc").display(),
-            self.run_dir().display(),
             self.path("var").display(),
             self.path("unix_chkpwd").display(),
             self.path("log").display()
@@ -95,10 +92,6 @@ impl Sandbox {
     fn script(&self, name: &str, text: &str) {
         fs::write(self.path(name), text).unwrap();
         fs::set_permissions(self.path(name), Permissions::from_mode(0o755)).unwrap();
-    }
-
-    fn run_dir(&self) -> PathBuf {
-        self.path("run")
     }
 
     fn log(&self) -> String {
@@ -153,7 +146,7 @@ impl Sandbox {
         attempt
     }
 
-    /// Unlock with the password, which starts accepting the PIN.
+    /// Unlock with the password, which unpauses the PIN.
     fn unlock_with_password(&self) {
         assert!(self.attempt(Password::Right, PASSWORD).unlocked());
     }
@@ -188,39 +181,39 @@ fn built() -> PathBuf {
 }
 
 #[test]
-fn after_boot_only_the_password_works() {
+fn the_pin_unlocks_from_the_start() {
     let sandbox = Sandbox::new();
-    assert!(!sandbox.attempt(Password::Wrong, PIN).unlocked());
-    assert!(sandbox.log().contains("PIN refused, password required: no password unlock since boot"), "{}", sandbox.log());
-}
-
-#[test]
-fn the_password_starts_accepting_the_pin_and_the_pin_unlocks() {
-    let sandbox = Sandbox::new();
-    sandbox.unlock_with_password();
-    assert!(sandbox.log().contains("longer than 12 characters, so not the PIN"), "{}", sandbox.log());
-    assert!(sandbox.log().contains("password correct, accepting the PIN for the next 8h"));
-    // pam_deny now stands for any password: only the PIN can unlock.
+    // pam_deny stands for any password: only the PIN can unlock.
     assert!(sandbox.attempt(Password::Wrong, PIN).unlocked());
     assert!(sandbox.log().contains("unlocked with the PIN"));
 }
 
 #[test]
-fn a_wrong_password_never_starts_accepting_the_pin() {
+fn the_password_unlocks_and_does_the_housekeeping() {
     let sandbox = Sandbox::new();
+    sandbox.unlock_with_password();
+    assert!(sandbox.log().contains("longer than 12 characters, so not the PIN"), "{}", sandbox.log());
+    assert!(sandbox.log().contains("password correct, PIN enabled"), "{}", sandbox.log());
+}
+
+#[test]
+fn a_wrong_password_never_unpauses_the_pin() {
+    let sandbox = Sandbox::new();
+    for wrong in ["1111", "2222", "3333"] {
+        assert!(!sandbox.attempt(Password::Wrong, wrong).unlocked());
+    }
     assert!(!sandbox.attempt(Password::Wrong, "a wrong password, long enough").unlocked());
-    assert!(!sandbox.run_dir().join(format!("{}.state", current_uid())).exists());
+    assert!(!sandbox.log().contains("housekeeping"), "{}", sandbox.log());
     assert!(!sandbox.attempt(Password::Wrong, PIN).unlocked());
 }
 
 #[test]
 fn wrong_pins_fall_through_and_three_require_the_password() {
     let sandbox = Sandbox::new();
-    sandbox.unlock_with_password();
     for wrong in ["1111", "2222", "3333"] {
         assert!(!sandbox.attempt(Password::Wrong, wrong).unlocked());
     }
-    assert!(sandbox.log().contains("failure 3 of 3, password required from now on"), "{}", sandbox.log());
+    assert!(sandbox.log().contains("consecutive failure 3 of 3; PIN paused, password required"), "{}", sandbox.log());
     assert!(!sandbox.attempt(Password::Wrong, PIN).unlocked());
     sandbox.unlock_with_password();
     assert!(sandbox.attempt(Password::Wrong, PIN).unlocked());
@@ -229,7 +222,6 @@ fn wrong_pins_fall_through_and_three_require_the_password() {
 #[test]
 fn the_pin_only_works_for_the_user_the_lock_screen_runs_as() {
     let sandbox = Sandbox::new();
-    sandbox.unlock_with_password();
     sandbox.stack(Password::Wrong, "");
     let attempt = PamClient::new(sandbox.path("pam.d"), "kde", "nobody").authenticate(PIN);
     assert!(!attempt.unlocked());
@@ -239,7 +231,6 @@ fn the_pin_only_works_for_the_user_the_lock_screen_runs_as() {
 #[test]
 fn a_bad_pam_line_refuses_instead_of_guessing() {
     let sandbox = Sandbox::new();
-    sandbox.unlock_with_password();
     sandbox.stack(Password::Wrong, "no_such_option");
     assert!(!PamClient::new(sandbox.path("pam.d"), "kde", &sandbox.user).authenticate(PIN).unlocked());
     assert!(sandbox.log().contains("bad PAM line: unknown argument \"no_such_option\""), "{}", sandbox.log());
@@ -250,7 +241,6 @@ fn a_bad_pam_line_refuses_instead_of_guessing() {
 #[test]
 fn survives_many_loads_and_unloads_across_threads() {
     let sandbox = Sandbox::new();
-    sandbox.unlock_with_password();
     sandbox.stack(Password::Wrong, "");
     let client = PamClient::new(sandbox.path("pam.d"), "kde", &sandbox.user);
     std::thread::scope(|scope| {
@@ -274,7 +264,6 @@ fn a_broken_pinchecker_fails_closed() {
         ("quits without reading", Some("#!/bin/sh\nexit 0\n")),
     ] {
         let sandbox = Sandbox::new();
-        sandbox.unlock_with_password();
         match pinchecker {
             None => fs::remove_file(sandbox.path("pinchecker")).unwrap(),
             Some(text) => sandbox.script("pinchecker", text),
@@ -298,7 +287,6 @@ fn one_session_serves_many_attempts() {
     let sandbox = Sandbox::new();
     let mut password = sandbox.session(Password::Right);
     let mut pin = sandbox.session(Password::Wrong);
-    assert!(!pin.authenticate(PIN).unlocked(), "not accepting the PIN yet");
     let unlocked = password.authenticate(PASSWORD);
     assert!(unlocked.unlocked() && unlocked.setcred.is_some(), "{unlocked:?}");
     for (typed, unlocks) in [(PIN, true), ("1111", false), (PIN, true), ("1111", false), ("2222", false), ("3333", false), (PIN, false)] {
@@ -307,9 +295,9 @@ fn one_session_serves_many_attempts() {
         assert_eq!(attempt.prompts.len(), 1, "asked once, every time: {attempt:?}");
         assert_eq!(attempt.setcred.is_some(), unlocks, "pam_setcred after a success only");
     }
-    assert!(sandbox.log().contains("failure 3 of 3, password required from now on"), "{}", sandbox.log());
+    assert!(sandbox.log().contains("consecutive failure 3 of 3; PIN paused, password required"), "{}", sandbox.log());
     assert!(password.authenticate(PASSWORD).unlocked());
-    assert!(pin.authenticate(PIN).unlocked(), "the PIN's session works again once the password started accepting it again");
+    assert!(pin.authenticate(PIN).unlocked(), "the PIN's session works again once the password unpaused it");
     // The PIN on the session whose password would pass: the check line ends the stack first.
     assert!(password.authenticate(PIN).unlocked());
     assert!(sandbox.log().contains("unlocked with the PIN"));
@@ -321,7 +309,6 @@ fn one_session_serves_many_attempts() {
 #[test]
 fn only_a_correct_pin_waits_out_the_minimum() {
     let sandbox = Sandbox::new();
-    sandbox.unlock_with_password();
     let timed = |password, typed| {
         let started = Instant::now();
         let unlocked = sandbox.attempt(password, typed).unlocked();
@@ -358,12 +345,12 @@ fn in_own_process(test: &str) -> Option<String> {
     Some(said)
 }
 
-/// What every host must still get: the password starts accepting the PIN, the PIN unlocks and a wrong one doesn't.
+/// What every host must still get: the password unlocks and does the housekeeping, the PIN unlocks and a wrong one doesn't.
 fn the_usual_answers(sandbox: &Sandbox) {
     let mut password = sandbox.session(Password::Right);
     let mut pin = sandbox.session(Password::Wrong);
     assert!(password.authenticate(PASSWORD).unlocked());
-    assert!(sandbox.log().contains("password correct, accepting the PIN for the next 8h"), "{}", sandbox.log());
+    assert!(sandbox.log().contains("password correct, PIN enabled"), "{}", sandbox.log());
     assert!(pin.authenticate(PIN).unlocked(), "{}", sandbox.log());
     assert!(!pin.authenticate("1111").unlocked());
     assert!(pin.authenticate(PIN).unlocked(), "{}", sandbox.log());

@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use nix::unistd::{Group, Uid, User, getegid, geteuid, getgid, getuid};
 use properpin_core::Error;
 
@@ -54,6 +56,18 @@ pub fn group_by_name(name: &str) -> Result<u32, Error> {
     group.map(|group| group.gid.as_raw()).ok_or_else(|| Error::System(format!("no group named {name:?}")))
 }
 
+/// `user`'s password hash, the second field of their line in the shadow file at `path`
+/// (`/etc/shadow`, which only root can read), or `None` when they have no line there, as with LDAP
+/// or systemd-homed accounts.
+pub fn shadow_hash(path: &Path, user: &str) -> Result<Option<String>, Error> {
+    let text = std::fs::read_to_string(path).map_err(|error| system(path.display(), error))?;
+    let hash = text.lines().find_map(|line| {
+        let mut fields = line.split(':');
+        (fields.next() == Some(user)).then(|| fields.next().unwrap_or_default().to_owned())
+    });
+    Ok(hash)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -70,5 +84,16 @@ mod tests {
         assert_eq!(group_by_name("root").unwrap(), 0);
         assert_eq!(group_by_name("4242").unwrap(), 4242);
         assert!(group_by_name("no-such-group-properpin").is_err());
+    }
+
+    #[test]
+    fn reads_a_users_shadow_hash() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("shadow");
+        std::fs::write(&path, "root:!locked::0:99999:7:::\nalice:$y$j9T$salt$hash:20000:0:99999:7:::\nbob::20000::::::\n").unwrap();
+        assert_eq!(shadow_hash(&path, "alice").unwrap().as_deref(), Some("$y$j9T$salt$hash"));
+        assert_eq!(shadow_hash(&path, "bob").unwrap().as_deref(), Some(""));
+        assert_eq!(shadow_hash(&path, "ali").unwrap(), None);
+        assert!(shadow_hash(&dir.path().join("missing"), "alice").is_err());
     }
 }

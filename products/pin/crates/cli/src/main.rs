@@ -1,11 +1,12 @@
 //! `properpin`: manage the PIN that unlocks the KDE lock screen.
 //!
 //! ```text
-//! sudo properpin set      choose a new PIN, typed twice, then your password; the lock screen
-//!                         accepts it at once, and its budget of failures starts over
+//! sudo properpin set      choose a new PIN, typed twice; the lock screen takes it at once, and
+//!                         its budget of failures starts over
 //! sudo properpin enable   turn a PIN disabled by too many concerning failures back on
 //! sudo properpin remove   delete it; the lock screen takes the password only
-//! properpin status        your PIN: what is set, which rules apply, and whether the lock screen is accepting it now
+//! properpin status        your PIN: what is set, which rules apply, and whether it is enabled,
+//!                         paused or disabled
 //! ```
 //!
 //! `set`, `enable` and `remove` change files only root may change, so they run under sudo or pkexec, and
@@ -16,27 +17,24 @@
 //! The hash file is written readable by the pinchecker's group only, so the user can't read it either:
 //! `status` asks the setgid pinchecker, which is the only program that reads hashes and counts.
 //!
-//! `set` also asks for the user's password, checks it through `unix_chkpwd`, and seals a fresh
-//! random pepper with a key derived from it (`docs/pepper-terminology.md`). The PIN is hashed with
-//! that pepper, so the hash file alone gives an attacker nothing to brute-force a few digits
-//! against. Each password unlock decrypts the pepper again; a password change stops the PIN until
-//! the next `set`.
+//! `set` refuses a PIN that is the user's password, comparing it, as root, with the user's hash in
+//! `/etc/shadow`, so it never asks for the password. `set` with the PIN already set, and `enable`
+//! of a disabled PIN, keep a PIN that may have been guessed, so they ask first; `--yes` skips the
+//! question.
 
 // Stricter checks for shipped code (docs/plan-tools.md): every unsafe block explains why it is
 // sound, nothing indexes or slices without a bounds check, and no cast silently drops bits.
 #![warn(clippy::undocumented_unsafe_blocks, clippy::indexing_slicing, clippy::cast_possible_truncation)]
 #![forbid(unsafe_code)]
 
-use std::io::{BufRead, IsTerminal, Read, stdin};
+use std::io::{BufRead, IsTerminal, Read, Write, stdin};
 use std::path::PathBuf;
 use std::process::{Command, ExitCode, Stdio};
 
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
-use properpin_core::{
-    Clock, MAX_INPUT_BYTES, MAX_PIN_BYTES, PasswordCheck, Secret, Store, exit, start_accepting_pin_after_password_unlock,
-};
-use properpin_sys::{Account, BootClock, UnixChkpwd, UserFiles, Yescrypt, current_euid, current_uid, group_by_name};
+use properpin_core::{Clock, Hasher, MAX_PIN_BYTES, Secret, Store, exit};
+use properpin_sys::{Account, SystemClock, UserFiles, Yescrypt, current_euid, current_uid, group_by_name, shadow_hash};
 
 /// Manage the PIN that unlocks the KDE lock screen.
 #[derive(Debug, Parser)]
@@ -48,13 +46,9 @@ struct Cli {
     /// Where each user's budget of failures lives; /var/lib/properpin once installed
     #[arg(long, value_name = "DIR")]
     budget: PathBuf,
-    /// Where each user's per-boot state lives, which set starts accepting the PIN with and remove deletes; /run/properpin
-    /// once installed
-    #[arg(long, value_name = "DIR")]
-    run: PathBuf,
-    /// The password checker set asks
-    #[arg(long, value_name = "PATH", default_value = "/usr/sbin/unix_chkpwd")]
-    chkpwd: PathBuf,
+    /// The shadow file set compares a new PIN with, to refuse the password as a PIN
+    #[arg(long, value_name = "PATH", default_value = "/etc/shadow")]
+    shadow: PathBuf,
     /// The setgid pinchecker, which status asks; /usr/local/libexec/properpin/properpin-pinchecker once installed
     #[arg(long, value_name = "PATH")]
     pinchecker: PathBuf,
@@ -70,14 +64,14 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Action {
-    /// Choose a new PIN, typed twice, then your password; the lock screen accepts it at once, and its
-    /// budget of failures starts over
-    Set(Target),
+    /// Choose a new PIN, typed twice; the lock screen takes it at once, and its budget of failures
+    /// starts over
+    Set(Confirmable),
     /// Turn a PIN disabled by too many concerning failures back on, keeping it
-    Enable(Target),
+    Enable(Confirmable),
     /// Delete the PIN; the lock screen takes the password only
     Remove(Target),
-    /// Show your PIN: what is set and whether the lock screen is accepting it right now
+    /// Show your PIN: what is set, and whether it is enabled, paused or disabled right now
     Status,
 }
 
@@ -86,6 +80,15 @@ struct Target {
     /// Whose PIN; default: the sudo or pkexec caller, or you
     #[arg(long)]
     user: Option<String>,
+}
+
+#[derive(Debug, Args)]
+struct Confirmable {
+    #[command(flatten)]
+    target: Target,
+    /// Don't ask before keeping a PIN that may have been guessed
+    #[arg(long)]
+    yes: bool,
 }
 
 fn main() -> ExitCode {
@@ -103,8 +106,8 @@ fn main() -> ExitCode {
 /// `Ok(false)` is a clean "no".
 fn run(cli: &Cli) -> Result<bool> {
     match &cli.command {
-        Action::Set(target) => set(cli, &target_account(target)?)?,
-        Action::Enable(target) => enable(cli, &target_account(target)?)?,
+        Action::Set(asked) => set(cli, &target_account(&asked.target)?, asked.yes)?,
+        Action::Enable(asked) => enable(cli, &target_account(&asked.target)?, asked.yes)?,
         Action::Remove(target) => remove(cli, &target_account(target)?)?,
         Action::Status => return status(cli),
     }
@@ -114,7 +117,7 @@ fn run(cli: &Cli) -> Result<bool> {
 fn files(cli: &Cli, account: &Account) -> Result<UserFiles> {
     let group = group_by_name(&cli.group)?;
     let files = UserFiles::new(&cli.etc, cli.owner, &account.name, account.uid)?;
-    Ok(files.with_budget(&cli.budget, cli.owner, group).with_runtime(&cli.run, cli.owner, group))
+    Ok(files.with_budget(&cli.budget, cli.owner, group))
 }
 
 /// Whose PIN: the one named, else whoever called sudo or pkexec, else whoever runs this.
@@ -131,7 +134,7 @@ fn target_account(target: &Target) -> Result<Account> {
     Ok(account)
 }
 
-fn set(cli: &Cli, account: &Account) -> Result<()> {
+fn set(cli: &Cli, account: &Account, yes: bool) -> Result<()> {
     require_owner(cli.owner)?;
     let group = group_by_name(&cli.group)?;
     let files = files(cli, account)?;
@@ -143,37 +146,43 @@ fn set(cli: &Cli, account: &Account) -> Result<()> {
     if !problems.is_empty() {
         bail!("the PIN needs {}", problems.join(", "));
     }
-    // The password seals the pepper, so a mistyped one would leave a PIN the lock screen never starts accepting.
-    let password = ask_secret(&mut input, &format!("Password for {}: ", account.name), MAX_INPUT_BYTES)?;
-    if password.as_bytes().is_empty() || !UnixChkpwd(cli.chkpwd.clone()).matches(&account.name, &password)? {
-        bail!("that is not the password of {}; nothing was changed", account.name);
+    match shadow_hash(&cli.shadow, &account.name)? {
+        None => {
+            eprintln!("Warning: {} has no entry in {}, so the PIN wasn't compared with the password.", account.name, cli.shadow.display())
+        }
+        Some(shadow) => match Yescrypt.is_password(pin, &shadow)? {
+            Some(true) => bail!("the PIN must not be the password; nothing was changed"),
+            Some(false) => {}
+            None => eprintln!(
+                "Warning: {} has no password hash in {}, so there was nothing to compare with.",
+                account.name,
+                cli.shadow.display()
+            ),
+        },
     }
-    if password.as_bytes() == pin.as_bytes() {
-        bail!("the PIN must not be the password; nothing was changed");
+    if !settings.pin_hash.is_empty() && Yescrypt.verify(pin, &settings.pin_hash)? {
+        let total = files.load_budget().map(|budget| budget.total).unwrap_or_default();
+        confirm(
+            &mut input,
+            yes,
+            &format!(
+                "This is the PIN already set. Setting it again starts its budget over, and forgets its {total} concerning failures \
+                 since it was set, which may have been someone guessing it."
+            ),
+        )?;
     }
-    let new = Yescrypt.new_pin(pin, password.as_bytes(), settings.hash_cost, settings.seal_cost)?;
-    drop(password);
-    // Only the hash and the encrypted pepper change. Per-user settings already in the file are kept.
-    files.save_pin(&new.pairs(), group)?;
-    // A new PIN, so no failure against the old one counts any more, and nothing stays disabled.
+    let hash = Yescrypt.hash(pin, settings.hash_cost)?;
+    // Only the hash changes. Per-user settings already in the file are kept.
+    files.save_pin(&[(properpin_core::HASH_SETTING, &hash)], group)?;
+    // A new PIN, so no failure against the old one counts any more, and nothing stays paused or disabled.
     files.remove_budget()?;
-    // Accepting the PIN from now, as after a password unlock: the password was just typed, and the pepper is at hand.
-    match start_accepting_pin_after_password_unlock(&files, &BootClock, new.pepper) {
-        Ok(_) => println!(
-            "PIN set for {}, and the lock screen is accepting it from now. Once that expires, unlocking with the password starts accepting it again.",
-            account.name
-        ),
-        Err(error) => println!("PIN set for {}. It works after the next password unlock at the lock screen ({error}).", account.name),
-    }
-    if files.runtime_on_tmpfs() == Some(false) {
-        println!("Warning: {} is not on tmpfs, so the pepper kept for accepting the PIN may be written to a disk.", cli.run.display());
-    }
+    println!("PIN set for {}. The lock screen takes it from now on.", account.name);
     Ok(())
 }
 
 /// The same PIN back on, with its recent failures forgotten. The total since it was set is kept,
 /// so its limit still holds: once reached, only a new PIN will do.
-fn enable(cli: &Cli, account: &Account) -> Result<()> {
+fn enable(cli: &Cli, account: &Account, yes: bool) -> Result<()> {
     require_owner(cli.owner)?;
     let files = files(cli, account)?;
     let settings = files.settings()?;
@@ -181,7 +190,7 @@ fn enable(cli: &Cli, account: &Account) -> Result<()> {
         bail!("no PIN is set for {}", account.name);
     }
     let mut budget = files.load_budget()?;
-    let judged = budget.judge(BootClock.wall()?, &settings);
+    let judged = budget.judge(SystemClock.now()?, &settings);
     if budget.total >= settings.max_concerning_total {
         bail!(
             "{} concerning failures since this PIN was set, and {} are allowed; choose a new one with: properpin set",
@@ -189,13 +198,21 @@ fn enable(cli: &Cli, account: &Account) -> Result<()> {
             settings.max_concerning_total
         );
     }
-    let was = judged.disabled;
+    if let Some(limit) = judged.disabled {
+        confirm(
+            &mut stdin().lock(),
+            yes,
+            &format!(
+                "The PIN was disabled after {limit}. They may have been someone guessing it; sudo properpin set chooses a new one \
+                 instead."
+            ),
+        )?;
+    }
     files.save_budget(&budget.enabled())?;
-    match was {
+    match judged.disabled {
         Some(limit) => println!("PIN enabled again for {}; it was disabled after {limit}.", account.name),
         None => println!("The PIN for {} wasn't disabled; its recent failures are forgotten.", account.name),
     }
-    println!("It works after the next password unlock at the lock screen.");
     Ok(())
 }
 
@@ -206,7 +223,6 @@ fn remove(cli: &Cli, account: &Account) -> Result<()> {
         bail!("no PIN is set for {}", account.name);
     }
     files.remove_budget()?;
-    files.remove_state()?;
     println!("PIN removed for {}. The lock screen takes the password only.", account.name);
     Ok(())
 }
@@ -236,9 +252,29 @@ fn require_owner(owner: u32) -> Result<()> {
     }
 }
 
+/// Say `warning` and ask whether to go on, on the terminal. `yes` answers for the user; without a
+/// terminal and without it, the answer is no.
+fn confirm(input: &mut impl BufRead, yes: bool, warning: &str) -> Result<()> {
+    eprintln!("{warning}");
+    if yes {
+        return Ok(());
+    }
+    if !stdin().is_terminal() {
+        bail!("no terminal to confirm on; nothing was changed (--yes skips the question)");
+    }
+    eprint!("Go on anyway? [y/N] ");
+    std::io::stderr().flush()?;
+    let mut answer = String::new();
+    input.read_line(&mut answer)?;
+    if answer.trim() != "y" {
+        bail!("nothing was changed");
+    }
+    Ok(())
+}
+
 /// The new PIN, typed twice. Both entries are wiped when dropped.
 fn ask_pin_twice(input: &mut impl BufRead) -> Result<Secret> {
-    let first = ask_secret(input, "New PIN: ", MAX_PIN_BYTES)?;
+    let first = ask_secret(input, "Choose a PIN (it should differ from your password): ", MAX_PIN_BYTES)?;
     let second = ask_secret(input, "Same again: ", MAX_PIN_BYTES)?;
     if first.as_bytes() != second.as_bytes() {
         bail!("the two entries differ; nothing was changed");

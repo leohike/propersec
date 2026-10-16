@@ -81,7 +81,7 @@ fn run_and_log(pam: &Pam, args: &Args, started: Instant, log: &impl Log) -> bool
     let yes = run(pam, args).unwrap_or_else(|error| {
         let what = match args.mode {
             Mode::Check => "PIN refused",
-            Mode::StartAcceptingPin => "can't start accepting the PIN",
+            Mode::Housekeeping => "housekeeping failed",
         };
         log.log(&format!("{what}: {error}"));
         false

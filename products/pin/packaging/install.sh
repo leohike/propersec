@@ -2,7 +2,9 @@
 # properpin's installer.
 #
 #   install.sh install     the properpin group, the module, the setgid pinchecker, the command,
-#                          /etc/properpin, /var/lib/properpin and /run/properpin; never touches PAM
+#                          /etc/properpin and /var/lib/properpin; never touches PAM. Also removes
+#                          what older versions left: PINs and budgets from before the pepper was
+#                          dropped, which can't be converted, and /run/properpin
 #   install.sh check       every installed path: kind, mode, owner, same bytes as the build, SELinux label;
 #                          and that the group has no members and a locked password
 #   install.sh enable      add properpin's three lines to /etc/pam.d/kde, after a diff and a yes
@@ -73,7 +75,7 @@ pinchecker=$libexec/properpin-pinchecker
 command_path=/usr/local/bin/properpin
 etc=/etc/properpin
 users=$etc/users
-run_dir=/run/properpin
+old_run_dir=/run/properpin
 budget_dir=/var/lib/properpin
 sysusers=/etc/sysusers.d/properpin.conf
 tmpfiles=/etc/tmpfiles.d/properpin.conf
@@ -99,7 +101,7 @@ wrapper() {
     cat <<EOF
 #!/bin/sh
 # Installed by properpin's install.sh: the properpin command with this machine's paths.
-exec $binary --etc $etc --budget $budget_dir --run $run_dir --pinchecker $pinchecker "\$@"
+exec $binary --etc $etc --budget $budget_dir --pinchecker $pinchecker "\$@"
 EOF
 }
 
@@ -110,13 +112,11 @@ sysusers_conf() {
     echo "g $pinchecker_group -"
 }
 
-# /run/properpin, created again at every boot: the pinchecker's per-boot state, which only the pinchecker's
-# group can enter. Sticky, so each user's run of the pinchecker can only replace that user's own files.
-# /var/lib/properpin, the budgets of failures, follows the same rules on disk; the rule only keeps
-# it in shape, since tmpfiles never empties a d directory without an age.
+# /var/lib/properpin, the budgets of failures, which only the pinchecker's group can enter. Sticky, so
+# each user's run of the pinchecker can only replace that user's own files. The rule only keeps it in
+# shape, since tmpfiles never empties a d directory without an age.
 tmpfiles_conf() {
-    echo "# Installed by properpin's install.sh: properpin-pinchecker's per-boot state, and its budgets."
-    echo "d $run_dir 1770 $owner $pinchecker_group -"
+    echo "# Installed by properpin's install.sh: properpin-pinchecker's budgets."
     echo "d $budget_dir 1770 $owner $pinchecker_group -"
 }
 
@@ -246,7 +246,7 @@ do_install() {
     require_root
     [[ -f $built_module && -f $built_binary && -f $built_pinchecker ]] ||
         fail "no build in $from; run: cargo build --release -p pam_properpin -p properpin-pinchecker -p properpin-cli"
-    make_dirs "$(dirname "$module_path")" "$(dirname "$command_path")" "$(dirname "$sysusers")" "$(dirname "$tmpfiles")" "$(dirname "$libexec")" "$(dirname "$run_dir")" "$(dirname "$budget_dir")"
+    make_dirs "$(dirname "$module_path")" "$(dirname "$command_path")" "$(dirname "$sysusers")" "$(dirname "$tmpfiles")" "$(dirname "$libexec")" "$(dirname "$budget_dir")"
     sysusers_conf | put "$sysusers" 0644
     tmpfiles_conf | put "$tmpfiles" 0644
     ensure_group
@@ -257,15 +257,37 @@ do_install() {
         { printf '%s\n' "${created_now[@]}"; cat "$root$created" 2>/dev/null || true; } | sort -u | put "$created" 0644
     fi
     own_dir "$users" 0750 "$owner" "$pinchecker_group"
-    own_dir "$run_dir" 1770 "$owner" "$pinchecker_group"
     own_dir "$budget_dir" 1770 "$owner" "$pinchecker_group"
+    remove_old_versions
     put "$module_path" 0755 <"$built_module"
     put "$binary" 0755 <"$built_binary"
     put "$pinchecker" 2755 "$owner:$pinchecker_group" <"$built_pinchecker"
     wrapper | put "$command_path" 0755
-    relabel "$root$module_path" "$root$libexec" "$root$command_path" "$root$etc" "$root$run_dir" "$root$budget_dir" "$root$sysusers" "$root$tmpfiles"
+    relabel "$root$module_path" "$root$libexec" "$root$command_path" "$root$etc" "$root$budget_dir" "$root$sysusers" "$root$tmpfiles"
     echo "installed under ${root:-/}; /etc/pam.d/kde is unchanged"
     echo "next: install.sh check, then install.sh enable"
+}
+
+# What versions with a pepper left behind. Their PINs were hashed with the pepper, so they can't be
+# converted without the PIN itself: each such user file and every budget from then goes, and each
+# user sets a new PIN. Their settings without a meaning now refuse the PIN until taken out.
+remove_old_versions() {
+    local file
+    for file in "$root$users"/*; do
+        if [[ -f $file ]] && grep -qE '^(encrypted_pepper|cleartext_salt_for_deriving_pepper_decryption_key)[[:space:]]*=' "$file"; then
+            rm -f -- "$file"
+            echo "removed the PIN of $(basename "$file"), set before properpin dropped its pepper; set a new one with: sudo properpin set"
+        fi
+    done
+    for file in "$root$budget_dir"/*.budget; do
+        if [[ -f $file ]] && ! grep -q '^consecutive = ' "$file"; then
+            rm -f -- "$file"
+        fi
+    done
+    rm -rf -- "$root$old_run_dir"
+    if [[ -f $root$etc/config ]] && grep -qE '^[[:space:]]*(expiry_hours|seal_cost)[[:space:]]*=' "$root$etc/config"; then
+        echo "warning: $etc/config sets expiry_hours or seal_cost, which no longer exist; take them out, or the PIN is refused"
+    fi
 }
 
 problems=()
@@ -324,7 +346,6 @@ do_check() {
     expect "$tmpfiles" file 644 "$owner" "$group"
     expect "$etc" dir 755 "$owner" "$group"
     expect "$users" dir 750 "$owner" "$pinchecker_group"
-    expect "$run_dir" dir 1770 "$owner" "$pinchecker_group"
     expect "$budget_dir" dir 1770 "$owner" "$pinchecker_group"
     if [[ -e $root$etc/config ]]; then
         expect "$etc/config" file 644 "$owner" "$group"
@@ -356,7 +377,7 @@ do_check() {
     fi
     if selinux_enabled; then
         local path
-        for path in "$module_path" "$libexec" "$binary" "$pinchecker" "$command_path" "$etc" "$users" "$run_dir" "$budget_dir" "$sysusers" "$tmpfiles"; do
+        for path in "$module_path" "$libexec" "$binary" "$pinchecker" "$command_path" "$etc" "$users" "$budget_dir" "$sysusers" "$tmpfiles"; do
             matchpathcon -V "$path" >/dev/null 2>&1 || problems+=("$path: wrong SELinux label; install again")
         done
     elif [[ $real == 1 ]]; then
@@ -457,8 +478,8 @@ do_uninstall() {
     rm -f "$root$module_path" "$root$command_path" "$root$sysusers" "$root$tmpfiles"
     # properpin's own directory, whatever else ended up in it.
     rm -rf -- "$root$libexec"
-    # Only per-boot state: failure counts and when the lock screen started accepting the PIN.
-    rm -rf -- "$root$run_dir"
+    # Left by versions with a pepper, if install never ran since.
+    rm -rf -- "$root$old_run_dir"
     # The directories install created, deepest first, as long as nothing else has moved in.
     if [[ -f $root$created ]]; then
         local dir

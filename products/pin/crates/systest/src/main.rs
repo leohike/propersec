@@ -26,7 +26,7 @@
 
 use std::fs::{self, Permissions};
 use std::io::{ErrorKind, Read, Write};
-use std::os::unix::fs::{MetadataExt, PermissionsExt, chown, symlink};
+use std::os::unix::fs::{PermissionsExt, chown, symlink};
 use std::os::unix::net::UnixDatagram;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -37,8 +37,8 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
 use pamharness::PamClient;
-use properpin_core::{Budget, Clock, PEPPER_BYTES, Pepper, PinState, Settings, exit};
-use properpin_sys::{Account, BootClock, Yescrypt, group_by_name};
+use properpin_core::{Budget, Clock, Settings, exit};
+use properpin_sys::{Account, SystemClock, Yescrypt, group_by_name};
 
 mod uninstall;
 
@@ -48,10 +48,11 @@ const USER: &str = "alice";
 const PASSWORD: &str = "correct horse battery staple";
 const PIN: &str = "4859";
 const KDE: &str = "/etc/pam.d/kde";
-const HELPER: &str = "/usr/local/libexec/properpin/properpin-pinchecker";
+const PINCHECKER: &str = "/usr/local/libexec/properpin/properpin-pinchecker";
 /// The group the pinchecker runs with, created by install.sh.
-const HELPER_GROUP: &str = "properpin";
-const RUN_DIR: &str = "/run/properpin";
+const PINCHECKER_GROUP: &str = "properpin";
+/// Where versions with a pepper kept their per-boot state; nothing may be there any more.
+const OLD_RUN_DIR: &str = "/run/properpin";
 const BUDGET_DIR: &str = "/var/lib/properpin";
 /// Where scenarios that play the attacker keep their files; emptied between scenarios.
 const SCRATCH: &str = "/tmp/properpin-scratch";
@@ -60,9 +61,9 @@ const SYSLOG: &str = "/dev/log";
 const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(60);
 /// A pinchecker whose attempt was killed finishes on its own: at most a second waiting for the lock,
 /// then a hash or `unix_chkpwd`. Still running after this, it is a bug.
-const HELPER_LINGER: Duration = Duration::from_secs(5);
+const PINCHECKER_LINGER: Duration = Duration::from_secs(5);
 /// What the kernel calls the pinchecker: its name cut to 15 bytes.
-const HELPER_COMM: &str = "properpin-helpe";
+const PINCHECKER_COMM: &str = "properpin-pinch";
 
 type Outcome<T = ()> = Result<T, String>;
 type Scenario = fn(&World) -> Outcome;
@@ -127,25 +128,25 @@ fn run() -> ExitCode {
         }
     };
     let scenarios: &[(&str, Scenario)] = &[
-        ("after boot only the password works", after_boot_only_the_password_works),
-        ("the password starts accepting the PIN, and the PIN unlocks", the_password_starts_accepting_the_pin),
-        ("a wrong password never starts accepting the PIN", a_wrong_password_never_starts_accepting_the_pin),
-        ("three wrong PINs require the password", three_wrong_pins_require_the_password),
-        ("set checks the password, seals with it, and accepts the PIN at once", set_checks_the_password_and_accepts_the_pin_at_once),
-        ("a password change stops the PIN until set", a_password_change_stops_the_pin),
-        ("a damaged encrypted pepper refuses the PIN, not the password", a_damaged_encrypted_pepper),
+        ("the PIN unlocks from the start, with no password first", the_pin_unlocks_from_the_start),
+        ("the password unlocks and does the housekeeping", the_password_does_the_housekeeping),
+        ("three wrong PINs pause the PIN until the password, on disk", three_wrong_pins_pause_the_pin),
+        ("a wrong password never unpauses the PIN", a_wrong_password_never_unpauses_the_pin),
+        ("set refuses the password as a PIN, and the PIN works at once", set_refuses_the_password_and_the_pin_works_at_once),
+        ("setting the same PIN again asks first", setting_the_same_pin_again_asks_first),
+        ("a password change leaves the PIN working", a_password_change_leaves_the_pin_working),
         ("the PIN works at the lock screen only", the_pin_works_at_the_lock_screen_only),
         ("a user file others can read is refused", a_user_file_others_can_read),
         ("a user file the user owns is refused", a_user_file_the_user_owns),
         ("a symlinked user file is refused", a_symlinked_user_file),
         ("a corrupt config is refused", a_corrupt_config),
         ("a hash in the global config is refused", a_hash_in_the_global_config),
-        ("a shared runtime directory is refused", a_shared_runtime_directory),
+        ("a shared budget directory is refused", a_shared_budget_directory),
         ("the user can't read their hash or touch their counts", the_user_cannot_reach_the_files),
         ("another user can't use or spend someone's PIN", another_user_gets_nothing),
         ("--dev options are refused under setgid", dev_options_are_refused_under_setgid),
         ("a poisoned start changes nothing", a_poisoned_start_changes_nothing),
-        ("starting to accept the PIN checks the password itself", starting_to_accept_the_pin_checks_the_password_itself),
+        ("the housekeeping checks the password itself", the_housekeeping_checks_the_password_itself),
         ("a missing pinchecker fails closed", a_missing_pinchecker_fails_closed),
         ("status shows your own PIN only", status_shows_your_own_pin),
         ("the pinchecker's group can't change the pinchecker", the_group_cannot_change_the_pinchecker),
@@ -154,13 +155,9 @@ fn run() -> ExitCode {
         ("the pinchecker's group stays empty and locked, with no account", the_group_stays_empty_and_locked),
         ("typos followed by the PIN or the password are forgiven", typos_are_forgiven),
         ("the slow attack: a guess, the user's PIN much later, again", the_slow_attack_is_stopped),
-        ("guesses nobody forgives disable the PIN, across a reboot", unforgiven_guesses_disable_the_pin),
+        ("guesses nobody forgives disable the PIN, and the password can't help", unforgiven_guesses_disable_the_pin),
         ("the lifetime limit takes a new PIN", the_lifetime_limit_takes_a_new_pin),
         ("a damaged or planted budget refuses the PIN", a_damaged_or_planted_budget),
-        ("a corrupt state means password required", a_corrupt_state),
-        ("state from an earlier boot is refused", state_from_an_earlier_boot),
-        ("accepting the PIN since a time in the future is refused", accepting_the_pin_since_a_time_in_the_future),
-        ("an expired PIN is refused", an_expired_pin),
         ("concurrent wrong PINs are all counted", concurrent_wrong_pins_are_all_counted),
         ("one session serves many attempts, and the worker exits cleanly", one_session_serves_many_attempts),
         ("a killed worker never unlocks and loses no count", a_killed_worker_loses_no_count),
@@ -181,107 +178,80 @@ fn run() -> ExitCode {
     if failed == 0 { ExitCode::SUCCESS } else { ExitCode::FAILURE }
 }
 
-fn after_boot_only_the_password_works(world: &World) -> Outcome {
-    world.pin_refused(PIN, "no password unlock since boot")?;
+fn the_pin_unlocks_from_the_start(world: &World) -> Outcome {
+    world.pin_unlocks()?;
+    world.pin_unlocks()?;
     world.password_unlocks()
 }
 
-fn the_password_starts_accepting_the_pin(world: &World) -> Outcome {
-    world.start_accepting_pin()?;
-    world.pin_unlocks()?;
+fn the_password_does_the_housekeeping(world: &World) -> Outcome {
+    world.unlock_with_password()?;
     world.pin_unlocks()
 }
 
-fn a_wrong_password_never_starts_accepting_the_pin(world: &World) -> Outcome {
+/// Three wrong PINs pause the PIN, and the count is in the budget on disk, so a reboot changes
+/// nothing: nothing of properpin's is in /run any more. Only the password unpauses it.
+fn three_wrong_pins_pause_the_pin(world: &World) -> Outcome {
+    world.pin_refused("1111", "not the PIN, consecutive failure 1 of 3")?;
+    world.pin_refused("2222", "not the PIN, consecutive failure 2 of 3")?;
+    world.pin_refused("3333", "consecutive failure 3 of 3; PIN paused, password required")?;
+    world.pin_refused(PIN, "PIN paused after 3 consecutive failures, password required")?;
+    let consecutive = world.budget()?.consecutive;
+    if consecutive != 3 || Path::new(OLD_RUN_DIR).exists() {
+        return Err(format!("{consecutive} consecutive in the budget, not 3, or {OLD_RUN_DIR} exists"));
+    }
+    world.unlock_with_password()?;
+    world.pin_unlocks()
+}
+
+fn a_wrong_password_never_unpauses_the_pin(world: &World) -> Outcome {
+    for wrong in ["1111", "2222", "3333"] {
+        world.pin_refused(wrong, "not the PIN")?;
+    }
     let wrong = world.kde("a wrong password, long enough")?;
-    expect(
-        !wrong.unlocked && !wrong.log.contains("accepting the PIN for the next"),
-        "a wrong password unlocked or started accepting the PIN",
-        &wrong,
-    )?;
-    world.pin_refused(PIN, "no password unlock since boot")
+    expect(!wrong.unlocked && !wrong.log.contains("password correct"), "a wrong password unlocked or unpaused the PIN", &wrong)?;
+    world.pin_refused(PIN, "PIN paused after 3 consecutive failures")
 }
 
-fn three_wrong_pins_require_the_password(world: &World) -> Outcome {
-    world.start_accepting_pin()?;
-    world.pin_refused("1111", "not the PIN, failure 1 of 3")?;
-    world.pin_refused("2222", "not the PIN, failure 2 of 3")?;
-    world.pin_refused("3333", "failure 3 of 3, password required from now on")?;
-    if world.pepper_in_memory()? {
-        return Err("three wrong PINs left the pepper in memory".into());
+/// `set` compares the PIN with alice's hash in the real /etc/shadow, as root, so it never asks for
+/// the password, and the new PIN works at once.
+fn set_refuses_the_password_and_the_pin_works_at_once(world: &World) -> Outcome {
+    write_file(&world.config(), "max_pin_length = 64\n", 0, 0, 0o644)?;
+    match properpin_as_root(&["set", "--user", USER], &format!("{PASSWORD}\n{PASSWORD}\n")) {
+        Err(said) if said.contains("the PIN must not be the password") => {}
+        other => return Err(format!("set took the password as a PIN: {other:?}")),
     }
-    world.pin_refused(PIN, "3 failures in a row")?;
-    world.start_accepting_pin()?;
+    let said = properpin_as_root(&["set", "--user", USER], "4860\n4860\n")?;
+    if !said.contains("The lock screen takes it from now on") {
+        return Err(format!("set said: {said}"));
+    }
+    world.pin_refused(PIN, "not the PIN, consecutive failure 1 of 3")?;
+    let attempt = world.kde("4860")?;
+    expect(attempt.unlocked && attempt.log.contains("unlocked with the PIN"), "the new PIN didn't unlock", &attempt)
+}
+
+/// The same PIN again would start its budget over, guesses and all, so set asks; without a
+/// terminal it refuses unless --yes.
+fn setting_the_same_pin_again_asks_first(world: &World) -> Outcome {
+    match properpin_as_root(&["set", "--user", USER], &format!("{PIN}\n{PIN}\n")) {
+        Err(said) if said.contains("This is the PIN already set") && said.contains("--yes skips the question") => {}
+        other => return Err(format!("set didn't ask before keeping the same PIN: {other:?}")),
+    }
+    properpin_as_root(&["set", "--user", USER, "--yes"], &format!("{PIN}\n{PIN}\n"))?;
     world.pin_unlocks()
 }
 
-/// `set` checks the password through the real `unix_chkpwd`, as root asking about alice, seals the
-/// pepper with it, and accepts the PIN at once, giving the files it creates in the run directory to
-/// alice. A wrong password changes nothing.
-fn set_checks_the_password_and_accepts_the_pin_at_once(world: &World) -> Outcome {
-    match properpin_as_root(&["set", "--user", USER], "4860\n4860\nnot the password\n") {
-        Err(said) if said.contains("that is not the password of alice") => {}
-        other => return Err(format!("set took a wrong password: {other:?}")),
-    }
-    world.pin_refused(PIN, "no password unlock since boot")?;
-    let said = properpin_as_root(&["set", "--user", USER], &format!("{PIN}\n{PIN}\n{PASSWORD}\n"))?;
-    if !said.contains("accepting it from now") {
-        return Err(format!("set didn't start accepting the PIN: {said}"));
-    }
-    let lock = PathBuf::from(format!("{RUN_DIR}/{}.lock", world.user.uid));
-    for path in [world.state_file(), lock] {
-        let info = fs::metadata(&path).map_err(message)?;
-        if (info.uid(), info.gid(), info.mode() & 0o7777) != (world.user.uid, world.pinchecker_gid, 0o600) {
-            return Err(format!("{}: {}:{} {:o}, not alice's", path.display(), info.uid(), info.gid(), info.mode() & 0o7777));
-        }
-    }
-    world.pin_unlocks()?;
-    world.pin_refused("1111", "not the PIN, failure 1 of 3")?;
-    world.pin_unlocks()
-}
-
-/// After a password change the new password decrypts the pepper to garbage, so the right PIN is
-/// wrong, until `set` again.
-fn a_password_change_stops_the_pin(world: &World) -> Outcome {
+/// The PIN no longer depends on the password: after a password change both work.
+fn a_password_change_leaves_the_pin_working(world: &World) -> Outcome {
     const NEW: &str = "a brand new password for alice";
-    world.start_accepting_pin()?;
-    world.pin_unlocks()?;
     let _restore = Password::change(NEW)?;
     let new = world.kde(NEW)?;
-    expect(new.unlocked && new.log.contains("password correct, accepting the PIN for the next"), "the new password didn't unlock", &new)?;
-    world.pin_refused(PIN, "not the PIN, failure 1 of 3")?;
-    let status = world.as_user(USER, &["/usr/local/bin/properpin", "status"], b"")?;
-    let status = String::from_utf8_lossy(&status.stdout);
-    if !status.contains("a password change stops the PIN from working") {
-        return Err(format!("status gave no hint:\n{status}"));
-    }
-    properpin_as_root(&["set", "--user", USER], &format!("{PIN}\n{PIN}\n{NEW}\n"))?;
+    expect(new.unlocked && new.log.contains("password correct, PIN enabled"), "the new password didn't unlock", &new)?;
     world.pin_unlocks()
 }
 
-/// The encrypted pepper damaged: one hex digit changed decrypts to a wrong pepper, which nothing
-/// can tell from a password change; cut short, it can't be decrypted at all. The password unlocks
-/// either way.
-fn a_damaged_encrypted_pepper(world: &World) -> Outcome {
-    let original = String::from_utf8_lossy(&world.pin_file).into_owned();
-    let line = original.lines().find(|line| line.starts_with("encrypted_pepper = ")).ok_or("no encrypted_pepper line")?;
-    let flipped = format!("{}{}", &line[..line.len() - 1], if line.ends_with('0') { '1' } else { '0' });
-    write_file(&world.user_file(), &original.replace(line, &flipped), 0, world.pinchecker_gid, 0o640)?;
-    world.start_accepting_pin()?;
-    world.pin_refused(PIN, "not the PIN, failure 1 of 3")?;
-    write_file(&world.user_file(), &original.replace(line, &line[..line.len() - 2]), 0, world.pinchecker_gid, 0o640)?;
-    let password = world.kde(PASSWORD)?;
-    expect(
-        password.unlocked && password.log.contains("can't start accepting the PIN") && password.log.contains("not 64 hex digits"),
-        "a cut-short pepper was accepted, or the password failed",
-        &password,
-    )
-}
-
-/// Every other service on the system checks only the password, whether the lock screen is accepting the PIN or not, and never even
-/// loads the module.
+/// Every other service on the system checks only the password, and never even loads the module.
 fn the_pin_works_at_the_lock_screen_only(world: &World) -> Outcome {
-    world.start_accepting_pin()?;
     for service in ["sudo", "su", "login", "system-auth", "password-auth", "passwd", "other"] {
         let pin = world.attempt(service, PIN)?;
         expect(!pin.unlocked, &format!("the PIN unlocked {service}"), &pin)?;
@@ -296,19 +266,16 @@ fn the_pin_works_at_the_lock_screen_only(world: &World) -> Outcome {
 }
 
 fn a_user_file_others_can_read(world: &World) -> Outcome {
-    world.start_accepting_pin()?;
     fs::set_permissions(world.user_file(), Permissions::from_mode(0o644)).map_err(message)?;
     world.fails_closed("readable by others")
 }
 
 fn a_user_file_the_user_owns(world: &World) -> Outcome {
-    world.start_accepting_pin()?;
     chown(world.user_file(), Some(world.user.uid), None).map_err(message)?;
     world.fails_closed("not 0")
 }
 
 fn a_symlinked_user_file(world: &World) -> Outcome {
-    world.start_accepting_pin()?;
     let real = world.user_file().with_extension("real");
     fs::rename(world.user_file(), &real).map_err(message)?;
     symlink(&real, world.user_file()).map_err(message)?;
@@ -316,36 +283,32 @@ fn a_symlinked_user_file(world: &World) -> Outcome {
 }
 
 fn a_corrupt_config(world: &World) -> Outcome {
-    world.start_accepting_pin()?;
     write_file(&world.config(), "this is not a setting\n", 0, 0, 0o644)?;
     world.fails_closed("expected 'key = value'")
 }
 
 fn a_hash_in_the_global_config(world: &World) -> Outcome {
-    world.start_accepting_pin()?;
     let user_file = String::from_utf8_lossy(&world.pin_file).into_owned();
     write_file(&world.config(), &user_file, 0, 0, 0o644)?;
     world.fails_closed("only a user's own file may hold hash")
 }
 
-fn a_shared_runtime_directory(world: &World) -> Outcome {
-    world.start_accepting_pin()?;
-    fs::set_permissions(RUN_DIR, Permissions::from_mode(0o1777)).map_err(message)?;
+fn a_shared_budget_directory(world: &World) -> Outcome {
+    fs::set_permissions(BUDGET_DIR, Permissions::from_mode(0o1777)).map_err(message)?;
     world.fails_closed("mode 1777, not 1770")
 }
 
 /// The point of the pinchecker: nothing the user runs can read the hash, or reset the counts.
 fn the_user_cannot_reach_the_files(world: &World) -> Outcome {
-    world.start_accepting_pin()?;
     for wrong in ["1111", "2222", "3333"] {
         world.pin_refused(wrong, "not the PIN")?;
     }
-    let state = world.state_file().display().to_string();
+    let state = world.budget_file().display().to_string();
     let user_file = world.user_file().display().to_string();
     for (what, script) in [
         ("read the hash", format!("cat {user_file}")),
         ("list the PIN files", "ls /etc/properpin/users".to_owned()),
-        ("list the counts", format!("ls {RUN_DIR}")),
+        ("list the counts", format!("ls {BUDGET_DIR}")),
         ("read the counts", format!("cat {state}")),
         ("delete the counts", format!("rm -f {state}")),
         ("replace the counts", format!("echo garbage > {state}")),
@@ -355,19 +318,18 @@ fn the_user_cannot_reach_the_files(world: &World) -> Outcome {
             return Err(format!("{USER} could {what}: {}", String::from_utf8_lossy(&output.stdout)));
         }
     }
-    world.pin_refused(PIN, "3 failures in a row")
+    world.pin_refused(PIN, "PIN paused after 3 consecutive failures")
 }
 
 /// bob has no PIN. Whatever he sends, he gets nothing about alice's, and spends none of her tries.
 fn another_user_gets_nothing(world: &World) -> Outcome {
-    world.start_accepting_pin()?;
     for args in [&["check"][..], &["check", USER], &["status", USER]] {
-        let output = world.as_user("bob", &[HELPER].iter().chain(args).copied().collect::<Vec<_>>(), PIN.as_bytes())?;
+        let output = world.as_user("bob", &[PINCHECKER].iter().chain(args).copied().collect::<Vec<_>>(), PIN.as_bytes())?;
         if output.status.code() == Some(exit::YES.into()) && args[0] == "check" {
             return Err(format!("bob's {args:?} said yes"));
         }
     }
-    let bob = world.as_user("bob", &[HELPER, "check"], b"1111")?;
+    let bob = world.as_user("bob", &[PINCHECKER, "check"], b"1111")?;
     expect_code(&bob, exit::NO, "bob's wrong PIN")?;
     let log = world.syslog.take();
     if !log.contains("bob: no PIN is set, refused") {
@@ -382,7 +344,6 @@ fn dev_options_are_refused_under_setgid(world: &World) -> Outcome {
     let user = &world.user;
     let fake = Path::new(SCRATCH);
     fs::create_dir_all(fake.join("etc/users")).map_err(message)?;
-    fs::create_dir_all(fake.join("run")).map_err(message)?;
     fs::create_dir_all(fake.join("var")).map_err(message)?;
     write_file(
         &fake.join("etc/users").join(USER),
@@ -391,15 +352,13 @@ fn dev_options_are_refused_under_setgid(world: &World) -> Outcome {
         user.gid,
         0o640,
     )?;
-    for dir in [fake.to_path_buf(), fake.join("etc"), fake.join("etc/users"), fake.join("run"), fake.join("var")] {
+    for dir in [fake.to_path_buf(), fake.join("etc"), fake.join("etc/users"), fake.join("var")] {
         chown(&dir, Some(user.uid), Some(user.gid)).map_err(message)?;
         fs::set_permissions(&dir, Permissions::from_mode(0o700)).map_err(message)?;
     }
     let dev = [
         "--dev-etc",
         &format!("{SCRATCH}/etc"),
-        "--dev-run",
-        &format!("{SCRATCH}/run"),
         "--dev-budget",
         &format!("{SCRATCH}/var"),
         "--dev-owner",
@@ -407,9 +366,9 @@ fn dev_options_are_refused_under_setgid(world: &World) -> Outcome {
         "--dev-chkpwd",
         "/usr/bin/true",
     ];
-    let started = world.as_user(USER, &[&[HELPER, "start-accepting-pin"][..], &dev].concat(), b"anything")?;
-    expect_code(&started, exit::USAGE, "start-accepting-pin with --dev options under setgid")?;
-    let check = world.as_user(USER, &[&[HELPER, "check"][..], &dev].concat(), b"0000")?;
+    let started = world.as_user(USER, &[&[PINCHECKER, "housekeeping"][..], &dev].concat(), b"anything")?;
+    expect_code(&started, exit::USAGE, "housekeeping with --dev options under setgid")?;
+    let check = world.as_user(USER, &[&[PINCHECKER, "check"][..], &dev].concat(), b"0000")?;
     expect_code(&check, exit::USAGE, "check with --dev options under setgid")?;
     let log = world.syslog.take();
     if !log.contains("refused: --dev options while running with elevated rights") {
@@ -421,9 +380,8 @@ fn dev_options_are_refused_under_setgid(world: &World) -> Outcome {
 /// Closed stdout and stderr, an extra open file, and a hostile environment, including a preloaded
 /// library that would hijack an ordinary program: the pinchecker answers as always.
 fn a_poisoned_start_changes_nothing(world: &World) -> Outcome {
-    world.start_accepting_pin()?;
     let script = format!(
-        "exec 7</etc/hostname; LD_PRELOAD={SCRATCH}/evil.so LD_LIBRARY_PATH={SCRATCH} RUST_BACKTRACE=full LANG=xx_XX TZ=../../etc/shadow exec {HELPER} check >&- 2>&-"
+        "exec 7</etc/hostname; LD_PRELOAD={SCRATCH}/evil.so LD_LIBRARY_PATH={SCRATCH} RUST_BACKTRACE=full LANG=xx_XX TZ=../../etc/shadow exec {PINCHECKER} check >&- 2>&-"
     );
     fs::create_dir_all(SCRATCH).map_err(message)?;
     fs::write(format!("{SCRATCH}/evil.so"), "not a library").map_err(message)?;
@@ -432,41 +390,42 @@ fn a_poisoned_start_changes_nothing(world: &World) -> Outcome {
     let wrong = world.as_user(USER, &["sh", "-c", &script], b"1111")?;
     expect_code(&wrong, exit::NO, "a wrong PIN with a poisoned start")?;
     let log = world.syslog.take();
-    if !log.contains("not the PIN, failure 1 of 3") {
+    if !log.contains("not the PIN, consecutive failure 1 of 3") {
         return Err(format!("the wrong PIN wasn't counted:\n{log}"));
     }
     Ok(())
 }
 
-/// Anything the user runs can ask the pinchecker to start accepting the PIN; only the real password does it, checked by the
-/// real unix_chkpwd.
-fn starting_to_accept_the_pin_checks_the_password_itself(world: &World) -> Outcome {
-    for wrong in ["", "wrong", "correct horse battery stapl"] {
-        let started = world.as_user(USER, &[HELPER, "start-accepting-pin"], wrong.as_bytes())?;
-        expect_code(&started, exit::NO, &format!("start-accepting-pin with {wrong:?}"))?;
+/// Anything the user runs can ask the pinchecker for its housekeeping; only the real password, checked
+/// by the real unix_chkpwd, unpauses the PIN.
+fn the_housekeeping_checks_the_password_itself(world: &World) -> Outcome {
+    for wrong in ["1111", "2222", "3333"] {
+        world.pin_refused(wrong, "not the PIN")?;
     }
-    world.pin_refused(PIN, "no password unlock since boot")?;
-    let started = world.as_user(USER, &[HELPER, "start-accepting-pin"], PASSWORD.as_bytes())?;
-    expect_code(&started, exit::YES, "start-accepting-pin with the password")?;
+    for wrong in ["", "wrong", "correct horse battery stapl"] {
+        let done = world.as_user(USER, &[PINCHECKER, "housekeeping"], wrong.as_bytes())?;
+        expect_code(&done, exit::NO, &format!("housekeeping with {wrong:?}"))?;
+    }
+    world.pin_refused(PIN, "PIN paused after 3 consecutive failures")?;
+    let done = world.as_user(USER, &[PINCHECKER, "housekeeping"], PASSWORD.as_bytes())?;
+    expect_code(&done, exit::YES, "housekeeping with the password")?;
     world.pin_unlocks()
 }
 
 fn a_missing_pinchecker_fails_closed(world: &World) -> Outcome {
-    world.start_accepting_pin()?;
-    fs::rename(HELPER, format!("{HELPER}.away")).map_err(message)?;
+    fs::rename(PINCHECKER, format!("{PINCHECKER}.away")).map_err(message)?;
     let pin = world.kde(PIN);
     let password = world.kde(PASSWORD);
-    fs::rename(format!("{HELPER}.away"), HELPER).map_err(message)?;
+    fs::rename(format!("{PINCHECKER}.away"), PINCHECKER).map_err(message)?;
     let (pin, password) = (pin?, password?);
     expect(!pin.unlocked && pin.log.contains("PIN refused:"), "the PIN worked without the pinchecker", &pin)?;
-    expect(password.unlocked && password.log.contains("can't start accepting the PIN:"), "the password didn't unlock", &password)
+    expect(password.unlocked && password.log.contains("housekeeping failed:"), "the password didn't unlock", &password)
 }
 
 fn status_shows_your_own_pin(world: &World) -> Outcome {
-    world.start_accepting_pin()?;
     let mine = world.as_user(USER, &["/usr/local/bin/properpin", "status"], b"")?;
     let text = String::from_utf8_lossy(&mine.stdout);
-    if !mine.status.success() || !text.contains("PIN        set") || !text.contains("accepting the PIN for another") {
+    if !mine.status.success() || !text.contains("PIN        set") || !text.contains("right now  enabled") {
         return Err(format!("alice's status: {text}{}", String::from_utf8_lossy(&mine.stderr)));
     }
     let bob = world.as_user("bob", &["/usr/local/bin/properpin", "status"], b"")?;
@@ -478,27 +437,27 @@ fn status_shows_your_own_pin(world: &World) -> Outcome {
         return Err("status ran as root".into());
     }
     // The pinchecker itself refuses root too, whoever calls it.
-    let pinchecker = Command::new(HELPER).arg("status").stdin(Stdio::null()).output().map_err(message)?;
+    let pinchecker = Command::new(PINCHECKER).arg("status").stdin(Stdio::null()).output().map_err(message)?;
     expect_code(&pinchecker, exit::USAGE, "the pinchecker run by root")
 }
 
 /// bob with the pinchecker's group stands in for bob having exploited a bug in the pinchecker: whatever he
 /// then does, the pinchecker itself stays root's, unchanged.
 fn the_group_cannot_change_the_pinchecker(world: &World) -> Outcome {
-    let before = fs::read(HELPER).map_err(message)?;
+    let before = fs::read(PINCHECKER).map_err(message)?;
     for (what, script) in [
-        ("append to the pinchecker", format!("echo evil >> {HELPER}")),
-        ("chmod the pinchecker", format!("chmod 777 {HELPER}")),
-        ("rename the pinchecker", format!("mv {HELPER} {HELPER}.moved")),
-        ("delete the pinchecker", format!("rm -f {HELPER}")),
-        ("replace the pinchecker", format!("cp /usr/bin/true {HELPER}")),
+        ("append to the pinchecker", format!("echo evil >> {PINCHECKER}")),
+        ("chmod the pinchecker", format!("chmod 777 {PINCHECKER}")),
+        ("rename the pinchecker", format!("mv {PINCHECKER} {PINCHECKER}.moved")),
+        ("delete the pinchecker", format!("rm -f {PINCHECKER}")),
+        ("replace the pinchecker", format!("cp /usr/bin/true {PINCHECKER}")),
     ] {
         let output = world.as_pinchecker_group("bob", &["sh", "-c", &script])?;
         if output.status.success() {
-            return Err(format!("bob with group {HELPER_GROUP} could {what}"));
+            return Err(format!("bob with group {PINCHECKER_GROUP} could {what}"));
         }
     }
-    if fs::read(HELPER).map_err(message)? != before {
+    if fs::read(PINCHECKER).map_err(message)? != before {
         return Err("the pinchecker's bytes changed".into());
     }
     install_sh(&["check"]).map(drop)
@@ -507,35 +466,32 @@ fn the_group_cannot_change_the_pinchecker(world: &World) -> Outcome {
 /// Each user's counts file is that user's own, in a sticky directory: bob running the pinchecker, or
 /// exploiting it, can't read, change, delete or replace alice's.
 fn one_users_pinchecker_cannot_touch_anothers_counts(world: &World) -> Outcome {
-    world.start_accepting_pin()?;
-    world.pin_refused("1111", "not the PIN, failure 1 of 3")?;
-    let state = world.state_file().display().to_string();
+    world.pin_refused("1111", "not the PIN, consecutive failure 1 of 3")?;
+    let state = world.budget_file().display().to_string();
     for (what, script) in [
         ("read alice's counts", format!("cat {state}")),
         ("overwrite alice's counts", format!("echo garbage > {state}")),
         ("delete alice's counts", format!("rm -f {state}")),
-        ("rename alice's counts", format!("mv {state} {RUN_DIR}/stolen")),
-        ("replace alice's counts", format!("echo garbage > {RUN_DIR}/mine && mv -f {RUN_DIR}/mine {state}")),
+        ("rename alice's counts", format!("mv {state} {BUDGET_DIR}/stolen")),
+        ("replace alice's counts", format!("echo garbage > {BUDGET_DIR}/mine && mv -f {BUDGET_DIR}/mine {state}")),
     ] {
         let output = world.as_pinchecker_group("bob", &["sh", "-c", &script])?;
         if output.status.success() {
-            return Err(format!("bob with group {HELPER_GROUP} could {what}"));
+            return Err(format!("bob with group {PINCHECKER_GROUP} could {what}"));
         }
     }
-    let _ = fs::remove_file(format!("{RUN_DIR}/mine"));
-    world.pin_refused("2222", "not the PIN, failure 2 of 3")
+    let _ = fs::remove_file(format!("{BUDGET_DIR}/mine"));
+    world.pin_refused("2222", "not the PIN, consecutive failure 2 of 3")
 }
 
-/// Before alice's first attempt of the boot, bob with the pinchecker's group creates her lock file,
-/// writable by anyone, and a state that says the lock screen is accepting her PIN. Her PIN is refused, and the log says
-/// whose lock file it is. The password still works.
+/// Before alice's first attempt, bob with the pinchecker's group creates her lock file, writable by
+/// anyone, and a fresh budget in her name. Her PIN is refused, and the log says whose lock file it
+/// is. The password still works.
 fn planted_counts_are_refused(world: &World) -> Outcome {
     let bob = Account::by_name("bob").map_err(message)?;
-    let pepper = Pepper::new(zeroize::Zeroizing::new([0; PEPPER_BYTES]));
-    let accepting = PinState::accepting_pin_from(&BootClock.boot_id().map_err(message)?, BootClock.now().map_err(message)?, pepper);
-    let lock = format!("{RUN_DIR}/{}.lock", world.user.uid);
-    let script = format!("umask 0 && touch {lock} && chmod 666 {lock} && cat > {}", world.state_file().display());
-    let planted = world.as_identity(bob.uid, world.pinchecker_gid, &["sh", "-c", &script], accepting.format().as_bytes())?;
+    let lock = format!("{BUDGET_DIR}/{}.lock", world.user.uid);
+    let script = format!("umask 0 && touch {lock} && chmod 666 {lock} && cat > {}", world.budget_file().display());
+    let planted = world.as_identity(bob.uid, world.pinchecker_gid, &["sh", "-c", &script], Budget::default().format().as_bytes())?;
     if !planted.status.success() {
         return Err(format!("couldn't plant the files: {}", String::from_utf8_lossy(&planted.stderr)));
     }
@@ -551,13 +507,13 @@ fn planted_counts_are_refused(world: &World) -> Outcome {
 /// Anyone with the pinchecker's group can read every hash and change every count, so install.sh check
 /// insists nobody has it: no members, and a locked password so newgrp can't give it. No account.
 fn the_group_stays_empty_and_locked(_world: &World) -> Outcome {
-    if Account::by_name(HELPER_GROUP).is_ok() {
-        return Err(format!("a user named {HELPER_GROUP} exists"));
+    if Account::by_name(PINCHECKER_GROUP).is_ok() {
+        return Err(format!("a user named {PINCHECKER_GROUP} exists"));
     }
     install_sh(&["check"])?;
     let (group, gshadow) = (fs::read("/etc/group").map_err(message)?, fs::read("/etc/gshadow").map_err(message)?);
     let result = (|| {
-        let added = Command::new("usermod").args(["-aG", HELPER_GROUP, "bob"]).status().map_err(message)?;
+        let added = Command::new("usermod").args(["-aG", PINCHECKER_GROUP, "bob"]).status().map_err(message)?;
         if !added.success() {
             return Err("usermod failed".to_owned());
         }
@@ -573,7 +529,7 @@ fn the_group_stays_empty_and_locked(_world: &World) -> Outcome {
             .lines()
             .map(|line| {
                 let mut fields: Vec<&str> = line.split(':').collect();
-                if fields[0] == HELPER_GROUP && fields.len() > 1 {
+                if fields[0] == PINCHECKER_GROUP && fields.len() > 1 {
                     fields[1] = "";
                 }
                 fields.join(":") + "\n"
@@ -594,12 +550,11 @@ fn the_group_stays_empty_and_locked(_world: &World) -> Outcome {
 /// The user's own mistakes never count: a wrong PIN, then the right one; a wrong password, then
 /// the right one. Nothing is left waiting, nothing is concerning.
 fn typos_are_forgiven(world: &World) -> Outcome {
-    world.start_accepting_pin()?;
-    world.pin_refused("1111", "not the PIN, failure 1 of 3")?;
+    world.pin_refused("1111", "not the PIN, consecutive failure 1 of 3")?;
     world.pin_unlocks()?;
     let wrong = world.kde("a wrong password, long enough")?;
     expect(!wrong.unlocked, "a wrong password unlocked", &wrong)?;
-    world.start_accepting_pin()?;
+    world.unlock_with_password()?;
     let budget = world.budget()?;
     if !budget.pending.is_empty() || budget.total != 0 {
         return Err(format!("typos were kept: {budget:?}"));
@@ -608,73 +563,71 @@ fn typos_are_forgiven(world: &World) -> Outcome {
 }
 
 /// The repeated-access attack: a guess while the user is away, then the user's own correct PIN
-/// two minutes later, which wipes the failures in a row but can't forgive the guess. With the
-/// daily limit at 3, the third round finds the PIN disabled.
+/// two minutes later, which starts the consecutive count over but can't forgive the guess. With
+/// the daily limit at 3, the third round finds the PIN disabled.
 fn the_slow_attack_is_stopped(world: &World) -> Outcome {
     write_file(&world.config(), "max_concerning_24h = 3\n", 0, 0, 0o644)?;
-    world.start_accepting_pin()?;
     for round in 1..=2 {
-        world.pin_refused("1111", "not the PIN, failure 1 of 3")?;
+        world.pin_refused("1111", "not the PIN, consecutive failure 1 of 3")?;
         world.edit_budget(|budget| budget.pending.iter_mut().for_each(|at| *at -= 120))?;
         world.pin_unlocks().map_err(|error| format!("round {round}: {error}"))?;
     }
-    world.pin_refused("1111", "not the PIN, failure 1 of 3")?;
+    world.pin_refused("1111", "not the PIN, consecutive failure 1 of 3")?;
     world.edit_budget(|budget| budget.pending.iter_mut().for_each(|at| *at -= 120))?;
-    world.pin_refused(PIN, "the PIN is disabled after 3 concerning failures within 24 hours")?;
+    world.pin_refused(PIN, "PIN disabled after 3 concerning failures within 24 hours")?;
     world.password_unlocks()
 }
 
 /// Nine concerning failures already today, and one more guess the user never forgives: the PIN is
-/// disabled, stays disabled after a reboot even for the password, and comes back with `enable`.
+/// disabled, the password doesn't bring it back, and `enable`, after asking, does at once.
 fn unforgiven_guesses_disable_the_pin(world: &World) -> Outcome {
-    world.start_accepting_pin()?;
-    let now = BootClock.wall().map_err(message)?;
+    let now = SystemClock.now().map_err(message)?;
     world.edit_budget(|budget| {
         budget.concerning = (1..=9).map(|hour| now - hour * 600).rev().collect();
         budget.total = 9;
     })?;
-    world.pin_refused("1111", "not the PIN, failure 1 of 3")?;
+    world.pin_refused("1111", "not the PIN, consecutive failure 1 of 3")?;
     // Two minutes pass before the user comes back: too late to forgive the guess.
     world.edit_budget(|budget| budget.pending.iter_mut().for_each(|at| *at -= 120))?;
     let attempt = world.kde(PIN)?;
-    let why = "the PIN is disabled after 10 concerning failures within 24 hours";
-    expect(!attempt.unlocked && attempt.log.contains("PIN disabled after") && attempt.log.contains(why), why, &attempt)?;
-    // A reboot: the per-boot state is gone, the budget isn't.
-    world.forget_this_boot()?;
+    let why = "PIN disabled after 10 concerning failures within 24 hours";
+    expect(!attempt.unlocked && attempt.log.contains("sudo properpin enable or set") && attempt.log.contains(why), why, &attempt)?;
     let password = world.kde(PASSWORD)?;
     expect(
         password.unlocked && password.log.contains("the PIN stays disabled after"),
-        "the password started accepting a disabled PIN",
+        "the password brought a disabled PIN back",
         &password,
     )?;
     world.pin_refused(PIN, why)?;
-    let enabled = properpin_as_root(&["enable", "--user", USER], "")?;
+    match properpin_as_root(&["enable", "--user", USER], "") {
+        Err(said) if said.contains("may have been someone guessing it") && said.contains("--yes skips the question") => {}
+        other => return Err(format!("enable didn't ask first: {other:?}")),
+    }
+    let enabled = properpin_as_root(&["enable", "--user", USER, "--yes"], "")?;
     if !enabled.contains("PIN enabled again") {
         return Err(format!("properpin enable said: {enabled}"));
     }
-    world.start_accepting_pin()?;
     world.pin_unlocks()
 }
 
 /// The total since the PIN was set has its own limit, which `enable` can't lift: only a new PIN.
 fn the_lifetime_limit_takes_a_new_pin(world: &World) -> Outcome {
-    world.start_accepting_pin()?;
-    world.edit_budget(|budget| budget.total = 99)?;
+    world.edit_budget(|budget| budget.total = 59)?;
     world.pin_refused("1111", "not the PIN")?;
     world.edit_budget(|budget| budget.pending.iter_mut().for_each(|at| *at -= 120))?;
-    world.pin_refused(PIN, "the PIN is disabled after 100 concerning failures since the PIN was set")?;
-    match properpin_as_root(&["enable", "--user", USER], "") {
+    world.pin_refused(PIN, "PIN disabled after 60 concerning failures since the PIN was set")?;
+    match properpin_as_root(&["enable", "--user", USER, "--yes"], "") {
         Err(said) if said.contains("choose a new one with: properpin set") => {}
         other => return Err(format!("enable lifted the lifetime limit: {other:?}")),
     }
-    properpin_as_root(&["set", "--user", USER], &format!("{PIN}\n{PIN}\n{PASSWORD}\n"))?;
-    world.start_accepting_pin()?;
-    world.pin_unlocks()
+    properpin_as_root(&["set", "--user", USER], "4860\n4860\n")?;
+    let attempt = world.kde("4860")?;
+    expect(attempt.unlocked, "the new PIN didn't unlock", &attempt)
 }
 
 /// A budget that can't be trusted is never read as a fresh one.
 fn a_damaged_or_planted_budget(world: &World) -> Outcome {
-    world.start_accepting_pin()?;
+    world.budget()?;
     overwrite(&world.budget_file(), "garbage\n")?;
     world.fails_closed("not a valid budget")?;
     // Planted by bob's pinchecker: private to bob, it can't even be opened; readable, its owner is wrong.
@@ -685,39 +638,9 @@ fn a_damaged_or_planted_budget(world: &World) -> Outcome {
     world.fails_closed(&format!("owned by uid {}, not {}", bob.uid, world.user.uid))
 }
 
-fn a_corrupt_state(world: &World) -> Outcome {
-    world.start_accepting_pin()?;
-    overwrite(&world.state_file(), "garbage\n")?;
-    world.pin_refused(PIN, "no password unlock since boot")
-}
-
-fn state_from_an_earlier_boot(world: &World) -> Outcome {
-    world.start_accepting_pin()?;
-    world.edit_state(|state| state.boot_id = "00000000-0000-4000-8000-000000000000".into())?;
-    world.pin_refused(PIN, "the state is from an earlier boot")?;
-    world.start_accepting_pin()?;
-    world.pin_unlocks()
-}
-
-fn accepting_the_pin_since_a_time_in_the_future(world: &World) -> Outcome {
-    world.start_accepting_pin()?;
-    world.edit_state(|state| state.accepting_pin_since += 3600)?;
-    world.pin_refused(PIN, "accepting the PIN since a time in the future")
-}
-
-fn an_expired_pin(world: &World) -> Outcome {
-    // 0.01 hours is 36 seconds; the lock screen started accepting the PIN a minute ago.
-    let user_file = format!("{}expiry_hours = 0.01\n", String::from_utf8_lossy(&world.pin_file));
-    write_file(&world.user_file(), &user_file, 0, world.pinchecker_gid, 0o640)?;
-    world.start_accepting_pin()?;
-    world.edit_state(|state| state.accepting_pin_since = state.accepting_pin_since.saturating_sub(60))?;
-    world.pin_refused(PIN, "the last password unlock was 0h01m ago")
-}
-
 /// Three wrong PINs at once: each is counted, none is lost to another's write, and the PIN is then
-/// refused.
+/// paused.
 fn concurrent_wrong_pins_are_all_counted(world: &World) -> Outcome {
-    world.start_accepting_pin()?;
     let children: Vec<Child> = ["1111", "2222", "3333"].into_iter().map(|wrong| world.spawn("kde", wrong)).collect::<Outcome<_>>()?;
     let mut log = String::new();
     for child in children {
@@ -726,11 +649,11 @@ fn concurrent_wrong_pins_are_all_counted(world: &World) -> Outcome {
         log += &attempt.log;
     }
     for count in 1..=3 {
-        if !log.contains(&format!("failure {count} of 3")) {
-            return Err(format!("no attempt was counted as failure {count} of 3\n{log}"));
+        if !log.contains(&format!("consecutive failure {count} of 3")) {
+            return Err(format!("no attempt was counted as consecutive failure {count} of 3\n{log}"));
         }
     }
-    world.pin_refused(PIN, "3 failures in a row")
+    world.pin_refused(PIN, "PIN paused after 3 consecutive failures")
 }
 
 /// The 6.8 worker's way: one session, the password, the PIN, a wrong PIN and the PIN again, each
@@ -757,11 +680,11 @@ fn one_session_serves_many_attempts(world: &World) -> Outcome {
     if answers.iter().map(|answer| answer.delays > 0).collect::<Vec<_>>() != [false, false, true, false] {
         return Err(format!("only the failure asks for a delay: {}", said()));
     }
-    if !log.contains("password correct, accepting the PIN for the next")
+    if !log.contains("password correct, PIN enabled")
         || log.matches("unlocked with the PIN").count() != 2
-        || !log.contains("failure 1 of 3")
+        || !log.contains("consecutive failure 1 of 3")
     {
-        return Err(format!("the log doesn't show accepting the PIN, two PIN unlocks and one failure: {}", said()));
+        return Err(format!("the log doesn't show the housekeeping, two PIN unlocks and one failure: {}", said()));
     }
     // kscreenlocker 6.8 takes an answer within 50 ms for a broken authenticator; the module makes
     // a correct PIN wait out min_milliseconds_before_pin_unlock, 75 ms with no config.
@@ -775,11 +698,10 @@ fn one_session_serves_many_attempts(world: &World) -> Outcome {
 
 /// With `min_milliseconds_before_pin_unlock` raised to a second, a correct PIN takes at least that
 /// through the real stack. Killed while it waits, as the 6.8 greeter cancels, the worker unlocks
-/// nothing; the pinchecker had already taken the PIN, so the failures in a row are reset as after any
+/// nothing; the pinchecker had already taken the PIN, so the consecutive count is reset as after any
 /// correct PIN, its pinchecker is gone, and the PIN unlocks again afterwards.
 fn a_correct_pin_waits_out_the_minimum(world: &World) -> Outcome {
     write_file(&world.config(), "min_milliseconds_before_pin_unlock = 1000\n", 0, 0, 0o644)?;
-    world.start_accepting_pin()?;
     let mut worker = world.start(&["worker", "kde", USER])?;
     writeln!(worker.stdin.take().expect("piped"), "{PIN}").map_err(message)?;
     let output = world.wait_for(worker)?;
@@ -787,7 +709,7 @@ fn a_correct_pin_waits_out_the_minimum(world: &World) -> Outcome {
         [Answer { status: pamharness::PAM_SUCCESS, ms, .. }] if ms >= 1000 => {}
         _ => return Err(format!("not one unlock after at least 1000 ms: {}", String::from_utf8_lossy(&output.stdout))),
     }
-    world.pin_refused("1111", "not the PIN, failure 1 of 3")?;
+    world.pin_refused("1111", "not the PIN, consecutive failure 1 of 3")?;
     let mut worker = world.start(&["worker", "kde", USER])?;
     // Kept open, so the worker waits for more rather than exiting.
     let mut stdin = worker.stdin.take().expect("piped");
@@ -801,10 +723,9 @@ fn a_correct_pin_waits_out_the_minimum(world: &World) -> Outcome {
     }
     no_pinchecker_left()?;
     let log = world.syslog.take();
-    let text = fs::read_to_string(world.state_file()).map_err(message)?;
-    let state = PinState::parse(&text).ok_or_else(|| format!("the state doesn't parse: {text}"))?;
-    if !log.contains("unlocked with the PIN") || state.failures != 0 {
-        return Err(format!("the pinchecker should have taken the PIN and reset the failures, {} in a row now:\n{log}", state.failures));
+    let consecutive = world.budget()?.consecutive;
+    if !log.contains("unlocked with the PIN") || consecutive != 0 {
+        return Err(format!("the pinchecker should have taken the PIN and reset the count, {consecutive} consecutive now:\n{log}"));
     }
     world.pin_unlocks()
 }
@@ -838,7 +759,7 @@ fn a_killed_worker_loses_no_count(world: &World) -> Outcome {
 }
 
 fn disable_and_uninstall(world: &World) -> Outcome {
-    world.start_accepting_pin()?;
+    world.pin_unlocks()?;
     install_sh(&["disable", "--yes"])?;
     let kde = fs::read_to_string(KDE).map_err(message)?;
     if kde != world.stock_kde {
@@ -854,7 +775,7 @@ fn disable_and_uninstall(world: &World) -> Outcome {
         "/usr/local/bin/properpin",
         "/etc/sysusers.d/properpin.conf",
         "/etc/tmpfiles.d/properpin.conf",
-        RUN_DIR,
+        OLD_RUN_DIR,
     ] {
         if Path::new(gone).exists() {
             return Err(format!("{gone} is still there after uninstall"));
@@ -863,9 +784,9 @@ fn disable_and_uninstall(world: &World) -> Outcome {
     if !world.user_file().exists() {
         return Err("uninstall deleted the user's PIN file".into());
     }
-    group_by_name(HELPER_GROUP).map_err(|_| "uninstall removed the group the kept PIN files belong to")?;
-    if Account::by_name(HELPER_GROUP).is_ok() {
-        return Err(format!("a user named {HELPER_GROUP} exists"));
+    group_by_name(PINCHECKER_GROUP).map_err(|_| "uninstall removed the group the kept PIN files belong to")?;
+    if Account::by_name(PINCHECKER_GROUP).is_ok() {
+        return Err(format!("a user named {PINCHECKER_GROUP} exists"));
     }
     if !world.budget_file().exists() {
         return Err("uninstall deleted the user's budget".into());
@@ -934,9 +855,9 @@ impl World {
 
         install_sh(&["install"])?;
         install_sh(&["enable", "--yes"])?;
-        let pinchecker_gid = group_by_name(HELPER_GROUP).map_err(message)?;
+        let pinchecker_gid = group_by_name(PINCHECKER_GROUP).map_err(message)?;
 
-        properpin_as_root(&["set", "--user", USER], &format!("{PIN}\n{PIN}\n{PASSWORD}\n"))?;
+        properpin_as_root(&["set", "--user", USER], &format!("{PIN}\n{PIN}\n"))?;
         let checked = install_sh(&["check"])?;
         if !checked.contains("has properpin's lines") {
             return Err(format!("install.sh check after set:\n{checked}"));
@@ -953,15 +874,16 @@ impl World {
         PathBuf::from("/etc/properpin/config")
     }
 
-    fn state_file(&self) -> PathBuf {
-        PathBuf::from(format!("{RUN_DIR}/{}.state", self.user.uid))
-    }
-
     fn budget_file(&self) -> PathBuf {
         PathBuf::from(format!("{BUDGET_DIR}/{}.budget", self.user.uid))
     }
 
+    /// alice's budget, which the first attempt creates; a fresh one, as the pinchecker would write
+    /// it, when there was no attempt yet.
     fn budget(&self) -> Outcome<Budget> {
+        if !self.budget_file().exists() {
+            write_file(&self.budget_file(), &Budget::default().format(), self.user.uid, self.pinchecker_gid, 0o600)?;
+        }
         let text = fs::read_to_string(self.budget_file()).map_err(message)?;
         Budget::parse(&text).ok_or_else(|| format!("the budget doesn't parse: {text}"))
     }
@@ -972,18 +894,10 @@ impl World {
         overwrite(&self.budget_file(), &budget.format())
     }
 
-    /// What a reboot does to properpin: `/run` starts empty. The budget on disk stays.
-    fn forget_this_boot(&self) -> Outcome {
-        for entry in fs::read_dir(RUN_DIR).map_err(message)? {
-            fs::remove_file(entry.map_err(message)?.path()).map_err(message)?;
-        }
-        Ok(())
-    }
-
-    /// Back to just after set-up: the PIN set, password required, nothing tampered with.
+    /// Back to just after set-up: the PIN set and enabled, nothing tampered with.
     fn reset(&self) -> Outcome {
-        let lock = PathBuf::from(format!("{RUN_DIR}/{}.lock", self.user.uid));
-        for path in [self.state_file(), lock, self.budget_file(), self.config(), self.user_file().with_extension("real")] {
+        let lock = PathBuf::from(format!("{BUDGET_DIR}/{}.lock", self.user.uid));
+        for path in [lock, self.budget_file(), self.config(), self.user_file().with_extension("real")] {
             match fs::remove_file(&path) {
                 Err(error) if error.kind() != ErrorKind::NotFound => return Err(format!("{}: {error}", path.display())),
                 _ => {}
@@ -991,10 +905,8 @@ impl World {
         }
         let _ = fs::remove_file(self.user_file());
         write_file(&self.user_file(), &String::from_utf8_lossy(&self.pin_file), 0, self.pinchecker_gid, 0o640)?;
-        for dir in [RUN_DIR, BUDGET_DIR] {
-            chown(dir, Some(0), Some(self.pinchecker_gid)).map_err(message)?;
-            fs::set_permissions(dir, Permissions::from_mode(0o1770)).map_err(message)?;
-        }
+        chown(BUDGET_DIR, Some(0), Some(self.pinchecker_gid)).map_err(message)?;
+        fs::set_permissions(BUDGET_DIR, Permissions::from_mode(0o1770)).map_err(message)?;
         let _ = fs::remove_dir_all(SCRATCH);
         self.syslog.take();
         Ok(())
@@ -1085,10 +997,10 @@ impl World {
         Ok(output)
     }
 
-    /// One round of `a_killed_worker_loses_no_count`, with the lock screen accepting the PIN and no failures yet.
+    /// One round of `a_killed_worker_loses_no_count`, after a password unlock, so with no failures yet.
     /// Returns how many failures were counted: 2 when the killed worker's guess reached the pinchecker.
     fn kill_a_worker(&self, after: Duration, gently: bool) -> Outcome<usize> {
-        self.start_accepting_pin()?;
+        self.unlock_with_password()?;
         let mut worker = self.start(&["worker", "kde", USER])?;
         // Kept open, so the worker waits for more rather than exiting.
         let mut stdin = worker.stdin.take().expect("piped");
@@ -1109,17 +1021,15 @@ impl World {
         expect(!fresh.unlocked, "the fresh wrong PIN unlocked", &fresh)?;
         no_pinchecker_left()?;
         let log = fresh.log + &self.syslog.take();
-        if log.contains("PIN refused:") || log.contains("can't start accepting the PIN") {
+        if log.contains("PIN refused:") || log.contains("housekeeping failed") {
             return Err(format!("an attempt got no answer from the pinchecker:\n{log}"));
         }
-        let counted = log.matches("not the PIN, failure").count();
-        let text = fs::read_to_string(self.state_file()).map_err(message)?;
-        let state = PinState::parse(&text).ok_or_else(|| format!("the state doesn't parse: {text}"))?;
+        let counted = log.matches("not the PIN, consecutive failure").count();
         let budget = self.budget()?;
-        if !(1..=2).contains(&counted) || state.failures as usize != counted || budget.pending.len() != counted {
+        if !(1..=2).contains(&counted) || budget.consecutive as usize != counted || budget.pending.len() != counted {
             return Err(format!(
-                "{counted} failures logged, {} in a row in the state, {} pending in the budget; they must agree, at 1 or 2:\n{log}",
-                state.failures,
+                "{counted} failures logged, {} consecutive and {} pending in the budget; they must agree, at 1 or 2:\n{log}",
+                budget.consecutive,
                 budget.pending.len()
             ));
         }
@@ -1137,12 +1047,12 @@ impl World {
         Ok(attempt)
     }
 
-    /// Unlock the lock screen with the password, which starts accepting the PIN.
-    fn start_accepting_pin(&self) -> Outcome {
+    /// Unlock the lock screen with the password, whose housekeeping unpauses the PIN.
+    fn unlock_with_password(&self) -> Outcome {
         let attempt = self.kde(PASSWORD)?;
         expect(
-            attempt.unlocked && attempt.log.contains("password correct, accepting the PIN for the next"),
-            "the password didn't start accepting the PIN",
+            attempt.unlocked && attempt.log.contains("password correct, PIN enabled"),
+            "the password didn't do the housekeeping",
             &attempt,
         )
     }
@@ -1166,17 +1076,6 @@ impl World {
     fn fails_closed(&self, why: &str) -> Outcome {
         self.pin_refused(PIN, why)?;
         self.password_unlocks()
-    }
-
-    fn pepper_in_memory(&self) -> Outcome<bool> {
-        Ok(fs::read_to_string(self.state_file()).map_err(message)?.contains("pepper = "))
-    }
-
-    fn edit_state(&self, change: impl FnOnce(&mut PinState)) -> Outcome {
-        let text = fs::read_to_string(self.state_file()).map_err(message)?;
-        let mut state = PinState::parse(&text).ok_or("the state file doesn't parse")?;
-        change(&mut state);
-        overwrite(&self.state_file(), &state.format())
     }
 }
 
@@ -1266,14 +1165,14 @@ fn expect_code(output: &std::process::Output, code: u8, what: &str) -> Outcome {
 /// No pinchecker is still running, within the time one whose attempt was killed takes to finish.
 /// Exited pincheckers nobody has reaped yet don't count.
 fn no_pinchecker_left() -> Outcome {
-    let deadline = Instant::now() + HELPER_LINGER;
+    let deadline = Instant::now() + PINCHECKER_LINGER;
     loop {
         let running = running_pincheckers()?;
         if running.is_empty() {
             return Ok(());
         }
         if Instant::now() > deadline {
-            return Err(format!("pincheckers still running after {HELPER_LINGER:?}: pids {running:?}"));
+            return Err(format!("pincheckers still running after {PINCHECKER_LINGER:?}: pids {running:?}"));
         }
         thread::sleep(Duration::from_millis(10));
     }
@@ -1287,7 +1186,7 @@ fn running_pincheckers() -> Outcome<Vec<u32>> {
         let Ok(stat) = fs::read_to_string(format!("/proc/{pid}/stat")) else { continue };
         let (Some(open), Some(close)) = (stat.find('('), stat.rfind(") ")) else { continue };
         let state = stat[close + 2..].chars().next();
-        if &stat[open + 1..close] == HELPER_COMM && state != Some('Z') {
+        if &stat[open + 1..close] == PINCHECKER_COMM && state != Some('Z') {
             running.push(pid);
         }
     }
@@ -1344,7 +1243,7 @@ fn write_file(path: &Path, text: &str, uid: u32, gid: u32, mode: u32) -> Outcome
 
 /// Rewrite an existing file in place, so it keeps its owner and mode. Opened without `O_CREAT`,
 /// which `fs.protected_regular=2` refuses even to root for another user's file in a sticky,
-/// group-writable directory such as `/run/properpin`.
+/// group-writable directory such as `/var/lib/properpin`.
 fn overwrite(path: &Path, text: &str) -> Outcome {
     let mut file = fs::OpenOptions::new().write(true).truncate(true).open(path).map_err(|error| format!("{}: {error}", path.display()))?;
     file.write_all(text.as_bytes()).map_err(message)

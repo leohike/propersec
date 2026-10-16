@@ -11,7 +11,7 @@ use std::process::{Command, Stdio};
 use properpin_core::{MAX_INPUT_BYTES, exit};
 use properpin_sys::{Account, Yescrypt, current_uid};
 
-const HELPER: &str = env!("CARGO_BIN_EXE_properpin-pinchecker");
+const PINCHECKER: &str = env!("CARGO_BIN_EXE_properpin-pinchecker");
 const PIN: &str = "4859";
 const PASSWORD: &str = "correct horse battery staple";
 
@@ -29,15 +29,13 @@ struct Run {
 impl Sandbox {
     fn new() -> Self {
         let sandbox = Self { dir: tempfile::tempdir().unwrap() };
-        for shared in ["run", "var"] {
-            fs::create_dir(sandbox.path(shared)).unwrap();
-            // Set explicitly: the umask would strip the group's write bit from a mkdir mode.
-            fs::set_permissions(sandbox.path(shared), Permissions::from_mode(0o1770)).unwrap();
-        }
+        fs::create_dir(sandbox.path("var")).unwrap();
+        // Set explicitly: the umask would strip the group's write bit from a mkdir mode.
+        fs::set_permissions(sandbox.path("var"), Permissions::from_mode(0o1770)).unwrap();
         let user = Account::by_uid(current_uid()).unwrap().name;
         let user_file = sandbox.path("etc/users").join(&user);
         fs::create_dir_all(user_file.parent().unwrap()).unwrap();
-        fs::write(&user_file, Yescrypt.new_pin(PIN, PASSWORD.as_bytes(), 4, 1).unwrap().lines()).unwrap();
+        fs::write(&user_file, format!("hash = {}\n", Yescrypt.hash(PIN, 4).unwrap())).unwrap();
         fs::set_permissions(&user_file, Permissions::from_mode(0o640)).unwrap();
         let chkpwd = sandbox.path("unix_chkpwd");
         let script = format!("#!/bin/bash\nIFS= read -r -d '' password\n[[ $1 == \"$(id -un)\" && $password == '{PASSWORD}' ]]\n");
@@ -52,16 +50,14 @@ impl Sandbox {
 
     fn dev_args(&self) -> Vec<String> {
         let mut args = Vec::new();
-        for (option, path) in
-            [("--dev-etc", "etc"), ("--dev-run", "run"), ("--dev-budget", "var"), ("--dev-chkpwd", "unix_chkpwd"), ("--dev-log", "log")]
-        {
+        for (option, path) in [("--dev-etc", "etc"), ("--dev-budget", "var"), ("--dev-chkpwd", "unix_chkpwd"), ("--dev-log", "log")] {
             args.extend([option.to_owned(), self.path(path).display().to_string()]);
         }
         args
     }
 
     fn command(&self, args: &[&str]) -> Command {
-        let mut command = Command::new(HELPER);
+        let mut command = Command::new(PINCHECKER);
         command.args(args).args(self.dev_args());
         command
     }
@@ -74,8 +70,8 @@ impl Sandbox {
         self.run(&["check"], typed.as_bytes()).code
     }
 
-    fn start_accepting_pin(&self) {
-        assert_eq!(self.run(&["start-accepting-pin"], PASSWORD.as_bytes()).code, Some(exit::YES.into()));
+    fn housekeeping(&self) {
+        assert_eq!(self.run(&["housekeeping"], PASSWORD.as_bytes()).code, Some(exit::YES.into()));
     }
 
     fn log(&self) -> String {
@@ -105,21 +101,24 @@ const USAGE: Option<i32> = Some(exit::USAGE as i32);
 #[test]
 fn the_whole_cycle_through_the_binary() {
     let sandbox = Sandbox::new();
-    assert_eq!(sandbox.check(PIN), NO);
-    assert!(sandbox.log().contains("PIN refused, password required: no password unlock since boot"), "{}", sandbox.log());
-    sandbox.start_accepting_pin();
     assert_eq!(sandbox.check(PIN), YES);
     for wrong in ["1111", "2222", "3333"] {
         assert_eq!(sandbox.check(wrong), NO);
     }
     assert_eq!(sandbox.check(PIN), NO);
-    assert!(sandbox.status().contains("password required: 3 failures in a row"), "{}", sandbox.status());
+    assert!(sandbox.log().contains("PIN paused after 3 consecutive failures, password required"), "{}", sandbox.log());
+    assert!(sandbox.status().contains("right now  paused after 3 consecutive failures"), "{}", sandbox.status());
+    sandbox.housekeeping();
+    assert_eq!(sandbox.check(PIN), YES);
 }
 
 #[test]
-fn a_wrong_password_never_starts_accepting_the_pin() {
+fn a_wrong_password_never_unpauses_the_pin() {
     let sandbox = Sandbox::new();
-    assert_eq!(sandbox.run(&["start-accepting-pin"], b"not the password").code, NO);
+    for wrong in ["1111", "2222", "3333"] {
+        sandbox.check(wrong);
+    }
+    assert_eq!(sandbox.run(&["housekeeping"], b"not the password").code, NO);
     assert_eq!(sandbox.check(PIN), NO);
     assert!(sandbox.log().contains("wrong password, nothing changed"), "{}", sandbox.log());
 }
@@ -127,12 +126,11 @@ fn a_wrong_password_never_starts_accepting_the_pin() {
 #[test]
 fn input_that_cannot_be_a_pin_is_refused_and_not_counted() {
     let sandbox = Sandbox::new();
-    sandbox.start_accepting_pin();
     let long = vec![b'1'; MAX_INPUT_BYTES * 4];
     for typed in [&b""[..], b"48\x0059", b"\xff\xfe", &long] {
         assert_eq!(sandbox.run(&["check"], typed).code, NO);
     }
-    assert!(sandbox.status().contains("0 of 3 failures so far"), "{}", sandbox.status());
+    assert!(sandbox.status().contains("enabled, 0 of 3 consecutive failures so far"), "{}", sandbox.status());
 }
 
 #[test]
@@ -148,10 +146,11 @@ fn anything_unexpected_on_the_command_line_is_refused() {
         &["--check"],
         &["check", "--dev-etc"],
         &["check", "--dev-etc", "/tmp"],
-        &["check", "--dev-owner", "root", "--dev-etc", "/tmp", "--dev-run", "/tmp"],
+        &["check", "--dev-owner", "root", "--dev-etc", "/tmp"],
+        &["check", "--dev-etc", "/tmp", "--dev-run", "/tmp", "--dev-budget", "/tmp"],
         &["check", "--dev-everything", "/tmp"],
     ] {
-        let mut command = Command::new(HELPER);
+        let mut command = Command::new(PINCHECKER);
         command.args(args);
         if args.first() == Some(&"frobnicate") {
             command.args(&dev);
@@ -164,7 +163,6 @@ fn anything_unexpected_on_the_command_line_is_refused() {
 #[test]
 fn a_poisoned_start_changes_nothing() {
     let sandbox = Sandbox::new();
-    sandbox.start_accepting_pin();
     let hostile = |mut command: Command| {
         command
             .env("RUST_BACKTRACE", "full")
@@ -180,22 +178,21 @@ fn a_poisoned_start_changes_nothing() {
 
     // Closed stdout and stderr, and an extra file left open, through the shell.
     let mut shell = Command::new("sh");
-    shell.args(["-c", "exec 7</dev/null; exec \"$0\" check \"$@\" >&- 2>&-", HELPER]).args(sandbox.dev_args());
+    shell.args(["-c", "exec 7</dev/null; exec \"$0\" check \"$@\" >&- 2>&-", PINCHECKER]).args(sandbox.dev_args());
     assert_eq!(run(shell, PIN.as_bytes()).code, YES);
     // Closed stdin reads as nothing typed.
     let mut shell = Command::new("sh");
-    shell.args(["-c", "exec \"$0\" check \"$@\" <&-", HELPER]).args(sandbox.dev_args());
+    shell.args(["-c", "exec \"$0\" check \"$@\" <&-", PINCHECKER]).args(sandbox.dev_args());
     assert_eq!(run(shell, b"").code, NO);
     // The wrong PIN was counted, the right one reset it, and nothing typed isn't counted.
-    assert!(sandbox.status().contains("0 of 3 failures so far"), "{}", sandbox.status());
-    assert!(sandbox.log().contains("not the PIN, failure 1 of 3"), "{}", sandbox.log());
+    assert!(sandbox.status().contains("enabled, 0 of 3 consecutive failures so far"), "{}", sandbox.status());
+    assert!(sandbox.log().contains("not the PIN, consecutive failure 1 of 3"), "{}", sandbox.log());
 }
 
 #[test]
 fn files_it_cannot_trust_are_refused() {
     let sandbox = Sandbox::new();
-    sandbox.start_accepting_pin();
-    fs::set_permissions(sandbox.path("run"), Permissions::from_mode(0o755)).unwrap();
+    fs::set_permissions(sandbox.path("var"), Permissions::from_mode(0o755)).unwrap();
     assert_eq!(sandbox.check(PIN), Some(exit::BROKEN.into()));
     assert!(sandbox.log().contains("mode 0755, not 1770"), "{}", sandbox.log());
 
@@ -210,7 +207,10 @@ fn files_it_cannot_trust_are_refused() {
 fn the_password_checker_must_exist() {
     let sandbox = Sandbox::new();
     fs::remove_file(sandbox.path("unix_chkpwd")).unwrap();
-    assert_eq!(sandbox.run(&["start-accepting-pin"], PASSWORD.as_bytes()).code, Some(exit::BROKEN.into()));
+    for wrong in ["1111", "2222", "3333"] {
+        sandbox.check(wrong);
+    }
+    assert_eq!(sandbox.run(&["housekeeping"], PASSWORD.as_bytes()).code, Some(exit::BROKEN.into()));
     assert_eq!(sandbox.check(PIN), NO);
 }
 
@@ -218,6 +218,6 @@ fn the_password_checker_must_exist() {
 fn status_needs_no_input_and_prints_the_rules() {
     let sandbox = Sandbox::new();
     let status = sandbox.status();
-    assert!(status.contains("PIN        set") && status.contains("policy     accepting the PIN for 8h"), "{status}");
-    assert!(!Path::new(&sandbox.path("run")).read_dir().unwrap().any(|_| true), "status wrote nothing");
+    assert!(status.contains("PIN        set") && status.contains("policy     paused after 3 consecutive failures"), "{status}");
+    assert!(!Path::new(&sandbox.path("var")).read_dir().unwrap().any(|_| true), "status wrote nothing");
 }

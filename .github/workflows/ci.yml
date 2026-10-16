@@ -79,7 +79,7 @@ jobs:
           persist-credentials: false
       - name: podman version
         # The container shares these with the runner's kernel; protected_regular=2 limits what even
-        # root may open in /run/properpin, which the scenarios have to respect.
+        # root may open in /var/lib/properpin, which the scenarios have to respect.
         run: |
           podman version
           sysctl fs.protected_regular fs.protected_symlinks

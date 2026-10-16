@@ -1,21 +1,22 @@
 //! `properpin-pinchecker`: the only program that reads PIN hashes and keeps the failure counts.
 //!
-//! It is installed owned by root and setgid to the `properpin` group, like Debian's `unix_chkpwd` is
-//! setgid to `shadow`, so the hash files and the counts can be readable by that group alone and stay
-//! out of reach of everything the user runs. The group has no members: running the pinchecker is the
+//! It is a setgid helper in the style of `unix_chkpwd`: installed owned by root and setgid to the
+//! `properpin` group, like Debian's `unix_chkpwd` is setgid to `shadow`, so the hash files and the
+//! counts can be readable by that group alone and stay out of reach of everything the user runs. The group has no members: running the pinchecker is the
 //! only way to get it. The pinchecker keeps its caller's user id, so the caller can't change the pinchecker,
 //! and each user's counts file is that user's own. The PAM module and the CLI start it, write what
 //! was typed to its stdin, and read its exit code (`properpin_core::exit`); only `status` prints
 //! anything.
 //!
 //! ```text
-//! properpin-pinchecker check                stdin: what was typed. Exit 0 if it is the PIN and the lock
-//!                                       screen is accepting the PIN
-//! properpin-pinchecker start-accepting-pin  stdin: the password, just accepted by pam_unix. Checked
-//!                                       again through unix_chkpwd, then it decrypts the pepper and
-//!                                       the lock screen starts accepting the PIN
-//! properpin-pinchecker status               prints the caller's PIN settings, and whether the lock
-//!                                       screen is accepting the PIN or the password is required
+//! properpin-pinchecker check         stdin: what was typed. Exit 0 if it is the PIN and the PIN is
+//!                                    enabled
+//! properpin-pinchecker housekeeping  stdin: the password, just accepted by pam_unix. Checked again
+//!                                    through unix_chkpwd, then the failures of the last moments are
+//!                                    forgiven and the consecutive count starts over, which unpauses
+//!                                    the PIN
+//! properpin-pinchecker status        prints the caller's PIN settings, and whether the PIN is
+//!                                    enabled, paused or disabled
 //! ```
 //!
 //! The caller is always the real user id the kernel reports. The pinchecker never takes a user name or
@@ -37,17 +38,16 @@ use std::path::PathBuf;
 
 pub use properpin_core::PasswordCheck;
 use properpin_core::{
-    Clock, Error, Hasher, Judged, Log, MAX_INPUT_BYTES, Refusal, Secret, Store, describe_seconds, exit,
-    start_accepting_pin_after_password_unlock, try_unlock_with_pin,
+    Clock, Error, Hasher, Judged, Log, MAX_INPUT_BYTES, Secret, Store, exit, housekeeping_after_password_unlock, try_unlock_with_pin,
 };
 pub use properpin_sys::UnixChkpwd;
-use properpin_sys::{Account, UserFiles, Yescrypt};
+use properpin_sys::{Account, UserFiles};
 
 /// What the caller asks for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Request {
     Check,
-    StartAcceptingPin,
+    Housekeeping,
     Status,
 }
 
@@ -55,7 +55,7 @@ impl Request {
     pub fn parse(word: &str) -> Option<Self> {
         match word {
             "check" => Some(Self::Check),
-            "start-accepting-pin" => Some(Self::StartAcceptingPin),
+            "housekeeping" => Some(Self::Housekeeping),
             "status" => Some(Self::Status),
             _ => None,
         }
@@ -74,22 +74,19 @@ pub struct Places {
     pub etc: PathBuf,
     /// Who must own the files under `etc`: root once installed.
     pub etc_owner: u32,
-    /// `/run/properpin` once installed: every user's state, in one directory.
-    pub run_dir: PathBuf,
-    /// Who must own `run_dir`: root once installed.
-    pub run_owner: u32,
-    /// The group `run_dir` must have: the one the pinchecker runs with, so a pinchecker installed without
-    /// its setgid bit runs with the caller's group and refuses.
-    pub run_group: u32,
-    /// `/var/lib/properpin` once installed: every user's budget, on disk. Same owner and group as
-    /// `run_dir`.
+    /// `/var/lib/properpin` once installed: every user's budget, in one directory on disk.
     pub budget_dir: PathBuf,
+    /// Who must own `budget_dir`: root once installed.
+    pub budget_owner: u32,
+    /// The group `budget_dir` must have: the one the pinchecker runs with, so a pinchecker installed
+    /// without its setgid bit runs with the caller's group and refuses.
+    pub budget_group: u32,
 }
 
 impl Places {
     fn files(&self, caller: &Account) -> Result<UserFiles, Error> {
         let files = UserFiles::new(&self.etc, self.etc_owner, &caller.name, caller.uid)?;
-        Ok(files.with_runtime(&self.run_dir, self.run_owner, self.run_group).with_budget(&self.budget_dir, self.run_owner, self.run_group))
+        Ok(files.with_budget(&self.budget_dir, self.budget_owner, self.budget_group))
     }
 }
 
@@ -123,7 +120,7 @@ pub struct Context<'a, H, C, P, L: ?Sized> {
     pub log: &'a L,
 }
 
-/// Answer one request from `caller`. `typed` is what came on stdin, for `check` and `start-accepting-pin`.
+/// Answer one request from `caller`. `typed` is what came on stdin, for `check` and `housekeeping`.
 /// Every outcome is logged here, and every error is a refusal.
 pub fn serve<H: Hasher, C: Clock, P: PasswordCheck, L: Log + ?Sized>(
     request: Request,
@@ -140,13 +137,13 @@ pub fn serve<H: Hasher, C: Clock, P: PasswordCheck, L: Log + ?Sized>(
     };
     let result = match request {
         Request::Check => check_pin(&files, caller, typed, context),
-        Request::StartAcceptingPin => start_accepting_pin(&files, caller, typed, context),
+        Request::Housekeeping => housekeeping(&files, caller, typed, context),
         Request::Status => status(&files, context.clock).map(|output| Reply { code: exit::YES, output }),
     };
     result.unwrap_or_else(|error| {
         let what = match request {
             Request::Check => "PIN refused",
-            Request::StartAcceptingPin => "can't start accepting the PIN",
+            Request::Housekeeping => "housekeeping failed",
             Request::Status => "status failed",
         };
         context.log.log(&format!("{}: {what}: {error}", caller.name));
@@ -172,14 +169,11 @@ fn log_judged<L: Log + ?Sized>(judged: &Judged, caller: &Account, log: &L) {
     }
 }
 
-/// Start accepting the PIN, but only for the right password: `start-accepting-pin` is open to
-/// everything the user runs, so without this check any program could make the lock screen accept
-/// the PIN at will, reset the failures in a row, and
-/// forgive the budget's failures as often as it liked. `unix_chkpwd` checks it, as pam_unix just
-/// did. The password then decrypts the pepper, which the PIN's hash needs. Nothing can tell
-/// whether that pepper is right: after a password change it isn't, and the PIN just stops
-/// matching until `properpin set`.
-fn start_accepting_pin<H, C: Clock, P: PasswordCheck, L: Log + ?Sized>(
+/// After a password unlock, but only for the right password: `housekeeping` is open to everything
+/// the user runs, so without this check any program could unpause the PIN, start its consecutive
+/// count over and forgive the budget's failures as often as it liked. `unix_chkpwd` checks it, as
+/// pam_unix just did.
+fn housekeeping<H, C: Clock, P: PasswordCheck, L: Log + ?Sized>(
     files: &UserFiles,
     caller: &Account,
     typed: &Secret,
@@ -187,30 +181,26 @@ fn start_accepting_pin<H, C: Clock, P: PasswordCheck, L: Log + ?Sized>(
 ) -> Result<Reply, Error> {
     let settings = files.settings()?;
     if settings.pin_hash.is_empty() {
-        context.log.log(&format!("{}: no PIN is set, so there is none to start accepting", caller.name));
+        context.log.log(&format!("{}: no PIN is set, so there is nothing to do", caller.name));
         return Ok(Reply::code(exit::NO));
     }
     if typed.as_bytes().is_empty() || !context.password.matches(&caller.name, typed)? {
         context.log.log(&format!("{}: wrong password, nothing changed", caller.name));
         return Ok(Reply::code(exit::NO));
     }
-    // Before the lock: the key takes about a tenth of a second at the default cost.
-    let pepper =
-        Yescrypt.unseal(&settings.cleartext_salt_for_deriving_pepper_decryption_key, &settings.encrypted_pepper, typed.as_bytes())?;
-    let judged = start_accepting_pin_after_password_unlock(files, context.clock, pepper)?;
+    let judged = housekeeping_after_password_unlock(files, context.clock)?;
     log_judged(&judged, caller, context.log);
-    if let Some(limit) = judged.disabled {
-        context.log.log(&format!(
-            "{}: password correct, but the PIN stays disabled after {limit}; sudo properpin enable turns it back on",
+    match judged.disabled {
+        Some(limit) => context.log.log(&format!(
+            "{}: password correct, but the PIN stays disabled after {limit}; sudo properpin enable or set turns it back on",
             caller.name
-        ));
-        return Ok(Reply::code(exit::NO));
+        )),
+        None => context.log.log(&format!("{}: password correct, PIN enabled", caller.name)),
     }
-    context.log.log(&format!("{}: password correct, accepting the PIN for the next {}h", caller.name, settings.expiry_hours));
     Ok(Reply::code(exit::YES))
 }
 
-/// What is set, which rules apply, and whether the lock screen is accepting the PIN right now.
+/// What is set, which rules apply, and whether the PIN is enabled, paused or disabled right now.
 fn status(files: &UserFiles, clock: &impl Clock) -> Result<String, Error> {
     let mut out = format!("user       {}\n", files.user());
     let settings = match files.settings() {
@@ -219,25 +209,15 @@ fn status(files: &UserFiles, clock: &impl Clock) -> Result<String, Error> {
         Err(error) => return Ok(out + &format!("PIN        unusable: {error}\n")),
     };
     out += &format!("PIN        set, in {}\n", files.user_file().display());
-    out += &format!(
-        "policy     accepting the PIN for {}h after a password unlock, until {} failures in a row\n",
-        settings.expiry_hours, settings.max_failures
-    );
+    out += &format!("policy     paused after {} consecutive failures, until a password unlock\n", settings.max_failures);
     let mut rules = format!("{} to {} characters", settings.min_pin_length, settings.max_pin_length);
     if settings.min_letters > 0 {
         rules += &format!(", {} English letters", settings.min_letters);
     }
-    out += &format!("set rules  {rules}, yescrypt cost {}, pepper sealed at cost {}\n", settings.hash_cost, settings.seal_cost);
-    if settings.cleartext_salt_for_deriving_pepper_decryption_key.is_empty() || settings.encrypted_pepper.is_empty() {
-        out += "pepper     none: the lock screen can never start accepting this PIN; sudo properpin set makes a new one\n";
-    }
-    out += "note       a password change stops the PIN from working, and nothing can tell why; sudo properpin set makes a new one\n";
-    if files.runtime_on_tmpfs() == Some(false) {
-        out += "warning    the run directory is not on tmpfs, so the pepper kept for accepting the PIN may be written to a disk\n";
-    }
+    out += &format!("set rules  {rules}, yescrypt cost {}\n", settings.hash_cost);
     // Judged as the next attempt would, without saving: status changes nothing.
     let mut budget = files.load_budget()?;
-    let judged = budget.judge(clock.wall()?, &settings);
+    let judged = budget.judge(clock.now()?, &settings);
     let counts = judged.counts;
     out += &format!(
         "budget     concerning failures: {} within 24 hours (of {}), {} within 7 days (of {}), {} since the PIN was set (of {}); \
@@ -250,28 +230,13 @@ fn status(files: &UserFiles, clock: &impl Clock) -> Result<String, Error> {
         settings.max_concerning_total,
         counts.pending
     );
-    let state = files.load_state();
-    let now = clock.now()?;
-    let refusal = match judged.disabled {
-        Some(limit) => Some(Refusal::Disabled(limit)),
-        None => settings.refusal(state.as_ref(), &clock.boot_id()?, now),
+    out += &match judged.disabled {
+        Some(limit) => format!("right now  disabled after {limit}; sudo properpin enable or set turns it back on\n"),
+        None if budget.paused(&settings) => {
+            format!("right now  paused after {} consecutive failures; unlocking with the password resumes it\n", budget.consecutive)
+        }
+        None => format!("right now  enabled, {} of {} consecutive failures so far\n", budget.consecutive, settings.max_failures),
     };
-    match (refusal, state) {
-        (Some(refusal @ Refusal::Disabled(_)), _) => {
-            out += &format!("right now  password required: {refusal}; sudo properpin enable or set turns it back on\n")
-        }
-        (Some(refusal), _) => out += &format!("right now  password required: {refusal}\n"),
-        (None, Some(state)) => {
-            let left = settings.expiry_whole_seconds().saturating_sub(now - state.accepting_pin_since);
-            out += &format!(
-                "right now  accepting the PIN for another {}, {} of {} failures so far\n",
-                describe_seconds(left),
-                state.failures,
-                settings.max_failures
-            );
-        }
-        (None, None) => out += "right now  password required\n",
-    }
     Ok(out)
 }
 
@@ -303,7 +268,7 @@ mod tests {
     use std::fs::{self, Permissions};
     use std::os::unix::fs::PermissionsExt;
 
-    use properpin_sys::{BootClock, Yescrypt, current_egid, current_uid};
+    use properpin_sys::{SystemClock, Yescrypt, current_egid, current_uid};
 
     use super::*;
 
@@ -322,19 +287,16 @@ mod tests {
         let places = Places {
             etc: dir.path().join("etc"),
             etc_owner: uid,
-            run_dir: dir.path().join("run"),
-            run_owner: uid,
-            run_group: current_egid(),
             budget_dir: dir.path().join("var"),
+            budget_owner: uid,
+            budget_group: current_egid(),
         };
-        for shared in [&places.run_dir, &places.budget_dir] {
-            fs::create_dir(shared).unwrap();
-            fs::set_permissions(shared, Permissions::from_mode(0o1770)).unwrap();
-        }
-        // alice is whoever runs the tests: her counts files must be her own, and they are the test's.
+        fs::create_dir(&places.budget_dir).unwrap();
+        fs::set_permissions(&places.budget_dir, Permissions::from_mode(0o1770)).unwrap();
+        // alice is whoever runs the tests: her budget must be her own, and it is the test's.
         let caller = Account { name: "alice".into(), uid, gid: current_egid() };
         let sandbox = Sandbox { _dir: dir, places, caller };
-        sandbox.write_user_file(&Yescrypt.new_pin(PIN, PASSWORD.as_bytes(), 4, 1).unwrap().lines());
+        sandbox.write_user_file(&format!("hash = {}\n", Yescrypt.hash(PIN, 4).unwrap()));
         sandbox
     }
 
@@ -351,7 +313,7 @@ mod tests {
         }
 
         fn ask_as(&self, caller: &Account, request: Request, typed: &str) -> (u8, String, String) {
-            self.ask_with(&BootClock, caller, request, typed)
+            self.ask_with(&SystemClock, caller, request, typed)
         }
 
         fn ask_with(&self, clock: &impl Clock, caller: &Account, request: Request, typed: &str) -> (u8, String, String) {
@@ -366,22 +328,20 @@ mod tests {
             fs::write(&path, text).unwrap();
             fs::set_permissions(&path, Permissions::from_mode(0o644)).unwrap();
         }
+
+        fn budget_file(&self) -> std::path::PathBuf {
+            self.places.budget_dir.join(format!("{}.budget", self.caller.uid))
+        }
     }
 
-    /// The real boot clock, with the wall clock moved on by `ahead` seconds.
+    /// The real clock, moved on by `ahead` seconds.
     struct Later {
         ahead: u64,
     }
 
     impl Clock for Later {
-        fn boot_id(&self) -> Result<String, Error> {
-            BootClock.boot_id()
-        }
         fn now(&self) -> Result<u64, Error> {
-            BootClock.now()
-        }
-        fn wall(&self) -> Result<u64, Error> {
-            Ok(BootClock.wall()? + self.ahead)
+            Ok(SystemClock.now()? + self.ahead)
         }
     }
 
@@ -394,106 +354,65 @@ mod tests {
         }
     }
 
-    /// Accepts `PASSWORD` for alice, the way `unix_chkpwd` would, and `NEW_PASSWORD` too, the
-    /// password she changes to in one test.
+    /// Accepts `PASSWORD` for alice, the way `unix_chkpwd` would.
     struct Password;
-
-    const NEW_PASSWORD: &str = "a new password after the PIN was set";
 
     impl PasswordCheck for Password {
         fn matches(&self, user: &str, password: &Secret) -> Result<bool, Error> {
-            Ok(user == "alice" && [PASSWORD.as_bytes(), NEW_PASSWORD.as_bytes()].contains(&password.as_bytes()))
+            Ok(user == "alice" && password.as_bytes() == PASSWORD.as_bytes())
         }
-    }
-
-    #[test]
-    fn after_a_password_change_the_pin_never_matches() {
-        let sandbox = sandbox();
-        assert_eq!(sandbox.ask(Request::StartAcceptingPin, NEW_PASSWORD).0, exit::YES);
-        let (code, _, log) = sandbox.ask(Request::Check, PIN);
-        assert_eq!((code, log.as_str()), (exit::NO, "alice: not the PIN, failure 1 of 3"));
-        assert!(sandbox.ask(Request::Status, "").1.contains("a password change stops the PIN from working"));
-        sandbox.ask(Request::StartAcceptingPin, PASSWORD);
-        assert_eq!(sandbox.ask(Request::Check, PIN).0, exit::YES);
-    }
-
-    #[test]
-    fn a_pin_without_a_pepper_is_never_accepted() {
-        let sandbox = sandbox();
-        sandbox.write_user_file(&format!("hash = {}\n", Yescrypt.hash(PIN, 4).unwrap()));
-        let (code, _, log) = sandbox.ask(Request::StartAcceptingPin, PASSWORD);
-        assert_eq!(code, exit::BROKEN);
-        assert!(log.contains("no encrypted pepper") && log.contains("sudo properpin set makes a new PIN"), "{log}");
-        assert_eq!(sandbox.ask(Request::Check, PIN).0, exit::NO);
-        assert!(sandbox.ask(Request::Status, "").1.contains("pepper     none: the lock screen can never start accepting this PIN"));
-    }
-
-    #[test]
-    fn the_state_holds_the_pepper_only_while_accepting_the_pin() {
-        let sandbox = sandbox();
-        let state = sandbox.places.run_dir.join(format!("{}.state", sandbox.caller.uid));
-        sandbox.ask(Request::StartAcceptingPin, PASSWORD);
-        assert!(fs::read_to_string(&state).unwrap().contains("pepper = "));
-        for wrong in ["1111", "2222", "3333"] {
-            sandbox.ask(Request::Check, wrong);
-        }
-        assert!(!fs::read_to_string(&state).unwrap().contains("pepper"));
-        let (code, _, log) = sandbox.ask(Request::Check, PIN);
-        assert_eq!((code, log.as_str()), (exit::NO, "alice: PIN refused, password required: 3 failures in a row"));
     }
 
     #[test]
     fn the_whole_cycle() {
         let sandbox = sandbox();
         let (code, _, log) = sandbox.ask(Request::Check, PIN);
-        assert_eq!((code, log.as_str()), (exit::NO, "alice: PIN refused, password required: no password unlock since boot"));
-        assert_eq!(sandbox.ask(Request::StartAcceptingPin, PASSWORD).0, exit::YES);
-        let (code, _, log) = sandbox.ask(Request::Check, PIN);
         assert_eq!((code, log.as_str()), (exit::YES, "alice: unlocked with the PIN"));
-        for wrong in ["1111", "2222", "3333"] {
+        for wrong in ["1111", "2222"] {
             assert_eq!(sandbox.ask(Request::Check, wrong).0, exit::NO);
         }
+        let (code, _, log) = sandbox.ask(Request::Check, "3333");
+        assert_eq!((code, log.as_str()), (exit::NO, "alice: not the PIN, consecutive failure 3 of 3; PIN paused, password required"));
         let (code, _, log) = sandbox.ask(Request::Check, PIN);
-        assert_eq!((code, log.as_str()), (exit::NO, "alice: PIN refused, password required: 3 failures in a row"));
-    }
-
-    #[test]
-    fn a_wrong_password_never_starts_accepting_the_pin() {
-        let sandbox = sandbox();
-        for wrong in ["", "wrong", "correct horse battery stapl"] {
-            let (code, _, log) = sandbox.ask(Request::StartAcceptingPin, wrong);
-            assert_eq!(code, exit::NO, "{wrong:?}");
-            assert!(log.contains("wrong password, nothing changed"), "{log}");
-        }
-        assert_eq!(sandbox.ask(Request::Check, PIN).0, exit::NO);
-    }
-
-    #[test]
-    fn accepting_the_pin_again_after_failures_needs_the_password_too() {
-        let sandbox = sandbox();
-        sandbox.ask(Request::StartAcceptingPin, PASSWORD);
-        for wrong in ["1111", "2222", "3333"] {
-            sandbox.ask(Request::Check, wrong);
-        }
-        sandbox.ask(Request::StartAcceptingPin, "not the password");
-        assert_eq!(sandbox.ask(Request::Check, PIN).0, exit::NO, "a rejected password must not reset the failures");
-        sandbox.ask(Request::StartAcceptingPin, PASSWORD);
+        assert_eq!((code, log.as_str()), (exit::NO, "alice: PIN paused after 3 consecutive failures, password required"));
+        let (code, _, log) = sandbox.ask(Request::Housekeeping, PASSWORD);
+        assert_eq!((code, log.as_str()), (exit::YES, "alice: password correct, PIN enabled"));
         assert_eq!(sandbox.ask(Request::Check, PIN).0, exit::YES);
     }
 
     #[test]
-    fn without_a_pin_there_is_nothing_to_start_accepting() {
+    fn the_budget_holds_the_consecutive_count_on_disk() {
+        let sandbox = sandbox();
+        sandbox.ask(Request::Check, "1111");
+        assert!(fs::read_to_string(sandbox.budget_file()).unwrap().starts_with("consecutive = 1\n"));
+    }
+
+    #[test]
+    fn a_wrong_password_changes_nothing() {
+        let sandbox = sandbox();
+        for wrong in ["1111", "2222", "3333"] {
+            sandbox.ask(Request::Check, wrong);
+        }
+        for wrong in ["", "wrong", "correct horse battery stapl"] {
+            let (code, _, log) = sandbox.ask(Request::Housekeeping, wrong);
+            assert_eq!(code, exit::NO, "{wrong:?}");
+            assert!(log.contains("wrong password, nothing changed"), "{log}");
+        }
+        assert_eq!(sandbox.ask(Request::Check, PIN).0, exit::NO, "a rejected password must not unpause the PIN");
+    }
+
+    #[test]
+    fn without_a_pin_there_is_nothing_to_do() {
         let sandbox = sandbox();
         fs::remove_file(sandbox.places.etc.join("users/alice")).unwrap();
-        let (code, _, log) = sandbox.ask(Request::StartAcceptingPin, PASSWORD);
-        assert_eq!((code, log.as_str()), (exit::NO, "alice: no PIN is set, so there is none to start accepting"));
-        assert_eq!(fs::read_dir(&sandbox.places.run_dir).unwrap().count(), 0, "nothing written");
+        let (code, _, log) = sandbox.ask(Request::Housekeeping, PASSWORD);
+        assert_eq!((code, log.as_str()), (exit::NO, "alice: no PIN is set, so there is nothing to do"));
+        assert_eq!(fs::read_dir(&sandbox.places.budget_dir).unwrap().count(), 0, "nothing written");
     }
 
     #[test]
     fn each_caller_gets_only_their_own_pin_and_counts() {
         let sandbox = sandbox();
-        sandbox.ask(Request::StartAcceptingPin, PASSWORD);
         let bob = Account { name: "bob".into(), uid: sandbox.caller.uid + 1, gid: sandbox.caller.gid };
         let (code, _, log) = sandbox.ask_as(&bob, Request::Check, PIN);
         assert_eq!((code, log.as_str()), (exit::NO, "bob: no PIN is set, refused"));
@@ -506,15 +425,14 @@ mod tests {
     #[test]
     fn broken_files_refuse() {
         let sandbox = sandbox();
-        sandbox.ask(Request::StartAcceptingPin, PASSWORD);
         fs::set_permissions(sandbox.places.etc.join("users/alice"), Permissions::from_mode(0o644)).unwrap();
         let (code, _, log) = sandbox.ask(Request::Check, PIN);
         assert_eq!(code, exit::BROKEN);
         assert!(log.contains("alice: PIN refused:") && log.contains("readable by others"), "{log}");
 
         let sandbox = self::sandbox();
-        fs::set_permissions(&sandbox.places.run_dir, Permissions::from_mode(0o755)).unwrap();
-        let (code, _, log) = sandbox.ask(Request::StartAcceptingPin, PASSWORD);
+        fs::set_permissions(&sandbox.places.budget_dir, Permissions::from_mode(0o755)).unwrap();
+        let (code, _, log) = sandbox.ask(Request::Housekeeping, PASSWORD);
         assert_eq!(code, exit::BROKEN);
         assert!(log.contains("mode 0755, not 1770"), "{log}");
     }
@@ -548,26 +466,23 @@ mod tests {
         let sandbox = sandbox();
         let (code, output, _) = sandbox.ask(Request::Status, "");
         assert_eq!(code, exit::YES);
-        assert!(output.contains("PIN        set") && output.contains("no password unlock since boot"), "{output}");
-        sandbox.ask(Request::StartAcceptingPin, PASSWORD);
-        sandbox.ask(Request::Check, "1111");
+        assert!(output.contains("PIN        set") && output.contains("right now  enabled, 0 of 3 consecutive failures so far"), "{output}");
+        assert!(output.contains("policy     paused after 3 consecutive failures, until a password unlock"), "{output}");
+        for wrong in ["1111", "2222", "3333"] {
+            sandbox.ask(Request::Check, wrong);
+        }
         let output = sandbox.ask(Request::Status, "").1;
-        assert!(
-            output.contains("accepting the PIN for another 7h59m, 1 of 3 failures so far")
-                || output.contains("accepting the PIN for another 8h00m"),
-            "{output}"
-        );
+        assert!(output.contains("right now  paused after 3 consecutive failures; unlocking with the password resumes it"), "{output}");
         fs::remove_file(sandbox.places.etc.join("users/alice")).unwrap();
         assert!(sandbox.ask(Request::Status, "").1.contains("none set"));
     }
 
     /// Guesses nobody forgives, a wrong password included, are judged later, logged, and disable
-    /// the PIN; the password then no longer starts accepting it.
+    /// the PIN; the password then doesn't bring it back.
     #[test]
     fn concerning_failures_are_logged_and_disable_the_pin() {
         let sandbox = sandbox();
         let alice = &sandbox.caller;
-        sandbox.ask(Request::StartAcceptingPin, PASSWORD);
         for wrong in ["1111", "2222", "not the password at all"] {
             sandbox.ask(Request::Check, wrong);
         }
@@ -577,7 +492,7 @@ mod tests {
         assert!(log.contains("3 failure(s) not followed by an unlock in time, now concerning: 3 within 24 hours"), "{log}");
         let output = sandbox.ask_with(&Later { ahead: 120 }, alice, Request::Status, "").1;
         assert!(
-            output.contains("concerning failures: 3 within 24 hours (of 10), 3 within 7 days (of 20), 3 since the PIN was set (of 100)"),
+            output.contains("concerning failures: 3 within 24 hours (of 10), 3 within 7 days (of 25), 3 since the PIN was set (of 60)"),
             "{output}"
         );
 
@@ -585,33 +500,31 @@ mod tests {
         sandbox.ask_with(&Later { ahead: 120 }, alice, Request::Check, "3333");
         let (code, _, log) = sandbox.ask_with(&Later { ahead: 300 }, alice, Request::Check, PIN);
         assert_eq!(code, exit::NO);
-        assert!(log.contains("PIN disabled after 4 concerning failures within 24 hours"), "{log}");
-        assert!(log.contains("PIN refused, password required: the PIN is disabled after 4 concerning failures"), "{log}");
-        let (code, _, log) = sandbox.ask_with(&Later { ahead: 300 }, alice, Request::StartAcceptingPin, PASSWORD);
-        assert_eq!((code, log.contains("password correct, but the PIN stays disabled after")), (exit::NO, true), "{log}");
+        assert!(log.contains("PIN disabled after 4 concerning failures within 24 hours; sudo properpin enable or set"), "{log}");
+        assert!(log.contains("alice: PIN disabled after 4 concerning failures within 24 hours, password required"), "{log}");
+        let (code, _, log) = sandbox.ask_with(&Later { ahead: 300 }, alice, Request::Housekeeping, PASSWORD);
+        assert_eq!((code, log.contains("password correct, but the PIN stays disabled after")), (exit::YES, true), "{log}");
         let output = sandbox.ask_with(&Later { ahead: 300 }, alice, Request::Status, "").1;
-        assert!(output.contains("sudo properpin enable or set turns it back on"), "{output}");
+        assert!(output.contains("right now  disabled after 4 concerning failures within 24 hours; sudo properpin enable"), "{output}");
     }
 
     #[test]
     fn typos_followed_by_the_pin_or_the_password_are_forgiven() {
         let sandbox = sandbox();
-        sandbox.ask(Request::StartAcceptingPin, PASSWORD);
         sandbox.ask(Request::Check, "1111");
         sandbox.ask(Request::Check, PIN);
         sandbox.ask(Request::Check, "correct horse battery stapl");
         sandbox.ask(Request::Check, PASSWORD);
-        sandbox.ask(Request::StartAcceptingPin, PASSWORD);
+        sandbox.ask(Request::Housekeeping, PASSWORD);
         let output = sandbox.ask_with(&Later { ahead: 3600 }, &sandbox.caller, Request::Status, "").1;
-        assert!(output.contains("0 since the PIN was set (of 100); 0 waiting to be forgiven"), "{output}");
+        assert!(output.contains("0 since the PIN was set (of 60); 0 waiting to be forgiven"), "{output}");
     }
 
     #[test]
     fn a_damaged_budget_refuses_the_pin() {
         let sandbox = sandbox();
-        sandbox.ask(Request::StartAcceptingPin, PASSWORD);
-        let budget = sandbox.places.budget_dir.join(format!("{}.budget", sandbox.caller.uid));
-        fs::write(&budget, "garbage\n").unwrap();
+        fs::write(sandbox.budget_file(), "garbage\n").unwrap();
+        fs::set_permissions(sandbox.budget_file(), Permissions::from_mode(0o600)).unwrap();
         let (code, _, log) = sandbox.ask(Request::Check, PIN);
         assert_eq!(code, exit::BROKEN);
         assert!(log.contains("not a valid budget"), "{log}");
@@ -630,7 +543,8 @@ mod tests {
     #[test]
     fn requests_are_exact_words() {
         assert_eq!(Request::parse("check"), Some(Request::Check));
-        for word in ["Check", "check ", "", "--check", "set"] {
+        assert_eq!(Request::parse("housekeeping"), Some(Request::Housekeeping));
+        for word in ["Check", "check ", "", "--check", "set", "start-accepting-pin"] {
             assert_eq!(Request::parse(word), None, "{word:?}");
         }
     }

@@ -14,10 +14,10 @@ pub struct Args {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
-    /// Before pam_unix: is the typed input the PIN, and is the lock screen accepting the PIN?
+    /// Before pam_unix: is the typed input the PIN, and is the PIN enabled?
     Check,
-    /// After a successful pam_unix: start accepting the PIN.
-    StartAcceptingPin,
+    /// After a successful pam_unix: forgive the user's own recent failures, and unpause the PIN.
+    Housekeeping,
 }
 
 impl Mode {
@@ -25,7 +25,7 @@ impl Mode {
     pub fn request(self) -> &'static str {
         match self {
             Self::Check => "check",
-            Self::StartAcceptingPin => "start-accepting-pin",
+            Self::Housekeeping => "housekeeping",
         }
     }
 }
@@ -38,7 +38,7 @@ impl Args {
         for word in words {
             match word.split_once('=') {
                 None if word == "check" => mode = Some(Mode::Check),
-                None if word == "start-accepting-pin" => mode = Some(Mode::StartAcceptingPin),
+                None if word == "housekeeping" => mode = Some(Mode::Housekeeping),
                 None if word == "test_panic" => test_panic = true,
                 Some(("pinchecker", path)) if path.starts_with('/') => pinchecker = Some(PathBuf::from(path)),
                 Some(("pinchecker", path)) => return Err(format!("pinchecker={path} is not an absolute path")),
@@ -48,10 +48,10 @@ impl Args {
                 _ => return Err(format!("unknown argument {word:?}")),
             }
         }
-        let mode = mode.ok_or("no mode: expected check or start-accepting-pin")?;
+        let mode = mode.ok_or("no mode: expected check or housekeeping")?;
         match (mode, &config) {
             (Mode::Check, None) => return Err("config= is required with check".into()),
-            (Mode::StartAcceptingPin, Some(_)) => return Err("config= is for check only".into()),
+            (Mode::Housekeeping, Some(_)) => return Err("config= is for check only".into()),
             _ => {}
         }
         Ok(Self { mode, pinchecker: pinchecker.ok_or("pinchecker= is required")?, config, log, test_panic })
@@ -77,8 +77,8 @@ mod tests {
                 test_panic: false
             }
         );
-        let args = Args::parse("start-accepting-pin pinchecker=/usr/local/libexec/properpin/properpin-pinchecker".split(' ')).unwrap();
-        assert_eq!((args.mode, args.config), (Mode::StartAcceptingPin, None));
+        let args = Args::parse("housekeeping pinchecker=/usr/local/libexec/properpin/properpin-pinchecker".split(' ')).unwrap();
+        assert_eq!((args.mode, args.config), (Mode::Housekeeping, None));
     }
 
     #[test]
@@ -91,7 +91,8 @@ mod tests {
             "check pinchecker=/h config=/c debug",
             "check pinchecker=/h",
             "check pinchecker=/h config=c",
-            "start-accepting-pin pinchecker=/h config=/c",
+            "housekeeping pinchecker=/h config=/c",
+            "start-accepting-pin pinchecker=/h",
         ] {
             assert!(Args::parse(line.split(' ')).is_err(), "{line}");
         }

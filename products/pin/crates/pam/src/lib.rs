@@ -3,13 +3,13 @@
 //! Two lines of `/etc/pam.d/kde` call it, around a direct `pam_unix` line (see `pam/kde-auth.pam`):
 //!
 //! ```text
-//! check                Is the typed input the PIN, and is the lock screen accepting the PIN right
-//!                      now? Success unlocks, but never sooner than
-//!                      min_milliseconds_before_pin_unlock after the module was called; anything
-//!                      else returns PAM_IGNORE at once, so pam_unix checks the same input as the
-//!                      password.
-//! start-accepting-pin  The password just succeeded: start accepting the PIN, with no failures,
-//!                      for the full expiry_hours.
+//! check         Is the typed input the PIN, and is the PIN enabled? Success unlocks, but never
+//!               sooner than min_milliseconds_before_pin_unlock after the module was called;
+//!               anything else returns PAM_IGNORE at once, so pam_unix checks the same input as the
+//!               password.
+//! housekeeping  The password just succeeded: forgive the failures of the last moments as the
+//!               user's own, the password itself among them, and start the consecutive count over,
+//!               which unpauses the PIN.
 //! ```
 //!
 //! It decides nothing itself. The hashes and the counts belong to the `properpin` group, out of
@@ -21,7 +21,7 @@
 //! ```text
 //! pinchecker=PATH    the pinchecker (/usr/local/libexec/properpin/properpin-pinchecker)   required
 //! config=PATH    the global config (/etc/properpin/config), for how long a     required with check,
-//!                correct PIN takes at least                                    refused with start-accepting-pin
+//!                correct PIN takes at least                                    refused with housekeeping
 //! log=FILE       append the module's own log lines here instead of syslog (tests)
 //! test_panic     panic on purpose while SIGCHLD is changed, to prove a panic becomes PAM_IGNORE
 //!                and puts SIGCHLD back (tests)

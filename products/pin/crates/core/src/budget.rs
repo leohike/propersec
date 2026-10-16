@@ -1,14 +1,16 @@
-//! The failures that outlive a boot, and the limits that disable the PIN.
+//! One user's failures, the only state properpin keeps: the consecutive count that pauses the PIN,
+//! and the limits that disable it. Kept on disk, so rebooting changes nothing.
 //!
-//! Every input typed at the lock screen that doesn't unlock is a failure, wrong passwords included,
-//! except an empty one. A failure is forgiven when the correct PIN follows within
+//! Every input typed at the lock screen while the PIN is enabled that doesn't unlock is a failure,
+//! wrong passwords included, except an empty one. While the PIN is paused or disabled nothing is
+//! checked, so nothing is recorded. A failure is forgiven when the correct PIN follows within
 //! `forgive_before_correct_pin` seconds, or the correct password within
 //! `forgive_before_correct_password`: that was the user, mistyping. A failure nothing forgave in
 //! time is *concerning*. Too many concerning failures within 24 hours, within 7 days, or since the
 //! PIN was set, and the PIN is disabled until root turns it back on (`properpin enable`) or sets a
-//! new one. Rebooting changes nothing: the budget is kept on disk.
+//! new one.
 //!
-//! This bounds the slow attack the failures in a row can't: two wrong guesses, then waiting for
+//! This bounds the slow attack the consecutive count can't: two wrong guesses, then waiting for
 //! the user's next correct PIN to wipe them, again and again. The user's PIN comes too late to
 //! forgive the guesses, so each one counts.
 //!
@@ -19,7 +21,7 @@
 use std::fmt;
 
 use crate::Settings;
-use crate::state::digits;
+use crate::kv::digits;
 
 pub const DAY: u64 = 24 * 3600;
 pub const WEEK: u64 = 7 * DAY;
@@ -59,6 +61,10 @@ pub struct Disabled {
 /// One user's failures across boots. Kept as `key = value` lines; see [`Budget::format`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Budget {
+    /// Inputs checked against the hash, one after another, that weren't the PIN, since the last PIN unlock or
+    /// the last password unlock. At `max_failures`, the PIN is paused. A mistyped password counts
+    /// too, when it is short enough to be a PIN.
+    pub consecutive: u32,
     /// Failures not yet forgiven or judged, oldest first.
     pub pending: Vec<u64>,
     /// Concerning failures of the last 7 days, oldest first.
@@ -162,8 +168,13 @@ impl Budget {
         before - self.pending.len()
     }
 
-    /// What `properpin enable` leaves behind: not disabled, nothing pending or concerning, and the
-    /// total kept, so the lifetime limit still holds for this PIN.
+    /// Whether the PIN is paused: `max_failures` consecutive failures, until a password unlock.
+    pub fn paused(&self, settings: &Settings) -> bool {
+        self.consecutive >= settings.max_failures
+    }
+
+    /// What `properpin enable` leaves behind: not disabled or paused, nothing pending or
+    /// concerning, and the total kept, so the lifetime limit still holds for this PIN.
     pub fn enabled(&self) -> Self {
         Self { total: self.total, ..Self::default() }
     }
@@ -176,12 +187,12 @@ impl Budget {
         self.total = self.total.saturating_add(failures.len() as u64);
     }
 
-    /// The budget in `text`, or `None` unless it parses exactly. Unlike the per-boot state, a
-    /// damaged budget is an error for the caller: reading it as empty would hand out a fresh one.
+    /// The budget in `text`, or `None` unless it parses exactly. A damaged budget is an error for
+    /// the caller: reading it as empty would hand out a fresh one.
     pub fn parse(text: &str) -> Option<Self> {
         let pairs = crate::kv::parse(text, "budget").ok()?;
         let get = |key: &str| pairs.iter().find(|(name, _)| name == key).map(|(_, value)| value.as_str());
-        if pairs.len() != 4 {
+        if pairs.len() != 5 {
             return None;
         }
         let pending = times(get("pending")?, MAX_PENDING)?;
@@ -199,7 +210,7 @@ impl Budget {
             }
             _ => return None,
         };
-        Some(Self { pending, concerning, total: digits(get("total")?)?, disabled })
+        Some(Self { consecutive: digits(get("consecutive")?)?, pending, concerning, total: digits(get("total")?)?, disabled })
     }
 
     pub fn format(&self) -> String {
@@ -214,7 +225,8 @@ impl Budget {
             Some(Disabled { limit: Limit::Total(count), at }) => format!("total {count} {at}"),
         };
         format!(
-            "pending = {}\nconcerning = {}\ntotal = {}\ndisabled = {disabled}\n",
+            "consecutive = {}\npending = {}\nconcerning = {}\ntotal = {}\ndisabled = {disabled}\n",
+            self.consecutive,
             list(&self.pending),
             list(&self.concerning),
             self.total
@@ -300,11 +312,11 @@ mod tests {
             }
             disabled = disabled.or(budget.judge(T + day * DAY + 2000, &settings()).disabled);
         }
-        assert_eq!(disabled, Some(Limit::Week(20)));
+        assert_eq!(disabled, Some(Limit::Week(25)));
 
-        let mut budget = Budget { total: 99, ..Budget::default() };
+        let mut budget = Budget { total: 59, ..Budget::default() };
         budget.record_failure(T);
-        assert_eq!(budget.judge(T + 1000, &settings()).disabled, Some(Limit::Total(100)));
+        assert_eq!(budget.judge(T + 1000, &settings()).disabled, Some(Limit::Total(60)));
     }
 
     #[test]
@@ -349,36 +361,45 @@ mod tests {
 
     #[test]
     fn enabling_keeps_only_the_total() {
-        let budget = Budget { pending: vec![T], concerning: vec![T], total: 12, disabled: Some(Disabled { limit: Limit::Day(10), at: T }) };
+        let budget = Budget {
+            consecutive: 3,
+            pending: vec![T],
+            concerning: vec![T],
+            total: 12,
+            disabled: Some(Disabled { limit: Limit::Day(10), at: T }),
+        };
         assert_eq!(budget.enabled(), Budget { total: 12, ..Budget::default() });
     }
 
     #[test]
     fn round_trips_and_refuses_anything_else() {
         let budget = Budget {
+            consecutive: 2,
             pending: vec![T, T + 1],
             concerning: vec![T - 5],
             total: 7,
-            disabled: Some(Disabled { limit: Limit::Week(20), at: T }),
+            disabled: Some(Disabled { limit: Limit::Week(25), at: T }),
         };
         assert_eq!(Budget::parse(&budget.format()), Some(budget));
         assert_eq!(Budget::parse(&Budget::default().format()), Some(Budget::default()));
-        for limit in [Limit::Day(10), Limit::Week(20), Limit::Total(100)] {
+        for limit in [Limit::Day(10), Limit::Week(25), Limit::Total(60)] {
             let disabled = Budget { disabled: Some(Disabled { limit, at: T }), ..Budget::default() };
             assert_eq!(Budget::parse(&disabled.format()), Some(disabled));
         }
-        let valid = "pending = none\nconcerning = none\ntotal = 0\ndisabled = no\n";
+        let valid = "consecutive = 0\npending = none\nconcerning = none\ntotal = 0\ndisabled = no\n";
         assert!(Budget::parse(valid).is_some());
         for text in [
             "",
-            "pending = none\nconcerning = none\ntotal = 0\n",
-            "pending = none\nconcerning = none\ntotal = 0\ndisabled = no\nextra = 1\n",
-            "pending = 2 1\nconcerning = none\ntotal = 0\ndisabled = no\n",
-            "pending = 1  2\nconcerning = none\ntotal = 0\ndisabled = no\n",
-            "pending = none\nconcerning = -1\ntotal = 0\ndisabled = no\n",
-            "pending = none\nconcerning = none\ntotal = x\ndisabled = no\n",
-            "pending = none\nconcerning = none\ntotal = 0\ndisabled = yes\n",
-            "pending = none\nconcerning = none\ntotal = 0\ndisabled = month 1 2\n",
+            "pending = none\nconcerning = none\ntotal = 0\ndisabled = no\n",
+            "consecutive = -1\npending = none\nconcerning = none\ntotal = 0\ndisabled = no\n",
+            "consecutive = 0\npending = none\nconcerning = none\ntotal = 0\n",
+            "consecutive = 0\npending = none\nconcerning = none\ntotal = 0\ndisabled = no\nextra = 1\n",
+            "consecutive = 0\npending = 2 1\nconcerning = none\ntotal = 0\ndisabled = no\n",
+            "consecutive = 0\npending = 1  2\nconcerning = none\ntotal = 0\ndisabled = no\n",
+            "consecutive = 0\npending = none\nconcerning = -1\ntotal = 0\ndisabled = no\n",
+            "consecutive = 0\npending = none\nconcerning = none\ntotal = x\ndisabled = no\n",
+            "consecutive = 0\npending = none\nconcerning = none\ntotal = 0\ndisabled = yes\n",
+            "consecutive = 0\npending = none\nconcerning = none\ntotal = 0\ndisabled = month 1 2\n",
         ] {
             assert_eq!(Budget::parse(text), None, "{text:?}");
         }

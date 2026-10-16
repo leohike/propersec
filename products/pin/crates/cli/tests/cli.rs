@@ -9,7 +9,7 @@ use std::sync::OnceLock;
 
 use assert_cmd::Command;
 use properpin_core::{Budget, Disabled, Limit};
-use properpin_sys::current_uid;
+use properpin_sys::{Yescrypt, current_uid};
 
 const PASSWORD: &str = "correct horse battery staple";
 
@@ -19,19 +19,19 @@ impl Sandbox {
     fn new() -> Self {
         let sandbox = Self(tempfile::tempdir().unwrap());
         let root = sandbox.0.path();
-        for shared in ["run", "var"] {
-            fs::create_dir(root.join(shared)).unwrap();
-            // Set explicitly: the umask would strip the group's write bit from a mkdir mode.
-            fs::set_permissions(root.join(shared), Permissions::from_mode(0o1770)).unwrap();
-        }
+        fs::create_dir(root.join("var")).unwrap();
+        // Set explicitly: the umask would strip the group's write bit from a mkdir mode.
+        fs::set_permissions(root.join("var"), Permissions::from_mode(0o1770)).unwrap();
         let chkpwd = format!("#!/bin/bash\nIFS= read -r -d '' password\n[[ $password == '{PASSWORD}' ]]\n");
         script(&root.join("unix_chkpwd"), &chkpwd);
         let pinchecker = format!(
-            "#!/bin/sh\nexec {} \"$@\" --dev-etc {root}/etc --dev-run {root}/run --dev-budget {root}/var --dev-chkpwd {root}/unix_chkpwd --dev-log {root}/log\n",
+            "#!/bin/sh\nexec {} \"$@\" --dev-etc {root}/etc --dev-budget {root}/var --dev-chkpwd {root}/unix_chkpwd --dev-log {root}/log\n",
             built_pinchecker().display(),
             root = root.display()
         );
         script(&root.join("pinchecker"), &pinchecker);
+        let shadow = format!("root:!:20000::::::\n{}:{}:20000:0:99999:7:::\n", user(), Yescrypt.hash(PASSWORD, 4).unwrap());
+        fs::write(root.join("shadow"), shadow).unwrap();
         sandbox
     }
 
@@ -42,22 +42,17 @@ impl Sandbox {
             .env_remove("SUDO_USER")
             .env_remove("PKEXEC_UID")
             .args(["--etc", root.join("etc").to_str().unwrap(), "--pinchecker", root.join("pinchecker").to_str().unwrap()])
-            .args(["--budget", root.join("var").to_str().unwrap(), "--run", root.join("run").to_str().unwrap()])
-            .args(["--chkpwd", root.join("unix_chkpwd").to_str().unwrap()])
+            .args(["--budget", root.join("var").to_str().unwrap(), "--shadow", root.join("shadow").to_str().unwrap()])
             .args(["--owner", &current_uid().to_string(), "--group", &pinchecker_gid().to_string()])
             .args(args)
             .write_stdin(stdin)
             .assert()
     }
 
-    /// What the lock screen's start-accepting-pin line does after a correct password. It must succeed.
-    fn start_accepting_pin(&self) {
-        assert!(self.try_start_accepting_pin(), "the password didn't start accepting the PIN");
-    }
-
-    fn try_start_accepting_pin(&self) -> bool {
+    /// What the lock screen's housekeeping line does after a correct password. It must succeed.
+    fn housekeeping(&self) {
         let status = std::process::Command::new(self.0.path().join("pinchecker"))
-            .arg("start-accepting-pin")
+            .arg("housekeeping")
             .stdin(std::process::Stdio::piped())
             .spawn()
             .and_then(|mut child| {
@@ -65,7 +60,7 @@ impl Sandbox {
                 child.wait()
             })
             .unwrap();
-        status.success()
+        assert!(status.success(), "the housekeeping after the password failed");
     }
 
     /// Replace the user's budget with `budget`, the way the pinchecker would have written it.
@@ -80,9 +75,9 @@ impl Sandbox {
     }
 }
 
-/// What `set` reads: the PIN, the same again, and the password.
+/// What `set` reads: the PIN, and the same again.
 fn new_pin(pin: &str, again: &str) -> String {
-    format!("{pin}\n{again}\n{PASSWORD}\n")
+    format!("{pin}\n{again}\n")
 }
 
 /// What the lock screen's PIN line does: whether `pin` unlocks right now.
@@ -91,6 +86,10 @@ fn unlocks(sandbox: &Sandbox, pin: &str) -> bool {
         std::process::Command::new(sandbox.0.path().join("pinchecker")).arg("check").stdin(std::process::Stdio::piped()).spawn().unwrap();
     std::io::Write::write_all(&mut child.stdin.take().unwrap(), pin.as_bytes()).unwrap();
     child.wait().unwrap().success()
+}
+
+fn user() -> String {
+    properpin_sys::Account::by_uid(current_uid()).unwrap().name
 }
 
 fn stdout(assert: &assert_cmd::assert::Assert) -> String {
@@ -132,31 +131,23 @@ fn built_pinchecker() -> &'static Path {
 #[test]
 fn set_then_status_then_remove() {
     let sandbox = Sandbox::new();
-    sandbox.properpin(&["set"], &new_pin("4859", "4859")).success();
+    says(&sandbox.properpin(&["set"], &new_pin("4859", "4859")).success(), "The lock screen takes it from now on");
     let [file] = &sandbox.user_files()[..] else { panic!("expected one user file") };
     assert_eq!(fs::metadata(file).unwrap().mode() & 0o777, 0o640);
     assert_eq!(fs::metadata(file).unwrap().gid(), pinchecker_gid(), "readable by the pinchecker's group");
     let text = fs::read_to_string(file).unwrap();
-    assert!(
-        text.starts_with("hash = $y$")
-            && text.contains("\ncleartext_salt_for_deriving_pepper_decryption_key = $y$jCT$")
-            && text.contains("\nencrypted_pepper = "),
-        "{text}"
-    );
+    assert!(text.starts_with("hash = $y$j9T$") && text.lines().count() == 1, "{text}");
 
-    // Accepting the PIN at once: set had the password, so it had the pepper.
+    // The PIN works at once, with no password unlock first.
     let status = stdout(&sandbox.properpin(&["status"], "").success());
-    assert!(status.contains("PIN        set"), "{status}");
-    assert!(status.contains("accepting the PIN for another"), "{status}");
+    assert!(status.contains("PIN        set") && status.contains("right now  enabled"), "{status}");
     assert!(unlocks(&sandbox, "4859"));
     assert!(!unlocks(&sandbox, "4860"));
 
-    let state = sandbox.0.path().join(format!("run/{}.state", current_uid()));
-    assert!(state.exists());
     sandbox.properpin(&["remove"], "").success();
-    assert!(!state.exists(), "remove leaves no pepper in memory");
     sandbox.properpin(&["remove"], "").failure();
     assert!(stdout(&sandbox.properpin(&["status"], "").success()).contains("none set"));
+    assert!(!unlocks(&sandbox, "4859"));
 }
 
 #[test]
@@ -164,10 +155,7 @@ fn set_refuses_mismatches_and_weak_pins() {
     let sandbox = Sandbox::new();
     says(&sandbox.properpin(&["set"], &new_pin("4859", "4860")).failure(), "the two entries differ");
     says(&sandbox.properpin(&["set"], &new_pin("48", "48")).failure(), "at least 4 characters");
-    says(&sandbox.properpin(&["set"], "4859\n4859\nnot the password\n").failure(), "that is not the password of");
-    says(&sandbox.properpin(&["set"], "4859\n4859\n\n").failure(), "that is not the password of");
     assert!(sandbox.user_files().is_empty());
-    assert_eq!(fs::read_dir(sandbox.0.path().join("run")).unwrap().count(), 0, "no PIN accepted");
 }
 
 #[test]
@@ -176,21 +164,48 @@ fn the_pin_may_not_be_the_password() {
     let config = sandbox.0.path().join("etc/config");
     fs::create_dir_all(config.parent().unwrap()).unwrap();
     fs::write(&config, "max_pin_length = 64\n").unwrap();
-    says(&sandbox.properpin(&["set"], &format!("{PASSWORD}\n{PASSWORD}\n{PASSWORD}\n")).failure(), "the PIN must not be the password");
+    says(&sandbox.properpin(&["set"], &new_pin(PASSWORD, PASSWORD)).failure(), "the PIN must not be the password");
     assert!(sandbox.user_files().is_empty());
 }
 
-/// Seal cost 8 is the default; one PIN set at it unseals and unlocks like any other.
+/// Without a shadow entry, as with LDAP or systemd-homed, set warns and goes on.
 #[test]
-fn a_set_pin_survives_a_reboot_through_the_password() {
+fn without_a_shadow_entry_the_pin_is_not_compared() {
+    let sandbox = Sandbox::new();
+    fs::write(sandbox.0.path().join("shadow"), "root:!:20000::::::\n").unwrap();
+    says(&sandbox.properpin(&["set"], &new_pin("4859", "4859")).success(), "wasn't compared with the password");
+    assert!(unlocks(&sandbox, "4859"));
+}
+
+/// The same PIN again starts its budget over, so set asks first; without a terminal, only --yes
+/// goes on.
+#[test]
+fn setting_the_same_pin_again_asks_first() {
     let sandbox = Sandbox::new();
     sandbox.properpin(&["set"], &new_pin("4859", "4859")).success();
-    // A reboot empties the run directory.
-    for entry in fs::read_dir(sandbox.0.path().join("run")).unwrap() {
-        fs::remove_file(entry.unwrap().path()).unwrap();
+    sandbox.write_budget(&Budget { total: 7, ..Budget::default() });
+    let assert = sandbox.properpin(&["set"], &new_pin("4859", "4859")).failure();
+    says(&assert, "This is the PIN already set");
+    says(&assert, "forgets its 7 concerning failures");
+    says(&assert, "--yes skips the question");
+    assert!(stdout(&sandbox.properpin(&["status"], "").success()).contains("7 since the PIN was set"));
+    sandbox.properpin(&["set", "--yes"], &new_pin("4859", "4859")).success();
+    assert!(stdout(&sandbox.properpin(&["status"], "").success()).contains("0 since the PIN was set"));
+    // A different PIN needs no question.
+    sandbox.properpin(&["set"], &new_pin("4860", "4860")).success();
+}
+
+/// The PIN works right after set, and after a reboot too: nothing about it lives in memory.
+#[test]
+fn a_reboot_changes_nothing() {
+    let sandbox = Sandbox::new();
+    sandbox.properpin(&["set"], &new_pin("4859", "4859")).success();
+    for wrong in ["1111", "2222", "3333"] {
+        assert!(!unlocks(&sandbox, wrong));
     }
+    // Paused, and still paused whatever happens to memory; the password unpauses it.
     assert!(!unlocks(&sandbox, "4859"));
-    sandbox.start_accepting_pin();
+    sandbox.housekeeping();
     assert!(unlocks(&sandbox, "4859"));
 }
 
@@ -198,9 +213,8 @@ fn a_set_pin_survives_a_reboot_through_the_password() {
 fn status_shows_what_the_pinchecker_sees() {
     let sandbox = Sandbox::new();
     sandbox.properpin(&["set"], &new_pin("4859", "4859")).success();
-    sandbox.start_accepting_pin();
     let status = stdout(&sandbox.properpin(&["status"], "").success());
-    assert!(status.contains("accepting the PIN for another"), "{status}");
+    assert!(status.contains("enabled, 0 of 3 consecutive failures so far"), "{status}");
     fs::remove_file(sandbox.0.path().join("pinchecker")).unwrap();
     says(&sandbox.properpin(&["status"], "").failure(), "pinchecker");
 }
@@ -210,16 +224,7 @@ fn set_needs_the_pinchecker_group_to_exist() {
     let sandbox = Sandbox::new();
     let assert = Command::cargo_bin("properpin")
         .unwrap()
-        .args([
-            "--etc",
-            sandbox.0.path().join("etc").to_str().unwrap(),
-            "--pinchecker",
-            "/nonexistent",
-            "--budget",
-            "/nonexistent",
-            "--run",
-            "/nonexistent",
-        ])
+        .args(["--etc", sandbox.0.path().join("etc").to_str().unwrap(), "--pinchecker", "/nonexistent", "--budget", "/nonexistent"])
         .args(["--owner", &current_uid().to_string(), "--group", "no-such-group-properpin", "set"])
         .write_stdin(new_pin("4859", "4859"))
         .assert()
@@ -228,8 +233,8 @@ fn set_needs_the_pinchecker_group_to_exist() {
     assert!(sandbox.user_files().is_empty());
 }
 
-/// A PIN disabled by its budget: `enable` brings the same PIN back, until the total since it was
-/// set reaches its limit; then only `set` does, and starts the budget over.
+/// A PIN disabled by its budget: `enable` brings the same PIN back after asking, until the total
+/// since it was set reaches its limit; then only `set` does, and starts the budget over.
 #[test]
 fn enable_and_set_bring_a_disabled_pin_back() {
     let sandbox = Sandbox::new();
@@ -237,25 +242,30 @@ fn enable_and_set_bring_a_disabled_pin_back() {
     sandbox.properpin(&["set"], &new_pin("4859", "4859")).success();
     let disabled = Some(Disabled { limit: Limit::Day(10), at: 1_800_000_000 });
     sandbox.write_budget(&Budget { concerning: vec![1_800_000_000], total: 10, disabled, ..Budget::default() });
-    assert!(!sandbox.try_start_accepting_pin(), "a disabled PIN is never accepted");
-    says(&sandbox.properpin(&["status"], "").success(), "the PIN is disabled after 10 concerning failures within 24 hours");
+    assert!(!unlocks(&sandbox, "4859"), "a disabled PIN never unlocks");
+    sandbox.housekeeping();
+    assert!(!unlocks(&sandbox, "4859"), "the password doesn't bring a disabled PIN back");
+    says(&sandbox.properpin(&["status"], "").success(), "disabled after 10 concerning failures within 24 hours");
 
-    says(&sandbox.properpin(&["enable"], "").success(), "PIN enabled again");
-    sandbox.start_accepting_pin();
+    let assert = sandbox.properpin(&["enable"], "").failure();
+    says(&assert, "may have been someone guessing it");
+    says(&assert, "--yes skips the question");
+    assert!(!unlocks(&sandbox, "4859"));
+    says(&sandbox.properpin(&["enable", "--yes"], "").success(), "PIN enabled again");
+    assert!(unlocks(&sandbox, "4859"), "enable brings the same PIN back at once");
     let status = stdout(&sandbox.properpin(&["status"], "").success());
-    assert!(status.contains("accepting the PIN for another") && status.contains("10 since the PIN was set (of 100)"), "{status}");
+    assert!(status.contains("right now  enabled") && status.contains("10 since the PIN was set (of 60)"), "{status}");
     says(&sandbox.properpin(&["enable"], "").success(), "wasn't disabled");
 
     sandbox.write_budget(&Budget {
-        total: 100,
-        disabled: Some(Disabled { limit: Limit::Total(100), at: 1_800_000_000 }),
+        total: 60,
+        disabled: Some(Disabled { limit: Limit::Total(60), at: 1_800_000_000 }),
         ..Budget::default()
     });
-    says(&sandbox.properpin(&["enable"], "").failure(), "choose a new one with: properpin set");
+    says(&sandbox.properpin(&["enable", "--yes"], "").failure(), "choose a new one with: properpin set");
     sandbox.properpin(&["set"], &new_pin("4860", "4860")).success();
-    sandbox.start_accepting_pin();
     let status = stdout(&sandbox.properpin(&["status"], "").success());
-    assert!(status.contains("accepting the PIN for another") && status.contains("0 since the PIN was set"), "{status}");
+    assert!(status.contains("right now  enabled") && status.contains("0 since the PIN was set"), "{status}");
 
     sandbox.properpin(&["remove"], "").success();
     assert!(!sandbox.0.path().join(format!("var/{}.budget", current_uid())).exists(), "remove leaves no budget behind");

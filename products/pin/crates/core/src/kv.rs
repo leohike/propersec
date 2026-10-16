@@ -40,14 +40,19 @@ pub fn with(mut pairs: Pairs, key: &str, value: &str) -> Pairs {
     pairs
 }
 
+/// Plain ASCII digits only: no sign, no spaces, no "²".
+pub(crate) fn digits<T: std::str::FromStr>(text: &str) -> Option<T> {
+    text.bytes().all(|byte| byte.is_ascii_digit()).then(|| text.parse().ok()).flatten()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn skips_comments_and_blanks_and_trims() {
-        let pairs = parse("# a comment\n\nmax_failures = 5\n  expiry_hours=2  \n", "f").unwrap();
-        assert_eq!(pairs, vec![("max_failures".into(), "5".into()), ("expiry_hours".into(), "2".into())]);
+        let pairs = parse("# a comment\n\nmax_failures = 5\n  hash_cost=6  \n", "f").unwrap();
+        assert_eq!(pairs, vec![("max_failures".into(), "5".into()), ("hash_cost".into(), "6".into())]);
     }
 
     #[test]

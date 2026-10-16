@@ -1,21 +1,20 @@
 //! `properpin-pinchecker`, the setgid program. See the library (`lib.rs`) for what it answers.
 //!
 //! ```text
-//! properpin-pinchecker check|start-accepting-pin|status
+//! properpin-pinchecker check|housekeeping|status
 //! ```
 //!
 //! Installed `root:properpin 2755`, setgid to the `properpin` group, with fixed locations: the
-//! hashes in `/etc/properpin` (owned by root, readable by the group), the counts in `/run/properpin`
-//! (root's, sticky, writable by the group), the budget in `/var/lib/properpin` (the same, on disk),
-//! the password checked by `/usr/sbin/unix_chkpwd`, and logs to syslog.
+//! hashes in `/etc/properpin` (owned by root, readable by the group), the counts in
+//! `/var/lib/properpin` (root's, sticky, writable by the group), the password checked by
+//! `/usr/sbin/unix_chkpwd`, and logs to syslog.
 //!
 //! For local tests, and only when started without elevated rights, these options replace them:
 //!
 //! ```text
 //! --dev-etc DIR       instead of /etc/properpin                   required with any --dev option
-//! --dev-run DIR       instead of /run/properpin                   required with any --dev option
 //! --dev-budget DIR    instead of /var/lib/properpin               required with any --dev option
-//! --dev-owner UID     who must own --dev-run and the files under --dev-etc   default: the caller
+//! --dev-owner UID     who must own --dev-budget and the files under --dev-etc   default: the caller
 //! --dev-chkpwd PATH   instead of /usr/sbin/unix_chkpwd
 //! --dev-log FILE      append log lines here instead of syslog
 //! ```
@@ -34,7 +33,7 @@ use std::process::ExitCode;
 
 use properpin_core::{Log, Secret, exit};
 use properpin_pinchecker::{Context, Places, Request, UnixChkpwd, dev_options_allowed, read_input, serve};
-use properpin_sys::{Account, BootClock, FileLog, Yescrypt, current_egid, current_euid, current_gid, current_uid};
+use properpin_sys::{Account, FileLog, SystemClock, Yescrypt, current_egid, current_euid, current_gid, current_uid};
 
 mod secure;
 
@@ -97,10 +96,9 @@ fn run(args: &[OsString]) -> u8 {
             Places {
                 etc: "/etc/properpin".into(),
                 etc_owner: 0,
-                run_dir: "/run/properpin".into(),
-                run_owner: 0,
-                run_group: current_egid(),
                 budget_dir: "/var/lib/properpin".into(),
+                budget_owner: 0,
+                budget_group: current_egid(),
             },
             UnixChkpwd::system(),
         ),
@@ -108,15 +106,14 @@ fn run(args: &[OsString]) -> u8 {
             Places {
                 etc: dev.etc.clone(),
                 etc_owner: dev.owner.unwrap_or(uid),
-                run_dir: dev.run.clone(),
-                run_owner: dev.owner.unwrap_or(uid),
-                run_group: current_egid(),
                 budget_dir: dev.budget.clone(),
+                budget_owner: dev.owner.unwrap_or(uid),
+                budget_group: current_egid(),
             },
             dev.chkpwd.clone().map_or_else(UnixChkpwd::system, UnixChkpwd),
         ),
     };
-    let context = Context { places: &places, hasher: &Yescrypt, clock: &BootClock, password: &password, log: log.as_ref() };
+    let context = Context { places: &places, hasher: &Yescrypt, clock: &SystemClock, password: &password, log: log.as_ref() };
     let reply = serve(options.request, &caller, &typed, &context);
     drop(typed);
     // Nothing to do if stdout is gone: the exit code is the answer.
@@ -131,7 +128,6 @@ struct Options {
 
 struct Dev {
     etc: PathBuf,
-    run: PathBuf,
     budget: PathBuf,
     owner: Option<u32>,
     chkpwd: Option<PathBuf>,
@@ -142,7 +138,7 @@ impl Options {
     /// Exactly one request, and `--dev-*` options given as `--dev-x VALUE`. Anything else is refused.
     fn parse(args: &[OsString]) -> Result<Self, String> {
         let mut request = None;
-        let (mut etc, mut run, mut budget, mut owner, mut chkpwd, mut log, mut any_dev) = (None, None, None, None, None, None, false);
+        let (mut etc, mut budget, mut owner, mut chkpwd, mut log, mut any_dev) = (None, None, None, None, None, false);
         let mut args = args.iter();
         while let Some(arg) = args.next() {
             let word = arg.to_str().ok_or("an argument is not UTF-8")?;
@@ -151,7 +147,6 @@ impl Options {
                 let value = PathBuf::from(args.next().ok_or(format!("{word} needs a value"))?);
                 match name {
                     "etc" => etc = Some(value),
-                    "run" => run = Some(value),
                     "budget" => budget = Some(value),
                     "owner" => owner = Some(value.to_str().and_then(|uid| uid.parse().ok()).ok_or(format!("{word} needs a uid"))?),
                     "chkpwd" => chkpwd = Some(value),
@@ -164,11 +159,11 @@ impl Options {
                 return Err(format!("unexpected argument {word:?}"));
             }
         }
-        let request = request.ok_or("no request: expected check, start-accepting-pin or status")?;
-        let dev = match (any_dev, etc, run, budget) {
+        let request = request.ok_or("no request: expected check, housekeeping or status")?;
+        let dev = match (any_dev, etc, budget) {
             (false, ..) => None,
-            (true, Some(etc), Some(run), Some(budget)) => Some(Dev { etc, run, budget, owner, chkpwd, log }),
-            (true, ..) => return Err("--dev options need --dev-etc, --dev-run and --dev-budget".into()),
+            (true, Some(etc), Some(budget)) => Some(Dev { etc, budget, owner, chkpwd, log }),
+            (true, ..) => return Err("--dev options need --dev-etc and --dev-budget".into()),
         };
         Ok(Self { request, dev })
     }

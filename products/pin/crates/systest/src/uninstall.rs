@@ -26,11 +26,11 @@ const BROKEN: &str = "/opt/properpin/broken";
 /// An attempt still running after this is dead: the lock screen would hang on it.
 const DEAD_AFTER: Duration = Duration::from_secs(30);
 /// The module waits ten seconds for a pinchecker before killing it.
-const HELPER_TIMEOUT: Duration = Duration::from_secs(10);
+const PINCHECKER_TIMEOUT: Duration = Duration::from_secs(10);
 /// Kept by uninstall on purpose, with the PINs and the budgets.
 const KEPT: [&str; 2] = ["/etc/properpin", "/var/lib/properpin"];
 /// Where anything of properpin's could be; recorded before and after.
-const WATCHED: [&str; 6] = ["/usr/local", "/etc/sysusers.d", "/etc/tmpfiles.d", "/etc/properpin", RUN_DIR, BUDGET_DIR];
+const WATCHED: [&str; 6] = ["/usr/local", "/etc/sysusers.d", "/etc/tmpfiles.d", "/etc/properpin", OLD_RUN_DIR, BUDGET_DIR];
 
 /// What a broken properpin does to the lock screen.
 #[derive(Debug, Clone, Copy)]
@@ -188,7 +188,7 @@ impl Bench {
         let from = case.variant.map_or(format!("{PRODUCT}/build"), |variant| format!("{BROKEN}/{variant}"));
         install_sh_from(&from, &["install"])?;
         install_sh_from(&from, &["enable", "--yes"])?;
-        properpin_as_root(&["set", "--user", USER], &format!("{PIN}\n{PIN}\n{PASSWORD}\n"))?;
+        properpin_as_root(&["set", "--user", USER], &format!("{PIN}\n{PIN}\n"))?;
         (case.damage)()?;
         self.is_broken(case).map_err(|error| format!("the broken install didn't break as expected: {error}"))?;
 
@@ -202,7 +202,8 @@ impl Bench {
         // properpin itself still installs and works afterwards, and goes again just as cleanly.
         install_sh(&["install"])?;
         install_sh(&["enable", "--yes"])?;
-        properpin_as_root(&["set", "--user", USER], &format!("{PIN}\n{PIN}\n{PASSWORD}\n"))?;
+        // The PIN file was kept, so this is the PIN already set, which set asks about first.
+        properpin_as_root(&["set", "--user", USER, "--yes"], &format!("{PIN}\n{PIN}\n"))?;
         self.expect("kde", PASSWORD, &Ran::Unlocked, "the password, reinstalled")?;
         self.expect("kde", PIN, &Ran::Unlocked, "the PIN, reinstalled")?;
         install_sh(&["uninstall", "--yes"])?;
@@ -228,7 +229,7 @@ impl Bench {
                 Breaks::LetsAnyoneIn => self.expect("kde", "not the password", &Ran::Unlocked, "a wrong password")?,
                 Breaks::Slows => {
                     let probe = self.probe("kde", PASSWORD)?;
-                    if probe.ran != Ran::Unlocked || probe.took < HELPER_TIMEOUT * 2 {
+                    if probe.ran != Ran::Unlocked || probe.took < PINCHECKER_TIMEOUT * 2 {
                         return Err(format!("the right password should unlock after two pinchecker timeouts: {probe:?}"));
                     }
                 }
@@ -282,7 +283,7 @@ impl Bench {
             }
         }
         for group in before.groups.symmetric_difference(&after.groups) {
-            if group != HELPER_GROUP {
+            if group != PINCHECKER_GROUP {
                 differences.push(format!("group {group}: there only before or only {when}"));
             }
         }

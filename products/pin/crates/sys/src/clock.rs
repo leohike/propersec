@@ -3,26 +3,12 @@ use properpin_core::{Clock, Error};
 
 use crate::system;
 
-const BOOT_ID: &str = "/proc/sys/kernel/random/boot_id";
-
-/// This boot's id from the kernel, and `CLOCK_BOOTTIME`: seconds since boot, suspend included.
-/// Changing the wall clock moves neither, so nobody at the keyboard can stretch the PIN's window.
-/// The wall clock itself, `CLOCK_REALTIME`, is only for the budget, which must outlive the boot.
+/// The wall clock, `CLOCK_REALTIME`: the only clock that survives a reboot, which the budget must.
 #[derive(Debug, Clone, Copy, Default)]
-pub struct BootClock;
+pub struct SystemClock;
 
-impl Clock for BootClock {
-    fn boot_id(&self) -> Result<String, Error> {
-        let id = std::fs::read_to_string(BOOT_ID).map_err(|error| system(BOOT_ID, error))?;
-        Ok(id.trim().into())
-    }
-
+impl Clock for SystemClock {
     fn now(&self) -> Result<u64, Error> {
-        let now = clock_gettime(ClockId::CLOCK_BOOTTIME).map_err(|error| system("CLOCK_BOOTTIME", error))?;
-        u64::try_from(now.tv_sec()).map_err(|error| system("CLOCK_BOOTTIME", error))
-    }
-
-    fn wall(&self) -> Result<u64, Error> {
         let now = clock_gettime(ClockId::CLOCK_REALTIME).map_err(|error| system("CLOCK_REALTIME", error))?;
         u64::try_from(now.tv_sec()).map_err(|error| system("CLOCK_REALTIME", error))
     }
@@ -33,23 +19,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn reads_this_boot() {
-        assert_eq!(BootClock.boot_id().unwrap(), BootClock.boot_id().unwrap());
-        assert_eq!(BootClock.boot_id().unwrap().len(), 36);
-        assert!(BootClock.now().unwrap() > 0);
-        assert!(BootClock.wall().unwrap() > 1_700_000_000);
-    }
-
-    /// The PIN's expiry rests on this clock moving: it must be the kernel's own uptime.
-    #[test]
-    fn boot_time_is_the_kernels_uptime() {
-        let uptime = || -> u64 {
-            let text = std::fs::read_to_string("/proc/uptime").unwrap();
-            text.split('.').next().unwrap().parse().unwrap()
-        };
-        let before = uptime();
-        let now = BootClock.now().unwrap();
-        let after = uptime();
-        assert!(before <= now && now <= after + 1, "{before} <= {now} <= {after} + 1");
+    fn reads_the_time_of_day() {
+        assert!(SystemClock.now().unwrap() > 1_700_000_000);
     }
 }
