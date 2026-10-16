@@ -2,6 +2,8 @@
 
 A known weakness of the setgid helper layout, written on 2026-10-03 when that layout was built. It is accepted for now: the PIN fails closed and the password still works. This doc describes it and a fix to make later.
 
+**Since 2026-10-16** the lock file sits next to the budget in `/var/lib/properpin`, since `/run/properpin` is gone with the pepper, so a reboot no longer clears a planted one. `sudo properpin set` and `remove` delete the lock file along with the budget instead, which the container's planted-files scenario checks. The rest of this doc describes the layout as it was.
+
 ## What happens
 
 `/run/properpin` is `root:properpin 1770`: the helper's group may create files there, and the sticky bit lets only a file's owner replace or delete it. Each user's `<uid>.lock` and `<uid>.state` are created by the helper running as that user, so they belong to that user.

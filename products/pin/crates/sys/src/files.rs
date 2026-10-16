@@ -126,14 +126,18 @@ impl UserFiles {
     }
 
     /// Start the budget over: `set` gives a new PIN a fresh one, and `remove` leaves none behind.
-    /// Root can delete it whoever owns it, which also clears a budget planted in the user's name.
+    /// The lock file goes too. Root can delete both whoever owns them, which also clears a budget
+    /// or a lock file planted in the user's name: on disk, a planted lock file would otherwise
+    /// refuse the user's PIN for good.
     pub fn remove_budget(&self) -> Result<bool, Error> {
-        let path = self.trusted_budget_dir()?.join(format!("{}.budget", self.uid));
-        match fs::remove_file(&path) {
+        let dir = self.trusted_budget_dir()?;
+        let remove = |path: PathBuf| match fs::remove_file(&path) {
             Ok(()) => Ok(true),
             Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
             Err(error) => Err(system(path.display(), error)),
-        }
+        };
+        remove(dir.join(format!("{}.lock", self.uid)))?;
+        remove(dir.join(format!("{}.budget", self.uid)))
     }
 
     // --- the pinchecker's side: the budget
@@ -473,7 +477,10 @@ mod tests {
         files.save_budget(&budget).unwrap();
         assert_eq!(files.load_budget().unwrap(), budget);
         assert_eq!(fs::metadata(files.budget_file().unwrap()).unwrap().mode() & 0o7777, 0o600);
+        let lock = files.lock().unwrap();
         assert!(files.remove_budget().unwrap());
+        assert!(!files.lock_file().unwrap().exists(), "the lock file goes with the budget");
+        drop(lock);
         assert!(!files.remove_budget().unwrap());
         assert_eq!(files.load_budget().unwrap(), Budget::default());
     }

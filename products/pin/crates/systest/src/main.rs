@@ -486,7 +486,7 @@ fn one_users_pinchecker_cannot_touch_anothers_counts(world: &World) -> Outcome {
 
 /// Before alice's first attempt, bob with the pinchecker's group creates her lock file, writable by
 /// anyone, and a fresh budget in her name. Her PIN is refused, and the log says whose lock file it
-/// is. The password still works.
+/// is. The password still works, and `set` clears them.
 fn planted_counts_are_refused(world: &World) -> Outcome {
     let bob = Account::by_name("bob").map_err(message)?;
     let lock = format!("{BUDGET_DIR}/{}.lock", world.user.uid);
@@ -501,7 +501,10 @@ fn planted_counts_are_refused(world: &World) -> Outcome {
     let why = format!("owned by uid {}, not {}", bob.uid, world.user.uid);
     let refused = attempt.log.contains(&why) || (protected && attempt.log.contains("Permission denied"));
     expect(!attempt.unlocked && refused, &format!("the PIN wasn't refused with {why:?}"), &attempt)?;
-    world.password_unlocks()
+    world.password_unlocks()?;
+    // On disk the planted lock file would refuse the PIN for good; set clears it.
+    properpin_as_root(&["set", "--user", USER, "--yes"], &format!("{PIN}\n{PIN}\n"))?;
+    world.pin_unlocks()
 }
 
 /// Anyone with the pinchecker's group can read every hash and change every count, so install.sh check
