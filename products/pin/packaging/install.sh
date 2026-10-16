@@ -457,7 +457,7 @@ do_uninstall() {
     rm -f "$root$module_path" "$root$command_path" "$root$sysusers" "$root$tmpfiles"
     # properpin's own directory, whatever else ended up in it.
     rm -rf -- "$root$libexec"
-    # Only per-boot state: failure counts and arming times.
+    # Only per-boot state: failure counts and when the lock screen started accepting the PIN.
     rm -rf -- "$root$run_dir"
     # The directories install created, deepest first, as long as nothing else has moved in.
     if [[ -f $root$created ]]; then

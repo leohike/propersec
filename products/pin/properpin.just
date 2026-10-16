@@ -26,7 +26,7 @@ lint:
 mutants:
     CARGO_BUILD_JOBS=2 taskset -c 0-$(( $(nproc) / 2 - 1 )) nice -n 10 cargo mutants --package properpin-core --package properpin-sys --test-package properpin-core --test-package properpin-sys --test-package properpin-helper --jobs 2
 
-# The whole lifecycle in a temporary directory, through the real helper binary (not setgid, so its --dev options work): set and armed, a reboot, refused, armed again by the password, three failures, refused
+# The whole lifecycle in a temporary directory, through the real helper binary (not setgid, so its --dev options work): set and accepting the PIN, a reboot, refused, accepting it again after the password, three failures, refused
 demo:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -49,8 +49,8 @@ demo:
     lock_screen 4859
     step "a reboot: the run directory starts empty, and the pepper with it"; rm -f "$root"/run/*
     lock_screen 4859
-    step "lock screen: the correct password, so the arm line runs"
-    echo -n "correct horse battery staple" | "$root/helper" arm; said
+    step "lock screen: the correct password, so the start-accepting-pin line runs"
+    echo -n "correct horse battery staple" | "$root/helper" start-accepting-pin; said
     lock_screen 4859
     for wrong in 1111 2222 3333; do lock_screen "$wrong"; done
     lock_screen 4859

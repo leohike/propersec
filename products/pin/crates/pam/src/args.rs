@@ -14,10 +14,10 @@ pub struct Args {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
-    /// Before pam_unix: is the typed input the PIN, and is the PIN armed?
+    /// Before pam_unix: is the typed input the PIN, and is the lock screen accepting the PIN?
     Check,
-    /// After a successful pam_unix: arm the PIN.
-    Arm,
+    /// After a successful pam_unix: start accepting the PIN.
+    StartAcceptingPin,
 }
 
 impl Mode {
@@ -25,7 +25,7 @@ impl Mode {
     pub fn request(self) -> &'static str {
         match self {
             Self::Check => "check",
-            Self::Arm => "arm",
+            Self::StartAcceptingPin => "start-accepting-pin",
         }
     }
 }
@@ -38,7 +38,7 @@ impl Args {
         for word in words {
             match word.split_once('=') {
                 None if word == "check" => mode = Some(Mode::Check),
-                None if word == "arm" => mode = Some(Mode::Arm),
+                None if word == "start-accepting-pin" => mode = Some(Mode::StartAcceptingPin),
                 None if word == "test_panic" => test_panic = true,
                 Some(("helper", path)) if path.starts_with('/') => helper = Some(PathBuf::from(path)),
                 Some(("helper", path)) => return Err(format!("helper={path} is not an absolute path")),
@@ -48,10 +48,10 @@ impl Args {
                 _ => return Err(format!("unknown argument {word:?}")),
             }
         }
-        let mode = mode.ok_or("no mode: expected check or arm")?;
+        let mode = mode.ok_or("no mode: expected check or start-accepting-pin")?;
         match (mode, &config) {
             (Mode::Check, None) => return Err("config= is required with check".into()),
-            (Mode::Arm, Some(_)) => return Err("config= is for check only".into()),
+            (Mode::StartAcceptingPin, Some(_)) => return Err("config= is for check only".into()),
             _ => {}
         }
         Ok(Self { mode, helper: helper.ok_or("helper= is required")?, config, log, test_panic })
@@ -76,8 +76,8 @@ mod tests {
                 test_panic: false
             }
         );
-        let args = Args::parse("arm helper=/usr/local/libexec/properpin/properpin-helper".split(' ')).unwrap();
-        assert_eq!((args.mode, args.config), (Mode::Arm, None));
+        let args = Args::parse("start-accepting-pin helper=/usr/local/libexec/properpin/properpin-helper".split(' ')).unwrap();
+        assert_eq!((args.mode, args.config), (Mode::StartAcceptingPin, None));
     }
 
     #[test]
@@ -90,7 +90,7 @@ mod tests {
             "check helper=/h config=/c debug",
             "check helper=/h",
             "check helper=/h config=c",
-            "arm helper=/h config=/c",
+            "start-accepting-pin helper=/h config=/c",
         ] {
             assert!(Args::parse(line.split(' ')).is_err(), "{line}");
         }

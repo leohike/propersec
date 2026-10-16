@@ -6,14 +6,15 @@ use crate::Limit;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Refusal {
     /// No password unlock since boot, or no state at all.
-    NotArmed,
+    NoPasswordUnlockSinceBoot,
     /// The state belongs to an earlier boot.
     OtherBoot,
-    /// The arming time is later than now, which a sane state never is.
-    ArmedInFuture,
-    /// The PIN was armed `age` seconds ago, which is too long.
+    /// The time the lock screen started accepting the PIN is later than now, which a sane state
+    /// never is.
+    AcceptingPinSinceInFuture,
+    /// The lock screen started accepting the PIN `age` seconds ago, which is too long.
     Expired { age: u64 },
-    /// Too many failures in a row since the PIN was armed or last used.
+    /// Too many failures in a row since the last password unlock or the last PIN unlock.
     TooManyFailures { failures: u32 },
     /// Too many concerning failures: disabled until root turns it back on or sets a new PIN.
     Disabled(Limit),
@@ -24,9 +25,9 @@ pub enum Refusal {
 impl fmt::Display for Refusal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::NotArmed => write!(f, "no password unlock since boot"),
+            Self::NoPasswordUnlockSinceBoot => write!(f, "no password unlock since boot"),
             Self::OtherBoot => write!(f, "the state is from an earlier boot"),
-            Self::ArmedInFuture => write!(f, "the arming time is in the future"),
+            Self::AcceptingPinSinceInFuture => write!(f, "accepting the PIN since a time in the future"),
             Self::Expired { age } => write!(f, "the last password unlock was {} ago", describe_seconds(*age)),
             Self::TooManyFailures { failures } => write!(f, "{failures} failures in a row"),
             Self::Disabled(limit) => write!(f, "the PIN is disabled after {limit}"),

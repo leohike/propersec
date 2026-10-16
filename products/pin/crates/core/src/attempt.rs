@@ -1,8 +1,9 @@
-//! One unlock attempt, and arming after a password unlock. Refusal is the default: the only
-//! [`Verdict::Unlock`] comes from a matching PIN while the PIN is armed and not disabled.
+//! One unlock attempt, and starting to accept the PIN after a password unlock. Refusal is the default: the only
+//! [`Verdict::Unlock`] comes from a matching PIN while the lock screen is accepting the PIN and
+//! it is not disabled.
 //!
-//! The pepper the PIN is hashed with stays in the state only while the PIN is armed: any refusal
-//! wipes it (expired, too many failures in a row, disabled), and only the password brings it back.
+//! The pepper the PIN is hashed with stays in the state only while the lock screen is accepting the PIN: any refusal
+//! wipes it (expired, too many failures in a row, disabled), and only the password brings it back: password required.
 
 use std::fmt;
 
@@ -56,26 +57,26 @@ pub trait Log {
 /// What one unlock attempt came to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Verdict {
-    /// The PIN matched while armed. The only outcome that unlocks.
+    /// The PIN matched while the lock screen was accepting it. The only outcome that unlocks.
     Unlock,
     /// Nothing was typed. Not a failure of any kind.
     Empty,
     /// No PIN is set for this user. Not a failure of any kind.
     NoPinSet,
-    /// Input that can never be a PIN (see [`usable_input`]). Not counted in a row.
+    /// Input that can never be a PIN (see [`input_that_could_be_a_pin`]). Not counted in a row.
     Unusable,
     /// Longer than any PIN may be: almost always the password. Not hashed, not counted in a row.
     TooLong { max: usize },
-    /// The PIN isn't armed, or is disabled; the input wasn't even checked.
+    /// The lock screen isn't accepting the PIN, or it is disabled; the input wasn't even checked.
     Refused(Refusal),
     /// Checked, and not the PIN. Counted in a row.
     WrongPin { failures: u32, max: u32 },
 }
 
-/// What [`check`] came to. Every outcome but `Unlock`, `Empty` and `NoPinSet` is also a failure in
+/// What [`try_unlock_with_pin`] came to. Every outcome but `Unlock`, `Empty` and `NoPinSet` is also a failure in
 /// the budget, waiting to be forgiven; `judged` says what the budget looked like.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CheckOutcome {
+pub struct UnlockAttemptOutcome {
     pub verdict: Verdict,
     pub judged: Judged,
 }
@@ -108,7 +109,7 @@ impl fmt::Display for Verdict {
 
 /// What the user typed, or `None` when it can't possibly be a PIN: empty, longer than
 /// [`MAX_PIN_BYTES`], holding a NUL, or not UTF-8. Such input never counts in a row.
-pub fn usable_input(raw: &[u8]) -> Option<&str> {
+pub fn input_that_could_be_a_pin(raw: &[u8]) -> Option<&str> {
     if raw.is_empty() || raw.len() > MAX_PIN_BYTES || raw.contains(&0) {
         return None;
     }
@@ -119,8 +120,13 @@ pub fn usable_input(raw: &[u8]) -> Option<&str> {
 ///
 /// An `Err` means something is broken (a file, the clock, libxcrypt); the caller treats it like
 /// any other refusal, so the password is checked next.
-pub fn check(store: &impl Store, hasher: &impl Hasher, clock: &impl Clock, typed: &[u8]) -> Result<CheckOutcome, Error> {
-    let plain = |verdict| Ok(CheckOutcome { verdict, judged: Judged::default() });
+pub fn try_unlock_with_pin(
+    store: &impl Store,
+    hasher: &impl Hasher,
+    clock: &impl Clock,
+    typed: &[u8],
+) -> Result<UnlockAttemptOutcome, Error> {
+    let plain = |verdict| Ok(UnlockAttemptOutcome { verdict, judged: Judged::default() });
     if typed.is_empty() {
         return plain(Verdict::Empty);
     }
@@ -133,34 +139,40 @@ pub fn check(store: &impl Store, hasher: &impl Hasher, clock: &impl Clock, typed
     let mut budget = store.load_budget()?;
     let judged = budget.judge(wall, &settings);
     // Every input is a failure until it unlocks, recorded before anything is decided, like the
-    // failures in a row below. A correct password forgives it moments later, through `arm`.
+    // failures in a row below. A correct password forgives it moments later, through [`start_accepting_pin_after_password_unlock`].
     budget.record_failure(wall);
     store.save_budget(&budget)?;
-    let verdict = match (judged.disabled, usable_input(typed)) {
+    let verdict = match (judged.disabled, input_that_could_be_a_pin(typed)) {
         (Some(limit), _) => {
-            forget_pepper(store, store.load_state())?;
+            stop_accepting_pin(store, store.load_state())?;
             Verdict::Refused(Refusal::Disabled(limit))
         }
         (None, None) => Verdict::Unusable,
         (None, Some(pin)) if pin.chars().count() > settings.max_pin_length => Verdict::TooLong { max: settings.max_pin_length },
-        (None, Some(pin)) => in_a_row(store, hasher, clock, &settings, pin)?,
+        (None, Some(pin)) => check_pin_while_accepting(store, hasher, clock, &settings, pin)?,
     };
     if verdict.unlocks() {
         budget.forgive(wall, settings.forgive_before_correct_pin);
         store.save_budget(&budget)?;
     }
-    Ok(CheckOutcome { verdict, judged })
+    Ok(UnlockAttemptOutcome { verdict, judged })
 }
 
-/// The armed PIN against the failures in a row, then the peppered hash.
-fn in_a_row(store: &impl Store, hasher: &impl Hasher, clock: &impl Clock, settings: &Settings, pin: &str) -> Result<Verdict, Error> {
+/// While the lock screen is accepting the PIN: the failures in a row, then the peppered hash.
+fn check_pin_while_accepting(
+    store: &impl Store,
+    hasher: &impl Hasher,
+    clock: &impl Clock,
+    settings: &Settings,
+    pin: &str,
+) -> Result<Verdict, Error> {
     let state = store.load_state();
     if let Some(refusal) = settings.refusal(state.as_ref(), &clock.boot_id()?, clock.now()?) {
-        forget_pepper(store, state)?;
+        stop_accepting_pin(store, state)?;
         return Ok(Verdict::Refused(refusal));
     }
     // refusal() refuses a missing state or pepper, so neither is missing here.
-    let Some(mut state) = state else { return Ok(Verdict::Refused(Refusal::NotArmed)) };
+    let Some(mut state) = state else { return Ok(Verdict::Refused(Refusal::NoPasswordUnlockSinceBoot)) };
     let Some(pepper) = state.pepper.clone() else { return Ok(Verdict::Refused(Refusal::NoPepper)) };
     // Count the failure before checking, and take it back on a match. An attempt abandoned
     // halfway (Plasma 6.8 cancels authenticators it switches away from) then still counts.
@@ -169,7 +181,7 @@ fn in_a_row(store: &impl Store, hasher: &impl Hasher, clock: &impl Clock, settin
     if !hasher.verify(&pepper.peppered(pin), &settings.pin_hash)? {
         let failures = state.failures;
         if failures >= settings.max_failures {
-            forget_pepper(store, Some(state))?;
+            stop_accepting_pin(store, Some(state))?;
         }
         return Ok(Verdict::WrongPin { failures, max: settings.max_failures });
     }
@@ -178,19 +190,21 @@ fn in_a_row(store: &impl Store, hasher: &impl Hasher, clock: &impl Clock, settin
     Ok(Verdict::Unlock)
 }
 
-/// Wipe the pepper from `state`, if it still holds one. The rest of the state stays, so the next
-/// attempt is refused for the same reason, and the password must arm the PIN again.
-fn forget_pepper(store: &impl Store, state: Option<PinState>) -> Result<(), Error> {
+/// Password required from now on: wipe the pepper from `state`, if it still holds one. The rest of
+/// the state stays, so the next attempt is refused for the same reason, and only a password unlock
+/// starts accepting the PIN again.
+fn stop_accepting_pin(store: &impl Store, state: Option<PinState>) -> Result<(), Error> {
     match state {
         Some(state) if state.pepper.is_some() => store.save_state(&PinState { pepper: None, ..state }),
         _ => Ok(()),
     }
 }
 
-/// After a password unlock: forgive the recent failures as the user's own, and arm the PIN from
-/// now, with nothing failed yet and the `pepper` the password decrypted, unless it is disabled.
+/// After a password unlock: forgive the recent failures as the user's own, and start accepting the
+/// PIN from now, with nothing failed yet and the `pepper` the password decrypted, unless it is
+/// disabled.
 /// `judged.disabled` says which; a disabled PIN's pepper is wiped.
-pub fn arm(store: &impl Store, clock: &impl Clock, pepper: Pepper) -> Result<Judged, Error> {
+pub fn start_accepting_pin_after_password_unlock(store: &impl Store, clock: &impl Clock, pepper: Pepper) -> Result<Judged, Error> {
     let settings = store.settings()?;
     let _lock = store.lock()?;
     let wall = clock.wall()?;
@@ -199,8 +213,8 @@ pub fn arm(store: &impl Store, clock: &impl Clock, pepper: Pepper) -> Result<Jud
     budget.forgive(wall, settings.forgive_before_correct_password);
     store.save_budget(&budget)?;
     match judged.disabled {
-        None => store.save_state(&PinState::armed(&clock.boot_id()?, clock.now()?, pepper))?,
-        Some(_) => forget_pepper(store, store.load_state())?,
+        None => store.save_state(&PinState::accepting_pin_from(&clock.boot_id()?, clock.now()?, pepper))?,
+        Some(_) => stop_accepting_pin(store, store.load_state())?,
     }
     Ok(judged)
 }
@@ -314,27 +328,27 @@ mod tests {
     }
 
     fn try_pin(store: &MemoryStore, clock: &FakeClock, typed: &str) -> Verdict {
-        check(store, &PlainHasher, clock, typed.as_bytes()).unwrap().verdict
+        try_unlock_with_pin(store, &PlainHasher, clock, typed.as_bytes()).unwrap().verdict
     }
 
-    fn armed() -> (MemoryStore, FakeClock) {
+    fn accepting_pin() -> (MemoryStore, FakeClock) {
         let (store, clock) = (MemoryStore::with_pin(), FakeClock::new());
-        arm(&store, &clock, pepper()).unwrap();
+        start_accepting_pin_after_password_unlock(&store, &clock, pepper()).unwrap();
         (store, clock)
     }
 
     #[test]
     fn unusable_input_never_counts_in_a_row_but_waits_in_the_budget() {
-        let (store, clock) = armed();
+        let (store, clock) = accepting_pin();
         for raw in [&b"48\x0059"[..], b"\xff\xfe", &[b'1'; MAX_PIN_BYTES + 1]] {
-            assert_eq!(check(&store, &PlainHasher, &clock, raw).unwrap().verdict, Verdict::Unusable);
+            assert_eq!(try_unlock_with_pin(&store, &PlainHasher, &clock, raw).unwrap().verdict, Verdict::Unusable);
         }
         assert_eq!((store.failures(), store.pending()), (Some(0), 3));
     }
 
     #[test]
     fn nothing_typed_and_no_pin_are_no_failures_at_all() {
-        let (store, clock) = armed();
+        let (store, clock) = accepting_pin();
         assert_eq!(try_pin(&store, &clock, ""), Verdict::Empty);
         let without = MemoryStore { settings: Settings::default(), ..MemoryStore::with_pin() };
         assert_eq!(try_pin(&without, &clock, PIN), Verdict::NoPinSet);
@@ -343,17 +357,17 @@ mod tests {
 
     #[test]
     fn longer_input_is_not_a_pin_and_not_counted_in_a_row() {
-        let (store, clock) = armed();
+        let (store, clock) = accepting_pin();
         assert_eq!(try_pin(&store, &clock, "correct horse battery"), Verdict::TooLong { max: 12 });
         assert_eq!((store.failures(), store.pending()), (Some(0), 1));
     }
 
     #[test]
     fn input_exactly_at_a_length_limit_is_still_checked() {
-        let (store, clock) = armed();
+        let (store, clock) = accepting_pin();
         assert_eq!(try_pin(&store, &clock, "123456789012"), Verdict::WrongPin { failures: 1, max: 3 });
         // The longest PIN the settings allow, 64 characters of four bytes each, fills MAX_PIN_BYTES.
-        let (mut store, clock) = armed();
+        let (mut store, clock) = accepting_pin();
         store.settings.max_pin_length = 64;
         let longest = "\u{10348}".repeat(64);
         assert_eq!(longest.len(), MAX_PIN_BYTES);
@@ -362,16 +376,16 @@ mod tests {
 
     #[test]
     fn typos_before_a_correct_pin_or_password_are_forgiven() {
-        let (store, clock) = armed();
+        let (store, clock) = accepting_pin();
         try_pin(&store, &clock, "1111");
         clock.advance(30);
         assert_eq!(try_pin(&store, &clock, PIN), Verdict::Unlock);
         assert_eq!(store.pending(), 0);
-        // A mistyped password, then the right one: check sees both, arm forgives both.
+        // A mistyped password, then the right one: the attempt sees both, the password unlock forgives both.
         try_pin(&store, &clock, "correct horse battery stapl");
         clock.advance(60);
         try_pin(&store, &clock, "correct horse battery staple");
-        arm(&store, &clock, pepper()).unwrap();
+        start_accepting_pin_after_password_unlock(&store, &clock, pepper()).unwrap();
         assert_eq!(store.pending(), 0);
         clock.advance(3600);
         assert_eq!(try_pin(&store, &clock, PIN), Verdict::Unlock);
@@ -382,7 +396,7 @@ mod tests {
     /// later, and again. The user's PIN never forgives the guesses, and the budget runs out.
     #[test]
     fn guesses_the_user_never_forgives_disable_the_pin() {
-        let (store, clock) = armed();
+        let (store, clock) = accepting_pin();
         let mut rounds = 0;
         while rounds < 20 && try_pin(&store, &clock, PIN) == Verdict::Unlock {
             rounds += 1;
@@ -393,20 +407,20 @@ mod tests {
         // Five rounds of two guesses; the next correct PIN finds 10 concerning failures within 24 hours.
         assert_eq!(rounds, 5);
         assert_eq!(try_pin(&store, &clock, PIN), Verdict::Refused(Refusal::Disabled(crate::Limit::Day(10))));
-        // The password no longer arms it either, and a reboot changes nothing.
-        assert_eq!(arm(&store, &clock, pepper()).unwrap().disabled, Some(crate::Limit::Day(10)));
+        // The password no longer starts accepting it either, and a reboot changes nothing.
+        assert_eq!(start_accepting_pin_after_password_unlock(&store, &clock, pepper()).unwrap().disabled, Some(crate::Limit::Day(10)));
         *clock.boot_id.borrow_mut() = "boot-2".into();
-        arm(&store, &clock, pepper()).unwrap();
+        start_accepting_pin_after_password_unlock(&store, &clock, pepper()).unwrap();
         assert_eq!(try_pin(&store, &clock, PIN), Verdict::Refused(Refusal::Disabled(crate::Limit::Day(10))));
         // Root turning it back on: the same PIN works again after the next password unlock.
         let enabled = store.budget.borrow().enabled();
         *store.budget.borrow_mut() = enabled;
-        arm(&store, &clock, pepper()).unwrap();
+        start_accepting_pin_after_password_unlock(&store, &clock, pepper()).unwrap();
         assert_eq!(try_pin(&store, &clock, PIN), Verdict::Unlock);
     }
 
     #[test]
-    fn a_damaged_budget_refuses_and_the_password_still_arms_nothing() {
+    fn a_damaged_budget_refuses_and_the_password_still_starts_accepting_nothing() {
         struct Damaged(MemoryStore);
         impl Store for Damaged {
             type Lock = ();
@@ -431,22 +445,22 @@ mod tests {
         }
         let store = Damaged(MemoryStore::with_pin());
         let clock = FakeClock::new();
-        assert!(arm(&store, &clock, pepper()).is_err());
-        assert!(check(&store, &PlainHasher, &clock, PIN.as_bytes()).is_err());
+        assert!(start_accepting_pin_after_password_unlock(&store, &clock, pepper()).is_err());
+        assert!(try_unlock_with_pin(&store, &PlainHasher, &clock, PIN.as_bytes()).is_err());
         assert_eq!(store.0.failures(), None);
     }
 
     #[test]
     fn after_boot_the_password_is_required_first() {
         let (store, clock) = (MemoryStore::with_pin(), FakeClock::new());
-        assert_eq!(try_pin(&store, &clock, PIN), Verdict::Refused(Refusal::NotArmed));
-        arm(&store, &clock, pepper()).unwrap();
+        assert_eq!(try_pin(&store, &clock, PIN), Verdict::Refused(Refusal::NoPasswordUnlockSinceBoot));
+        start_accepting_pin_after_password_unlock(&store, &clock, pepper()).unwrap();
         assert_eq!(try_pin(&store, &clock, PIN), Verdict::Unlock);
     }
 
     #[test]
     fn wrong_pins_count_up_to_the_limit_and_a_right_pin_resets() {
-        let (store, clock) = armed();
+        let (store, clock) = accepting_pin();
         assert_eq!(try_pin(&store, &clock, "1111"), Verdict::WrongPin { failures: 1, max: 3 });
         assert_eq!(try_pin(&store, &clock, "2222"), Verdict::WrongPin { failures: 2, max: 3 });
         assert_eq!(try_pin(&store, &clock, PIN), Verdict::Unlock);
@@ -455,22 +469,22 @@ mod tests {
 
     #[test]
     fn at_the_limit_even_the_right_pin_is_refused_until_the_password() {
-        let (store, clock) = armed();
+        let (store, clock) = accepting_pin();
         for wrong in ["1111", "2222", "3333"] {
             try_pin(&store, &clock, wrong);
         }
         assert_eq!(try_pin(&store, &clock, PIN), Verdict::Refused(Refusal::TooManyFailures { failures: 3 }));
-        arm(&store, &clock, pepper()).unwrap();
+        start_accepting_pin_after_password_unlock(&store, &clock, pepper()).unwrap();
         assert_eq!(try_pin(&store, &clock, PIN), Verdict::Unlock);
     }
 
     #[test]
     fn the_pin_expires_and_does_not_outlive_its_boot() {
-        let (store, clock) = armed();
+        let (store, clock) = accepting_pin();
         clock.advance(8 * 3600);
         assert_eq!(try_pin(&store, &clock, PIN), Verdict::Refused(Refusal::Expired { age: 8 * 3600 }));
 
-        let (store, clock) = armed();
+        let (store, clock) = accepting_pin();
         *clock.boot_id.borrow_mut() = "boot-2".into();
         assert_eq!(try_pin(&store, &clock, PIN), Verdict::Refused(Refusal::OtherBoot));
     }
@@ -482,12 +496,12 @@ mod tests {
     #[test]
     fn every_refusal_wipes_the_pepper_until_the_password() {
         // Expired.
-        let (store, clock) = armed();
+        let (store, clock) = accepting_pin();
         clock.advance(8 * 3600);
         assert!(matches!(try_pin(&store, &clock, PIN), Verdict::Refused(Refusal::Expired { .. })));
         assert!(!pepper_in_memory(&store));
         // Three failures in a row: wiped with the third, and the reason stays the same.
-        let (store, clock) = armed();
+        let (store, clock) = accepting_pin();
         for wrong in ["1111", "2222"] {
             try_pin(&store, &clock, wrong);
             assert!(pepper_in_memory(&store));
@@ -495,24 +509,24 @@ mod tests {
         try_pin(&store, &clock, "3333");
         assert!(!pepper_in_memory(&store));
         assert_eq!(try_pin(&store, &clock, PIN), Verdict::Refused(Refusal::TooManyFailures { failures: 3 }));
-        arm(&store, &clock, pepper()).unwrap();
+        start_accepting_pin_after_password_unlock(&store, &clock, pepper()).unwrap();
         assert!(pepper_in_memory(&store));
         assert_eq!(try_pin(&store, &clock, PIN), Verdict::Unlock);
     }
 
     #[test]
     fn a_disabled_pin_loses_its_pepper_and_the_password_does_not_bring_it_back() {
-        let (store, clock) = armed();
+        let (store, clock) = accepting_pin();
         store.budget.borrow_mut().disabled = Some(crate::Disabled { limit: crate::Limit::Day(10), at: clock.wall.get() });
         assert!(matches!(try_pin(&store, &clock, PIN), Verdict::Refused(Refusal::Disabled(_))));
         assert!(!pepper_in_memory(&store));
-        assert!(arm(&store, &clock, pepper()).unwrap().disabled.is_some());
+        assert!(start_accepting_pin_after_password_unlock(&store, &clock, pepper()).unwrap().disabled.is_some());
         assert!(!pepper_in_memory(&store));
-        // Root's enable: the same PIN, once the password has armed it again.
+        // Root's enable: the same PIN, once a password unlock has started accepting it again.
         let enabled = store.budget.borrow().enabled();
         *store.budget.borrow_mut() = enabled;
         assert_eq!(try_pin(&store, &clock, PIN), Verdict::Refused(Refusal::NoPepper));
-        arm(&store, &clock, pepper()).unwrap();
+        start_accepting_pin_after_password_unlock(&store, &clock, pepper()).unwrap();
         assert_eq!(try_pin(&store, &clock, PIN), Verdict::Unlock);
     }
 
@@ -521,14 +535,14 @@ mod tests {
     #[test]
     fn the_wrong_pepper_makes_the_right_pin_wrong() {
         let (store, clock) = (MemoryStore::with_pin(), FakeClock::new());
-        arm(&store, &clock, pepper().xor(&[1; crate::PEPPER_BYTES])).unwrap();
+        start_accepting_pin_after_password_unlock(&store, &clock, pepper().xor(&[1; crate::PEPPER_BYTES])).unwrap();
         assert_eq!(try_pin(&store, &clock, PIN), Verdict::WrongPin { failures: 1, max: 3 });
     }
 
     #[test]
     fn a_failure_is_saved_before_the_hash_is_checked() {
-        let (store, clock) = armed();
-        assert!(check(&store, &BrokenHasher, &clock, PIN.as_bytes()).is_err());
+        let (store, clock) = accepting_pin();
+        assert!(try_unlock_with_pin(&store, &BrokenHasher, &clock, PIN.as_bytes()).is_err());
         assert_eq!((store.failures(), store.pending()), (Some(1), 1));
     }
 
@@ -550,10 +564,10 @@ mod tests {
     /// the hash is checked (Plasma 6.8 kills its PAM worker on cancel) still counts.
     #[test]
     fn every_check_happens_with_its_attempt_already_counted() {
-        let (store, clock) = armed();
+        let (store, clock) = accepting_pin();
         let hasher = WitnessHasher { store: &store, seen: RefCell::default() };
         for typed in ["1111", "2222", PIN, "3333"] {
-            check(&store, &hasher, &clock, typed.as_bytes()).unwrap();
+            try_unlock_with_pin(&store, &hasher, &clock, typed.as_bytes()).unwrap();
         }
         // Two wrong, then the right PIN seen as the third attempt and taken back, then one wrong.
         assert_eq!(*hasher.seen.borrow(), [Some(1), Some(2), Some(3), Some(1)]);
@@ -589,25 +603,26 @@ mod tests {
     }
 
     proptest! {
-        /// A tiny model of the rules, run against the real `check` and `arm`: the right PIN unlocks
-        /// exactly when the model says it's armed, and a wrong PIN never does.
+        /// A tiny model of the rules, run against the real `try_unlock_with_pin` and
+        /// `start_accepting_pin_after_password_unlock`: the right PIN unlocks exactly when the model
+        /// says the lock screen is accepting it, and a wrong PIN never does.
         #[test]
-        fn the_pin_unlocks_exactly_when_armed(events in prop::collection::vec(event(), 0..60)) {
+        fn the_pin_unlocks_exactly_when_accepted_by_the_model(events in prop::collection::vec(event(), 0..60)) {
             // The budget is tested on its own; here its limits are out of reach.
             let mut store = MemoryStore::with_pin();
             store.settings = Settings { max_concerning_24h: 100, max_concerning_7d: 200, max_concerning_total: 100_000, ..store.settings };
             let clock = FakeClock::new();
             let limit = store.settings.max_failures;
-            let mut armed_at: Option<u64> = None;
+            let mut accepting_pin_since: Option<u64> = None;
             let mut failures = 0;
             let mut boots = 1;
             for event in events {
                 let now = clock.now.get();
-                let allowed = armed_at.is_some_and(|at| now - at < 8 * 3600) && failures < limit;
+                let allowed = accepting_pin_since.is_some_and(|at| now - at < 8 * 3600) && failures < limit;
                 match event {
                     Event::PasswordUnlock => {
-                        arm(&store, &clock, pepper()).unwrap();
-                        (armed_at, failures) = (Some(now), 0);
+                        start_accepting_pin_after_password_unlock(&store, &clock, pepper()).unwrap();
+                        (accepting_pin_since, failures) = (Some(now), 0);
                     }
                     Event::RightPin => {
                         prop_assert_eq!(try_pin(&store, &clock, PIN).unlocks(), allowed);
@@ -621,7 +636,7 @@ mod tests {
                     Event::Reboot => {
                         boots += 1;
                         *clock.boot_id.borrow_mut() = format!("boot-{boots}");
-                        armed_at = None;
+                        accepting_pin_since = None;
                     }
                 }
             }

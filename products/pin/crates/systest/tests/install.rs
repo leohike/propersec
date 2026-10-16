@@ -121,7 +121,7 @@ fn install_enable_disable_uninstall_leaves_pam_as_it_was() {
     assert!(lines[0].starts_with("# properpin begin"), "{enabled}");
     assert!(lines[1].contains("pam_properpin.so check helper=/usr/local/libexec/properpin/properpin-helper config=/etc/properpin/config"));
     assert!(lines[2].contains("pam_unix.so use_first_pass"));
-    assert!(lines[3].contains("pam_properpin.so arm"));
+    assert!(lines[3].contains("pam_properpin.so start-accepting-pin"));
     assert_eq!(lines[4], "# properpin end");
     assert!(enabled.ends_with(STOCK_KDE), "everything stock stays, below the block");
     assert!(root.ok("check").contains("has properpin's lines"));

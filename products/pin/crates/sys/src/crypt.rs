@@ -43,7 +43,7 @@ impl Yescrypt {
     /// `hash_cost`, and the pepper encrypted with a `pepper_decryption_key` derived from
     /// `password` at `seal_cost`, with a fresh salt, so no `pepper_decryption_key` is ever used
     /// twice. The caller must have checked the password:
-    /// sealed with a mistyped one, the PIN could never be armed.
+    /// sealed with a mistyped one, the lock screen could never start accepting the PIN.
     pub fn new_pin(&self, pin: &str, password: &[u8], hash_cost: u32, seal_cost: u32) -> Result<NewPin, Error> {
         let pepper = random_pepper()?;
         let hash = self.hash(&pepper.peppered(pin), hash_cost)?;
@@ -85,7 +85,7 @@ impl Yescrypt {
     }
 }
 
-/// What `set` writes for a new PIN (see [`Yescrypt::new_pin`]), and the pepper it arms with.
+/// What `set` writes for a new PIN (see [`Yescrypt::new_pin`]), and the pepper the lock screen starts accepting the PIN with.
 #[derive(Debug)]
 pub struct NewPin {
     /// `hash_of_peppered_pin`.

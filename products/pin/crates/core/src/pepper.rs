@@ -7,7 +7,7 @@ pub const PEPPER_BYTES: usize = 32;
 
 /// The `clear_text_pepper` of `docs/pepper-terminology.md`: 32 random bytes mixed into the PIN
 /// hash, so the hash alone can't be brute-forced the way a hash of a few digits can. It lives in
-/// clear text in memory only, in the per-boot state while the PIN is armed; on disk it is only ever
+/// clear text in memory only, in the per-boot state while the lock screen is accepting the PIN; on disk it is only ever
 /// `encrypted_pepper`, under a key derived from the password.
 ///
 /// Wiped when dropped, and never printed.

@@ -1,7 +1,7 @@
 //! `properpin-helper`, the setgid program. See the library (`lib.rs`) for what it answers.
 //!
 //! ```text
-//! properpin-helper check|arm|status
+//! properpin-helper check|start-accepting-pin|status
 //! ```
 //!
 //! Installed `root:properpin 2755`, setgid to the `properpin` group, with fixed locations: the
@@ -164,7 +164,7 @@ impl Options {
                 return Err(format!("unexpected argument {word:?}"));
             }
         }
-        let request = request.ok_or("no request: expected check, arm or status")?;
+        let request = request.ok_or("no request: expected check, start-accepting-pin or status")?;
         let dev = match (any_dev, etc, run, budget) {
             (false, ..) => None,
             (true, Some(etc), Some(run), Some(budget)) => Some(Dev { etc, run, budget, owner, chkpwd, log }),

@@ -27,7 +27,7 @@ pub trait Transaction {
     fn typed(&self) -> Result<Secret, Error>;
 }
 
-/// `Ok(true)` unlocks (for `check`) or armed the PIN (for `arm`). Everything else refuses.
+/// `Ok(true)` unlocks (for `check`) or started accepting the PIN (for `start-accepting-pin`). Everything else refuses.
 pub fn run(transaction: &impl Transaction, args: &Args) -> Result<bool, Error> {
     calling_account(transaction)?;
     let typed = transaction.typed()?;

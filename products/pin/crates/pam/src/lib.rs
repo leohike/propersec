@@ -3,10 +3,13 @@
 //! Two lines of `/etc/pam.d/kde` call it, around a direct `pam_unix` line (see `pam/kde-auth.pam`):
 //!
 //! ```text
-//! check  Is the typed input the PIN, and is the PIN armed right now? Success unlocks, but never
-//!        sooner than min_milliseconds_before_pin_unlock after the module was called; anything
-//!        else returns PAM_IGNORE at once, so pam_unix checks the same input as the password.
-//! arm    The password just succeeded: arm the PIN, with no failures and a fresh window.
+//! check                Is the typed input the PIN, and is the lock screen accepting the PIN right
+//!                      now? Success unlocks, but never sooner than
+//!                      min_milliseconds_before_pin_unlock after the module was called; anything
+//!                      else returns PAM_IGNORE at once, so pam_unix checks the same input as the
+//!                      password.
+//! start-accepting-pin  The password just succeeded: start accepting the PIN, with no failures,
+//!                      for the full expiry_hours.
 //! ```
 //!
 //! It decides nothing itself. The hashes and the counts belong to the `properpin` group, out of
@@ -18,7 +21,7 @@
 //! ```text
 //! helper=PATH    the helper (/usr/local/libexec/properpin/properpin-helper)   required
 //! config=PATH    the global config (/etc/properpin/config), for how long a     required with check,
-//!                correct PIN takes at least                                    refused with arm
+//!                correct PIN takes at least                                    refused with start-accepting-pin
 //! log=FILE       append the module's own log lines here instead of syslog (tests)
 //! test_panic     panic on purpose while SIGCHLD is changed, to prove a panic becomes PAM_IGNORE
 //!                and puts SIGCHLD back (tests)

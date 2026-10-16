@@ -5,7 +5,7 @@ A short assessment of properpin as it would be with everything planned so far bu
 ## What "complete" means here
 
 - **The setgid helper** (`docs/spec-setgid-helper.md`): hashes `root:properpin 0640`, counts in `/run/properpin`, a root-owned helper setgid to a group with no members. Nothing the user runs can read a hash or reset a count.
-- **The pepper** (built): a random secret mixed into the PIN hash, in clear text only in RAM (`/run/properpin`) while the PIN is armed, and on disk only encrypted under a key derived from the password (`docs/pepper-terminology.md`). A stolen hash and encrypted pepper can't be cracked without guessing the password first. `/run/properpin` not being a memory filesystem is warned about, not refused.
+- **The pepper** (built): a random secret mixed into the PIN hash, in clear text only in RAM (`/run/properpin`) while the lock screen is accepting the PIN, and on disk only encrypted under a key derived from the password (`docs/pepper-terminology.md`). A stolen hash and encrypted pepper can't be cracked without guessing the password first. `/run/properpin` not being a memory filesystem is warned about, not refused.
 - **The failure budget** (built): every failure nobody forgave counts across reboots, and 10 a day, 20 a week or 100 per PIN disable it until root turns it back on.
 - **PIN equal to the password refused** at `properpin set`.
 - **Assumed about the system**: full-disk encryption (LUKS), swap that never reaches disk unencrypted (zram, or swap inside LUKS), and no hibernation to an unencrypted disk. The development machine meets all three (zram only, hibernation disabled).
@@ -20,7 +20,7 @@ A short assessment of properpin as it would be with everything planned so far bu
 | Someone watching you type, or a camera | A short secret typed many times a day | A long secret typed rarely, now that the PIN does the daily unlocks | **The PIN is easier to catch**; the password gets harder |
 | Root on the running machine | Can read the hash and the pepper | Can log the password, read memory, unlock the session | **None**: root wins either way |
 | Cold boot, DMA, any RAM reader | Could recover the hash and the pepper | Gets the LUKS master key, in RAM for the whole session, and with it the disk | **None**: the disk key is worth more than any PIN |
-| Reboot, or the PIN's expiry | The PIN stops working until the next password unlock | n/a | The PIN only exists while armed |
+| Reboot, or the PIN's expiry | The PIN stops working until the next password unlock | n/a | The PIN only works while the lock screen is accepting it |
 
 ## Conclusion
 

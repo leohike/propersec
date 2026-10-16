@@ -21,7 +21,7 @@ A bug has to get through all of them to matter. That works in properpin because 
 ## Conditions, or the layering is an illusion
 
 - **Independence.** No shared parsing, state or code path between the layers beyond the lock, so one bug can't break two at once.
-- **One small place decides.** The helper's exit code, the PAM control flags and the arming check: if any single place says "unlock" without asking every layer, all of them are bypassed. Keep it a few lines long, and test that removing any one layer still refuses, the way the product README's "broken on purpose" checks already work.
+- **One small place decides.** The helper's exit code, the PAM control flags and the check that the lock screen is accepting the PIN: if any single place says "unlock" without asking every layer, all of them are bypassed. Keep it a few lines long, and test that removing any one layer still refuses, the way the product README's "broken on purpose" checks already work.
 - **Count before checking,** in every layer, as the existing counting order requires; the TPM does it by itself.
 - **No secret escapes.** The layers limit guessing, not the use of a known PIN, so a leak bypasses all of them. For the TPM code that means:
   - salted sessions, with the TPM's key checked against the one recorded at `set`;

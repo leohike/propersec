@@ -1,11 +1,11 @@
 //! `properpin`: manage the PIN that unlocks the KDE lock screen.
 //!
 //! ```text
-//! sudo properpin set      choose a new PIN, typed twice, then your password; arms it at once and
-//!                         starts its budget of failures over
+//! sudo properpin set      choose a new PIN, typed twice, then your password; the lock screen
+//!                         accepts it at once, and its budget of failures starts over
 //! sudo properpin enable   turn a PIN disabled by too many concerning failures back on
 //! sudo properpin remove   delete it; the lock screen takes the password only
-//! properpin status        your PIN: what is set, which rules apply, and whether it is armed now
+//! properpin status        your PIN: what is set, which rules apply, and whether the lock screen is accepting it now
 //! ```
 //!
 //! `set`, `enable` and `remove` change files only root may change, so they run under sudo or pkexec, and
@@ -33,7 +33,9 @@ use std::process::{Command, ExitCode, Stdio};
 
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
-use properpin_core::{Clock, MAX_INPUT_BYTES, MAX_PIN_BYTES, PasswordCheck, Secret, Store, arm, exit};
+use properpin_core::{
+    Clock, MAX_INPUT_BYTES, MAX_PIN_BYTES, PasswordCheck, Secret, Store, exit, start_accepting_pin_after_password_unlock,
+};
 use properpin_sys::{Account, BootClock, UnixChkpwd, UserFiles, Yescrypt, current_euid, current_uid, group_by_name};
 
 /// Manage the PIN that unlocks the KDE lock screen.
@@ -46,7 +48,7 @@ struct Cli {
     /// Where each user's budget of failures lives; /var/lib/properpin once installed
     #[arg(long, value_name = "DIR")]
     budget: PathBuf,
-    /// Where each user's per-boot state lives, which set arms and remove deletes; /run/properpin
+    /// Where each user's per-boot state lives, which set starts accepting the PIN with and remove deletes; /run/properpin
     /// once installed
     #[arg(long, value_name = "DIR")]
     run: PathBuf,
@@ -68,14 +70,14 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Action {
-    /// Choose a new PIN, typed twice, then your password; arms it at once and starts its budget of
-    /// failures over
+    /// Choose a new PIN, typed twice, then your password; the lock screen accepts it at once, and its
+    /// budget of failures starts over
     Set(Target),
     /// Turn a PIN disabled by too many concerning failures back on, keeping it
     Enable(Target),
     /// Delete the PIN; the lock screen takes the password only
     Remove(Target),
-    /// Show your PIN: what is set and whether it is armed right now
+    /// Show your PIN: what is set and whether the lock screen is accepting it right now
     Status,
 }
 
@@ -141,7 +143,7 @@ fn set(cli: &Cli, account: &Account) -> Result<()> {
     if !problems.is_empty() {
         bail!("the PIN needs {}", problems.join(", "));
     }
-    // The password seals the pepper, so a mistyped one would leave a PIN that never arms.
+    // The password seals the pepper, so a mistyped one would leave a PIN the lock screen never starts accepting.
     let password = ask_secret(&mut input, &format!("Password for {}: ", account.name), MAX_INPUT_BYTES)?;
     if password.as_bytes().is_empty() || !UnixChkpwd(cli.chkpwd.clone()).matches(&account.name, &password)? {
         bail!("that is not the password of {}; nothing was changed", account.name);
@@ -155,13 +157,16 @@ fn set(cli: &Cli, account: &Account) -> Result<()> {
     files.save_pin(&new.pairs(), group)?;
     // A new PIN, so no failure against the old one counts any more, and nothing stays disabled.
     files.remove_budget()?;
-    // Armed now, as a password unlock would: the password was just typed, and the pepper is at hand.
-    match arm(&files, &BootClock, new.pepper) {
-        Ok(_) => println!("PIN set for {}, and armed now. After it expires, a password unlock arms it again.", account.name),
+    // Accepting the PIN from now, as after a password unlock: the password was just typed, and the pepper is at hand.
+    match start_accepting_pin_after_password_unlock(&files, &BootClock, new.pepper) {
+        Ok(_) => println!(
+            "PIN set for {}, and the lock screen is accepting it from now. Once that expires, unlocking with the password starts accepting it again.",
+            account.name
+        ),
         Err(error) => println!("PIN set for {}. It works after the next password unlock at the lock screen ({error}).", account.name),
     }
     if files.runtime_on_tmpfs() == Some(false) {
-        println!("Warning: {} is not on tmpfs, so the armed PIN's pepper may be written to a disk.", cli.run.display());
+        println!("Warning: {} is not on tmpfs, so the pepper kept for accepting the PIN may be written to a disk.", cli.run.display());
     }
     Ok(())
 }
@@ -282,6 +287,6 @@ mod tests {
         let long = vec![b'1'; MAX_PIN_BYTES * 3];
         let typed = read_secret_line(&mut &long[..], MAX_PIN_BYTES).unwrap();
         assert_eq!(typed.as_bytes().len(), MAX_PIN_BYTES + 2);
-        assert_eq!(properpin_core::usable_input(typed.as_bytes()), None);
+        assert_eq!(properpin_core::input_that_could_be_a_pin(typed.as_bytes()), None);
     }
 }

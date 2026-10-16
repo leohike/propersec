@@ -68,14 +68,14 @@ The root README is still headed "lazypass" with "TBD…", the repository is prop
 
 ### Settings and defaults that are hard to change later
 
-A default users never touch becomes a promise. Before a release, decide the open ones in the plan: the default `hash_cost` (5 today, 8 measured to be fine), the lowest allowed `hash_cost`, the limits of the failure budget, the eight-hour expiry, and whether fingerprint and smartcard unlocks arm the PIN (the plan's row says it should be a stated decision, not an accident).
+A default users never touch becomes a promise. Before a release, decide the open ones in the plan: the default `hash_cost` (5 today, 8 measured to be fine), the lowest allowed `hash_cost`, the limits of the failure budget, the eight-hour expiry, and whether fingerprint and smartcard unlocks start accepting the PIN (the plan's row says it should be a stated decision, not an accident).
 
 ## Testing still to do
 
 On top of 6.8 and uninstall, from the Aurora VM report's list of what remains untested on a real system, these matter before strangers rely on it:
 
 - **The PIN disabled by the budget,** then refused after the password, and `sudo properpin enable` bringing it back, at the real lock screen.
-- **Expiry** after eight hours armed, and **suspend and resume** with the PIN armed, since laptops sleep with the lock screen up far more often than they reboot.
+- **Expiry** after eight hours of accepting the PIN, and **suspend and resume** while the lock screen is accepting the PIN, since laptops sleep with the lock screen up far more often than they reboot.
 - **A password change,** which should stop the PIN silently until the next `set`, and `properpin status` saying so.
 - **Other services refusing the PIN** for real: polkit, SDDM, a TTY login and SSH, not only `sudo`.
 - **More than one user with a PIN,** and a confined SELinux user (`user_t`, `staff_t`), where running a setgid program from `/usr/local/libexec` may be refused.

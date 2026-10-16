@@ -14,7 +14,7 @@ use crate::{
 /// only root can change them.
 ///
 /// The unlock path uses the hash, the next three fields and the budget's five; `set` uses the
-/// four in between, and `seal_cost`; arming uses the cleartext salt for deriving the pepper decryption key and the
+/// four in between, and `seal_cost`; starting to accept the PIN uses the cleartext salt for deriving the pepper decryption key and the
 /// encrypted pepper. The PAM module itself reads `min_milliseconds_before_pin_unlock`. The
 /// budget's settings, `seal_cost` and `min_milliseconds_before_pin_unlock` may only come from the
 /// global config.
@@ -24,11 +24,11 @@ pub struct Settings {
     /// (`hash_of_peppered_pin`).
     pub pin_hash: String,
     /// The yescrypt setting the pepper's key is derived from the password with, salt and cost
-    /// both. Empty only for a PIN set before peppers, which can never be armed.
+    /// both. Empty only for a PIN set before peppers, which the lock screen can never start accepting.
     pub cleartext_salt_for_deriving_pepper_decryption_key: String,
     /// The pepper XORed with that key, as 64 hex digits.
     pub encrypted_pepper: String,
-    /// How long the PIN stays armed after a password unlock.
+    /// How long the lock screen keeps accepting the PIN after a password unlock.
     pub expiry_hours: f64,
     /// Failures in a row after which the password is required.
     pub max_failures: u32,
@@ -198,16 +198,16 @@ impl Settings {
     }
 
     /// Why the PIN must be refused right now without even checking it, which means the password
-    /// is required; or `None` while the PIN is armed.
+    /// is required; or `None` while the lock screen is accepting the PIN.
     ///
     /// `boot_id` and `now` (seconds since boot) are passed in, so tests can try every case
     /// without a real clock or a reboot.
     pub fn refusal(&self, state: Option<&PinState>, boot_id: &str, now: u64) -> Option<Refusal> {
-        let Some(state) = state else { return Some(Refusal::NotArmed) };
+        let Some(state) = state else { return Some(Refusal::NoPasswordUnlockSinceBoot) };
         if state.boot_id != boot_id {
             return Some(Refusal::OtherBoot);
         }
-        let Some(age) = now.checked_sub(state.armed_at) else { return Some(Refusal::ArmedInFuture) };
+        let Some(age) = now.checked_sub(state.accepting_pin_since) else { return Some(Refusal::AcceptingPinSinceInFuture) };
         if age as f64 >= self.expiry_seconds() {
             return Some(Refusal::Expired { age });
         }

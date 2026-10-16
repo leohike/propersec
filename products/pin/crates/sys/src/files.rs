@@ -37,7 +37,7 @@ const LOCK_TIMEOUT: Duration = Duration::from_secs(1);
 /// user's run of the helper can't read, replace or plant another's. The budget follows the same
 /// rules in a directory on disk, so it survives a reboot; the run directory's lock covers it.
 /// `properpin enable` needs the `etc` side and the budget; [`UserFiles::with_runtime`] adds the
-/// state, which the helper keeps, `properpin set` arms, and `properpin remove` deletes. Whoever
+/// state, which the helper keeps, `properpin set` starts accepting the PIN with, and `properpin remove` deletes. Whoever
 /// writes the state or creates the lock file, the user or root, gives it to the user.
 #[derive(Debug, Clone)]
 pub struct UserFiles {
@@ -152,7 +152,7 @@ impl UserFiles {
         }
     }
 
-    /// Delete the state, and the pepper in it: `remove` leaves nothing armed behind.
+    /// Delete the state, and the pepper in it: `remove` leaves no PIN accepted behind.
     pub fn remove_state(&self) -> Result<bool, Error> {
         let path = self.trusted_run_dir()?.join(format!("{}.state", self.uid));
         match fs::remove_file(&path) {
@@ -482,7 +482,7 @@ mod tests {
         let Scratch { files, .. } = &scratch();
         assert_eq!(files.load_state(), None);
         let pepper = properpin_core::Pepper::new(Zeroizing::new([9; properpin_core::PEPPER_BYTES]));
-        let state = PinState::armed("b", 7, pepper);
+        let state = PinState::accepting_pin_from("b", 7, pepper);
         let _lock = files.lock().unwrap();
         files.save_state(&state).unwrap();
         assert_eq!(files.load_state(), Some(state));
@@ -495,7 +495,7 @@ mod tests {
     #[test]
     fn a_state_others_could_read_reads_as_none() {
         let Scratch { files, .. } = &scratch();
-        files.save_state(&PinState { boot_id: "b".into(), armed_at: 7, failures: 0, pepper: None }).unwrap();
+        files.save_state(&PinState { boot_id: "b".into(), accepting_pin_since: 7, failures: 0, pepper: None }).unwrap();
         fs::set_permissions(files.state_file().unwrap(), Permissions::from_mode(0o640)).unwrap();
         assert_eq!(files.load_state(), None);
     }
@@ -517,7 +517,7 @@ mod tests {
             fs::set_permissions(&dir, Permissions::from_mode(mode)).unwrap();
             let error = files.lock().unwrap_err().to_string();
             assert!(error.contains(&format!("mode {mode:04o}, not 1770")), "{error}");
-            assert!(files.save_state(&PinState { boot_id: "b".into(), armed_at: 7, failures: 0, pepper: None }).is_err());
+            assert!(files.save_state(&PinState { boot_id: "b".into(), accepting_pin_since: 7, failures: 0, pepper: None }).is_err());
         }
         fs::set_permissions(&dir, Permissions::from_mode(0o1770)).unwrap();
         assert!(files.lock().is_ok());
@@ -572,7 +572,11 @@ mod tests {
             runtime.owner,
             runtime.group,
         );
-        write(&victim.state_file().unwrap(), &PinState { boot_id: "b".into(), armed_at: 7, failures: 0, pepper: None }.format(), 0o600);
+        write(
+            &victim.state_file().unwrap(),
+            &PinState { boot_id: "b".into(), accepting_pin_since: 7, failures: 0, pepper: None }.format(),
+            0o600,
+        );
         assert_eq!(victim.load_state(), None);
     }
 
@@ -593,7 +597,7 @@ mod tests {
             runtime.owner,
             runtime.group,
         );
-        let state = PinState { boot_id: "b".into(), armed_at: 7, failures: 1, pepper: None };
+        let state = PinState { boot_id: "b".into(), accepting_pin_since: 7, failures: 1, pepper: None };
         files.save_state(&state).unwrap();
         assert_eq!(other.load_state(), None);
         assert_ne!(files.state_file(), other.state_file());

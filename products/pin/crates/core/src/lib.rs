@@ -4,8 +4,8 @@
 //!
 //! - **password**: the account password. It works everywhere, always, and pam_unix checks it.
 //! - **PIN**: a short extra secret, digits or letters, that unlocks the lock screen and nothing
-//!   else, and only while it is *armed*: for some hours after a password unlock, and until too
-//!   many failures in a row. Otherwise the password is required. Too many failures nobody forgave,
+//!   else, and only while the lock screen is *accepting the PIN*: for some hours after a password
+//!   unlock, and until too many failures in a row. Otherwise it is *password required*. Too many failures nobody forgave,
 //!   across days and reboots, disable the PIN altogether ([`Budget`]).
 //!
 //! This crate decides and does nothing else: no files, no clock, no hashing, no PAM. Those come
@@ -28,7 +28,10 @@ mod secret;
 mod settings;
 mod state;
 
-pub use attempt::{CheckOutcome, Clock, Hasher, Log, PasswordCheck, Store, Verdict, arm, check, usable_input};
+pub use attempt::{
+    Clock, Hasher, Log, PasswordCheck, Store, UnlockAttemptOutcome, Verdict, input_that_could_be_a_pin,
+    start_accepting_pin_after_password_unlock, try_unlock_with_pin,
+};
 pub use budget::{Budget, Counts, DAY, Disabled, Judged, Limit, WEEK};
 pub use error::Error;
 pub use pepper::{PEPPER_BYTES, Pepper, to_hex as pepper_hex};
@@ -66,9 +69,10 @@ pub const USER_ONLY: &[&str] = &[HASH_SETTING, CLEARTEXT_SALT_FOR_DERIVING_PEPPE
 
 /// The setgid helper's exit codes, which are all it answers: the PAM module and the CLI read them.
 pub mod exit {
-    /// `check`: the PIN unlocks. `arm`: the PIN is armed. `status`: printed.
+    /// `check`: the PIN unlocks. `start-accepting-pin`: accepting the PIN from now. `status`: printed.
     pub const YES: u8 = 0;
-    /// `check`: not unlocked. `arm`: not armed. A clean "no", logged by the helper.
+    /// `check`: not unlocked. `start-accepting-pin`: a wrong password, or a disabled PIN. A clean "no",
+    /// logged by the helper.
     pub const NO: u8 = 1;
     /// Bad arguments, or a refused environment: run as root, a terminal on stdin, `--dev-*` options
     /// under setgid.

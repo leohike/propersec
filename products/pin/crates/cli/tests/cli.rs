@@ -50,14 +50,14 @@ impl Sandbox {
             .assert()
     }
 
-    /// What the lock screen's arm line does after a correct password. It must arm the PIN.
-    fn arm(&self) {
-        assert!(self.try_arm(), "the password didn't arm the PIN");
+    /// What the lock screen's start-accepting-pin line does after a correct password. It must succeed.
+    fn start_accepting_pin(&self) {
+        assert!(self.try_start_accepting_pin(), "the password didn't start accepting the PIN");
     }
 
-    fn try_arm(&self) -> bool {
+    fn try_start_accepting_pin(&self) -> bool {
         let status = std::process::Command::new(self.0.path().join("helper"))
-            .arg("arm")
+            .arg("start-accepting-pin")
             .stdin(std::process::Stdio::piped())
             .spawn()
             .and_then(|mut child| {
@@ -144,10 +144,10 @@ fn set_then_status_then_remove() {
         "{text}"
     );
 
-    // Armed at once: set had the password, so it had the pepper.
+    // Accepting the PIN at once: set had the password, so it had the pepper.
     let status = stdout(&sandbox.properpin(&["status"], "").success());
     assert!(status.contains("PIN        set"), "{status}");
-    assert!(status.contains("PIN armed for another"), "{status}");
+    assert!(status.contains("accepting the PIN for another"), "{status}");
     assert!(unlocks(&sandbox, "4859"));
     assert!(!unlocks(&sandbox, "4860"));
 
@@ -167,7 +167,7 @@ fn set_refuses_mismatches_and_weak_pins() {
     says(&sandbox.properpin(&["set"], "4859\n4859\nnot the password\n").failure(), "that is not the password of");
     says(&sandbox.properpin(&["set"], "4859\n4859\n\n").failure(), "that is not the password of");
     assert!(sandbox.user_files().is_empty());
-    assert_eq!(fs::read_dir(sandbox.0.path().join("run")).unwrap().count(), 0, "nothing armed");
+    assert_eq!(fs::read_dir(sandbox.0.path().join("run")).unwrap().count(), 0, "no PIN accepted");
 }
 
 #[test]
@@ -190,7 +190,7 @@ fn a_set_pin_survives_a_reboot_through_the_password() {
         fs::remove_file(entry.unwrap().path()).unwrap();
     }
     assert!(!unlocks(&sandbox, "4859"));
-    sandbox.arm();
+    sandbox.start_accepting_pin();
     assert!(unlocks(&sandbox, "4859"));
 }
 
@@ -198,9 +198,9 @@ fn a_set_pin_survives_a_reboot_through_the_password() {
 fn status_shows_what_the_helper_sees() {
     let sandbox = Sandbox::new();
     sandbox.properpin(&["set"], &new_pin("4859", "4859")).success();
-    sandbox.arm();
+    sandbox.start_accepting_pin();
     let status = stdout(&sandbox.properpin(&["status"], "").success());
-    assert!(status.contains("PIN armed for another"), "{status}");
+    assert!(status.contains("accepting the PIN for another"), "{status}");
     fs::remove_file(sandbox.0.path().join("helper")).unwrap();
     says(&sandbox.properpin(&["status"], "").failure(), "helper");
 }
@@ -237,13 +237,13 @@ fn enable_and_set_bring_a_disabled_pin_back() {
     sandbox.properpin(&["set"], &new_pin("4859", "4859")).success();
     let disabled = Some(Disabled { limit: Limit::Day(10), at: 1_800_000_000 });
     sandbox.write_budget(&Budget { concerning: vec![1_800_000_000], total: 10, disabled, ..Budget::default() });
-    assert!(!sandbox.try_arm(), "a disabled PIN is never armed");
+    assert!(!sandbox.try_start_accepting_pin(), "a disabled PIN is never accepted");
     says(&sandbox.properpin(&["status"], "").success(), "the PIN is disabled after 10 concerning failures within 24 hours");
 
     says(&sandbox.properpin(&["enable"], "").success(), "PIN enabled again");
-    sandbox.arm();
+    sandbox.start_accepting_pin();
     let status = stdout(&sandbox.properpin(&["status"], "").success());
-    assert!(status.contains("PIN armed for another") && status.contains("10 since the PIN was set (of 100)"), "{status}");
+    assert!(status.contains("accepting the PIN for another") && status.contains("10 since the PIN was set (of 100)"), "{status}");
     says(&sandbox.properpin(&["enable"], "").success(), "wasn't disabled");
 
     sandbox.write_budget(&Budget {
@@ -253,9 +253,9 @@ fn enable_and_set_bring_a_disabled_pin_back() {
     });
     says(&sandbox.properpin(&["enable"], "").failure(), "choose a new one with: properpin set");
     sandbox.properpin(&["set"], &new_pin("4860", "4860")).success();
-    sandbox.arm();
+    sandbox.start_accepting_pin();
     let status = stdout(&sandbox.properpin(&["status"], "").success());
-    assert!(status.contains("PIN armed for another") && status.contains("0 since the PIN was set"), "{status}");
+    assert!(status.contains("accepting the PIN for another") && status.contains("0 since the PIN was set"), "{status}");
 
     sandbox.properpin(&["remove"], "").success();
     assert!(!sandbox.0.path().join(format!("var/{}.budget", current_uid())).exists(), "remove leaves no budget behind");

@@ -153,7 +153,7 @@ impl Sandbox {
         attempt
     }
 
-    /// Unlock with the password, which arms the PIN.
+    /// Unlock with the password, which starts accepting the PIN.
     fn unlock_with_password(&self) {
         assert!(self.attempt(Password::Right, PASSWORD).unlocked());
     }
@@ -195,18 +195,18 @@ fn after_boot_only_the_password_works() {
 }
 
 #[test]
-fn the_password_arms_the_pin_and_the_pin_unlocks() {
+fn the_password_starts_accepting_the_pin_and_the_pin_unlocks() {
     let sandbox = Sandbox::new();
     sandbox.unlock_with_password();
     assert!(sandbox.log().contains("longer than 12 characters, so not the PIN"), "{}", sandbox.log());
-    assert!(sandbox.log().contains("password accepted, PIN armed"));
+    assert!(sandbox.log().contains("password correct, accepting the PIN for the next 8h"));
     // pam_deny now stands for any password: only the PIN can unlock.
     assert!(sandbox.attempt(Password::Wrong, PIN).unlocked());
     assert!(sandbox.log().contains("unlocked with the PIN"));
 }
 
 #[test]
-fn a_wrong_password_never_arms_the_pin() {
+fn a_wrong_password_never_starts_accepting_the_pin() {
     let sandbox = Sandbox::new();
     assert!(!sandbox.attempt(Password::Wrong, "a wrong password, long enough").unlocked());
     assert!(!sandbox.run_dir().join(format!("{}.state", current_uid())).exists());
@@ -214,7 +214,7 @@ fn a_wrong_password_never_arms_the_pin() {
 }
 
 #[test]
-fn wrong_pins_fall_through_and_three_disarm() {
+fn wrong_pins_fall_through_and_three_require_the_password() {
     let sandbox = Sandbox::new();
     sandbox.unlock_with_password();
     for wrong in ["1111", "2222", "3333"] {
@@ -298,9 +298,9 @@ fn one_session_serves_many_attempts() {
     let sandbox = Sandbox::new();
     let mut password = sandbox.session(Password::Right);
     let mut pin = sandbox.session(Password::Wrong);
-    assert!(!pin.authenticate(PIN).unlocked(), "not armed yet");
-    let armed = password.authenticate(PASSWORD);
-    assert!(armed.unlocked() && armed.setcred.is_some(), "{armed:?}");
+    assert!(!pin.authenticate(PIN).unlocked(), "not accepting the PIN yet");
+    let unlocked = password.authenticate(PASSWORD);
+    assert!(unlocked.unlocked() && unlocked.setcred.is_some(), "{unlocked:?}");
     for (typed, unlocks) in [(PIN, true), ("1111", false), (PIN, true), ("1111", false), ("2222", false), ("3333", false), (PIN, false)] {
         let attempt = pin.authenticate(typed);
         assert_eq!(attempt.unlocked(), unlocks, "{typed}: {attempt:?}\n{}", sandbox.log());
@@ -309,7 +309,7 @@ fn one_session_serves_many_attempts() {
     }
     assert!(sandbox.log().contains("failure 3 of 3, password required from now on"), "{}", sandbox.log());
     assert!(password.authenticate(PASSWORD).unlocked());
-    assert!(pin.authenticate(PIN).unlocked(), "the PIN's session works again once the password re-armed it");
+    assert!(pin.authenticate(PIN).unlocked(), "the PIN's session works again once the password started accepting it again");
     // The PIN on the session whose password would pass: the check line ends the stack first.
     assert!(password.authenticate(PIN).unlocked());
     assert!(sandbox.log().contains("unlocked with the PIN"));
@@ -358,12 +358,12 @@ fn in_own_process(test: &str) -> Option<String> {
     Some(said)
 }
 
-/// What every host must still get: the password arms the PIN, the PIN unlocks and a wrong one doesn't.
+/// What every host must still get: the password starts accepting the PIN, the PIN unlocks and a wrong one doesn't.
 fn the_usual_answers(sandbox: &Sandbox) {
     let mut password = sandbox.session(Password::Right);
     let mut pin = sandbox.session(Password::Wrong);
     assert!(password.authenticate(PASSWORD).unlocked());
-    assert!(sandbox.log().contains("password accepted, PIN armed"), "{}", sandbox.log());
+    assert!(sandbox.log().contains("password correct, accepting the PIN for the next 8h"), "{}", sandbox.log());
     assert!(pin.authenticate(PIN).unlocked(), "{}", sandbox.log());
     assert!(!pin.authenticate("1111").unlocked());
     assert!(pin.authenticate(PIN).unlocked(), "{}", sandbox.log());
