@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
-# Writes the repo's licence texts into LICENSES/, REUSE style (one file per
-# licence, named by its SPDX identifier), from SPDX's license-list-data at a
-# pinned tag. Each download must match the SHA-256 below, or nothing is
-# written. Existing files that differ are kept unless --force is given.
+# Writes the repo's licence texts from SPDX's license-list-data at a pinned
+# tag, twice: into LICENSES/, REUSE style (one file per licence, named by its
+# SPDX identifier), and as LICENSE-MIT and LICENSE-APACHE at the root, the
+# names GitHub's licence detection looks for. Each download must match the
+# SHA-256 below, or nothing is written. Existing files that differ are kept
+# unless --force is given.
 #
 # Usage: scripts/fetch-licenses.sh [--force]
 
@@ -25,7 +27,6 @@ case "${1-}" in
 esac
 
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-dest="$repo_root/LICENSES"
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
@@ -48,22 +49,32 @@ if [[ $(grep -cxF "$placeholder" "$tmp/MIT.txt") != 1 ]]; then
 fi
 sed -i "s|^Copyright (c) <year> <copyright holders>\$|Copyright (c) $MIT_HOLDER|" "$tmp/MIT.txt"
 
+# Each licence goes to these paths, relative to the repo root.
+declare -A TARGETS=(
+    [MIT]="LICENSES/MIT.txt LICENSE-MIT"
+    [Apache-2.0]="LICENSES/Apache-2.0.txt LICENSE-APACHE"
+)
+
 # Refuse to overwrite files that differ, unless forced.
 for id in MIT Apache-2.0; do
-    target="$dest/$id.txt"
-    if [[ -e $target ]] && ! cmp -s "$tmp/$id.txt" "$target" && (( ! force )); then
-        echo "error: $target exists and differs; rerun with --force to overwrite; nothing written" >&2
-        exit 1
-    fi
+    for rel in ${TARGETS[$id]}; do
+        target="$repo_root/$rel"
+        if [[ -e $target ]] && ! cmp -s "$tmp/$id.txt" "$target" && (( ! force )); then
+            echo "error: $target exists and differs; rerun with --force to overwrite; nothing written" >&2
+            exit 1
+        fi
+    done
 done
 
-mkdir -p "$dest"
 for id in MIT Apache-2.0; do
-    target="$dest/$id.txt"
-    if [[ -e $target ]] && cmp -s "$tmp/$id.txt" "$target"; then
-        echo "unchanged: LICENSES/$id.txt"
-    else
-        install -m 0644 "$tmp/$id.txt" "$target"
-        echo "wrote: LICENSES/$id.txt"
-    fi
+    for rel in ${TARGETS[$id]}; do
+        target="$repo_root/$rel"
+        mkdir -p "$(dirname "$target")"
+        if [[ -e $target ]] && cmp -s "$tmp/$id.txt" "$target"; then
+            echo "unchanged: $rel"
+        else
+            install -m 0644 "$tmp/$id.txt" "$target"
+            echo "wrote: $rel"
+        fi
+    done
 done
