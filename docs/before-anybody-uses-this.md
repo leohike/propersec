@@ -22,8 +22,8 @@ A setgid pinchecker and a module inside the lock screen are exactly what people 
 
 The worst thing properpin can do is lock its user out of their own lock screen: a module libpam can't load fails the whole `kde` stack, the right password included, as the Installing part of `docs/concerns.md` says. The repair exists (a TTY or SSH, then `install.sh uninstall`, which restores `/etc/pam.d/kde`) but is described only in test documents. Users need a short page, read before installing, that says:
 
-- make sure you can reach a text console (Ctrl+Alt+F3) or SSH in before you enable it, and that you know your password there;
-- keep a copy of `/etc/pam.d/kde` from before, and where `enable` keeps its own (`/etc/properpin/kde.pam.before-enable`);
+- make sure you can reach a text console (Ctrl+Alt+F3) or SSH in before you install it, and that you know your password there;
+- keep a copy of `/etc/pam.d/kde` from before, and where `install` keeps its own (`/etc/properpin/kde.pam.without-properpin`);
 - the one command that takes properpin out, and the one line to delete from `/etc/pam.d/kde` by hand if even that is not possible;
 - on an atomic desktop, that `ostree admin config-diff` shows what changed in `/etc`, and that an older deployment can be booted.
 
@@ -31,7 +31,7 @@ The repair from a text console should then actually be done in the VM, as `docs/
 
 ### Uninstall on a real system
 
-`install.sh disable` and `uninstall` were never run outside a container: not their interactive diff and prompt, not the relabelling of the restored PAM file, not the leftovers on an ostree system. It is the first item under "What remains untested on a real system" in the Aurora VM report and the cheapest blocker to clear: snapshot the VM, uninstall, check `ausearch` and the file list, compare `/etc/pam.d/kde` with the saved copy.
+`install.sh uninstall`, and `install` over an earlier install, were never run outside a container: not their interactive diff and prompt, not the relabelling of the restored PAM file, not the leftovers on an ostree system. It is the first item under "What remains untested on a real system" in the Aurora VM report and the cheapest blocker to clear: snapshot the VM, uninstall, check `ausearch` and the file list, compare `/etc/pam.d/kde` with the saved copy.
 
 ### Purge the PIN hashes on uninstall
 
@@ -44,11 +44,11 @@ Already a row in the plan and described in `docs/uninstall-should-purge-pin-hash
 - recheck the code against the tagged 6.8.0, as the plan's row says;
 - run the VM test again on 6.8: the "ms elapsed during pam_authenticate" journal lines, a PIN typed during the failure delay, suspend while an attempt runs, fingerprint and smartcard switching;
 - run an ostree image update with properpin enabled, before and after, as the Aurora VM report lists;
-- decide whether `check` and `enable` should warn, or refuse, on a kscreenlocker version properpin was never tested with. A refusal is safer; a warning is friendlier to users on distributions that move faster than the tests. Either way the supported versions belong in the README.
+- decide whether `check` and `install` should warn, or refuse, on a kscreenlocker version properpin was never tested with. A refusal is safer; a warning is friendlier to users on distributions that move faster than the tests. Either way the supported versions belong in the README.
 
 ### Supported systems, stated and enforced
 
-Only Fedora 44 (in a container) and Aurora 44 (in a VM) have run properpin. Debian, Ubuntu and their derivatives build the stack from `common-auth`, Arch from `system-local-login` and friends, openSUSE differently again, and `install.sh enable` expects Fedora's `auth substack password-auth` followed by `auth include postlogin`. `enable` should refuse any `/etc/pam.d/kde` it doesn't recognise, with a message naming the supported systems, and the README should list them. Users on other distributions will try anyway; the refusal is what keeps a guess from turning into a lock-out.
+Only Fedora 44 (in a container) and Aurora 44 (in a VM) have run properpin. Debian, Ubuntu and their derivatives build the stack from `common-auth`, Arch from `system-local-login` and friends, openSUSE differently again, and `install.sh install` expects Fedora's `auth substack password-auth` followed by `auth include postlogin`. `install` should refuse any `/etc/pam.d/kde` it doesn't recognise, with a message naming the supported systems, and the README should list them. Users on other distributions will try anyway; the refusal is what keeps a guess from turning into a lock-out.
 
 ## Decide now, while nobody depends on it
 
@@ -92,7 +92,7 @@ Today the only way to install properpin is to clone the repository, build with c
 
 - **Releases.** Semantic versions with git tags, a CHANGELOG that calls out security fixes, and release artifacts built only by CI, never on a laptop. Sign the tags.
 - **Provenance.** GitHub's artifact attestations give each release a signed record of which workflow built it from which commit, in the SLSA style, at no cost. A reproducible build (two independent builds, byte-identical output) is the stronger version and worth trying once the build is packaged.
-- **An RPM, in COPR.** On Fedora this is the natural channel, and on atomic desktops (Kinoite, Aurora, Bazzite) users can layer it with `rpm-ostree install`, after which it lives in `/usr` with the distribution's SELinux labels and survives image updates. Layering is meant for system software exactly like this. The package would install the files and the group; `enable`, the edit to `/etc/pam.d/kde`, should stay a separate command the user runs, never an RPM scriptlet, so a package install can never by itself change how the lock screen authenticates. Removal of the package should refuse, or disable first, while the PAM file still names the module, because otherwise it would delete a module the stack still loads, which is the lock-out described above.
+- **An RPM, in COPR.** On Fedora this is the natural channel, and on atomic desktops (Kinoite, Aurora, Bazzite) users can layer it with `rpm-ostree install`, after which it lives in `/usr` with the distribution's SELinux labels and survives image updates. Layering is meant for system software exactly like this. The package would install the files and the group; the edit to `/etc/pam.d/kde`, which `install.sh install` makes, should stay a command the user runs, never an RPM scriptlet, so a package install can never by itself change how the lock screen authenticates. That command would also have to take the lines out before a package update and put them back after, as `install.sh install` does. Removal of the package should refuse, or take the lines out first, while the PAM file still names the module, because otherwise it would delete a module the stack still loads, which is the lock-out described above.
 - **Image builders.** Aurora and other Universal Blue images are often customised with a containerfile; a short recipe for adding properpin's RPM to a custom image would reach exactly the people most likely to want this.
 - **Later,** a systemd-sysext image for atomic systems without layering, and packages for other distributions once their PAM layouts are supported.
 

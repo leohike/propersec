@@ -45,15 +45,15 @@ enum Breaks {
     Slows,
     /// The right password is refused.
     LocksOut,
-    /// `install.sh disable` gives up on the PAM file, so only uninstall can repair it.
-    DisableGivesUp,
+    /// `install.sh check` finds the PAM file damaged around properpin's lines.
+    Damaged,
 }
 
 struct Case {
     name: &'static str,
     /// The build to install: a directory under `BROKEN`, or `None` for the real one.
     variant: Option<&'static str>,
-    /// Done as root after install, enable and set.
+    /// Done as root after install and set.
     damage: fn() -> Outcome,
     breaks: &'static [Breaks],
 }
@@ -72,10 +72,10 @@ const CASES: &[Case] = &[
     Case { name: "module-deleted", variant: None, damage: delete_the_module, breaks: &[Breaks::LocksOut] },
     Case { name: "pinchecker-says-yes", variant: Some("pinchecker-says-yes"), damage: no_damage, breaks: &[Breaks::LetsAnyoneIn] },
     Case { name: "pinchecker-sleeps", variant: Some("pinchecker-sleeps"), damage: no_damage, breaks: &[Breaks::Slows] },
-    Case { name: "kde-end-marker-deleted", variant: None, damage: delete_the_end_marker, breaks: &[Breaks::DisableGivesUp] },
-    Case { name: "kde-block-twice", variant: None, damage: repeat_the_block, breaks: &[Breaks::DisableGivesUp] },
-    Case { name: "kde-markers-stripped", variant: None, damage: strip_the_markers, breaks: &[Breaks::DisableGivesUp] },
-    Case { name: "kde-cut-inside-block", variant: None, damage: cut_inside_the_block, breaks: &[Breaks::DisableGivesUp, Breaks::LocksOut] },
+    Case { name: "kde-end-marker-deleted", variant: None, damage: delete_the_end_marker, breaks: &[Breaks::Damaged] },
+    Case { name: "kde-block-twice", variant: None, damage: repeat_the_block, breaks: &[Breaks::Damaged] },
+    Case { name: "kde-markers-stripped", variant: None, damage: strip_the_markers, breaks: &[Breaks::Damaged] },
+    Case { name: "kde-cut-inside-block", variant: None, damage: cut_inside_the_block, breaks: &[Breaks::Damaged, Breaks::LocksOut] },
 ];
 
 fn delete_the_module() -> Outcome {
@@ -91,7 +91,7 @@ fn delete_the_end_marker() -> Outcome {
     edit_kde(|text| text.lines().filter(|line| *line != "# properpin end").map(|line| format!("{line}\n")).collect())
 }
 
-/// As if enable had run twice on a file that already had the block.
+/// As if properpin's lines had gone in twice.
 fn repeat_the_block() -> Outcome {
     edit_kde(|text| {
         let block: String = text.lines().take_while(|line| *line != "# properpin end").map(|line| format!("{line}\n")).collect();
@@ -186,8 +186,7 @@ impl Bench {
         }
 
         let from = case.variant.map_or(format!("{PRODUCT}/build"), |variant| format!("{BROKEN}/{variant}"));
-        install_sh_from(&from, &["install"])?;
-        install_sh_from(&from, &["enable", "--yes"])?;
+        install_sh_from(&from, &["install", "--yes"])?;
         properpin_as_root(&["set", "--user", USER], &format!("{PIN}\n{PIN}\n"))?;
         (case.damage)()?;
         self.is_broken(case).map_err(|error| format!("the broken install didn't break as expected: {error}"))?;
@@ -200,8 +199,7 @@ impl Bench {
         self.matches(&before, "after a second uninstall")?;
 
         // properpin itself still installs and works afterwards, and goes again just as cleanly.
-        install_sh(&["install"])?;
-        install_sh(&["enable", "--yes"])?;
+        install_sh(&["install", "--yes"])?;
         // The PIN file was kept, so this is the PIN already set, which set asks about first.
         properpin_as_root(&["set", "--user", USER, "--yes"], &format!("{PIN}\n{PIN}\n"))?;
         self.expect("kde", PASSWORD, &Ran::Unlocked, "the password, reinstalled")?;
@@ -234,17 +232,10 @@ impl Bench {
                     }
                 }
                 Breaks::LocksOut => self.expect("kde", PASSWORD, &Ran::Refused, "the right password")?,
-                Breaks::DisableGivesUp => {
-                    let gave_up = Command::new("bash")
-                        .arg(format!("{PRODUCT}/packaging/install.sh"))
-                        .args(["disable", "--yes"])
-                        .output()
-                        .map_err(message)?;
-                    let said = String::from_utf8_lossy(&gave_up.stderr);
-                    if gave_up.status.success() || !said.contains("fix it by hand") {
-                        return Err(format!("disable should give up on the damaged PAM file: {said}"));
-                    }
-                }
+                Breaks::Damaged => match install_sh(&["check"]) {
+                    Err(said) if said.contains("damaged around properpin's lines") => {}
+                    other => return Err(format!("check should find the PAM file damaged: {other:?}")),
+                },
             }
         }
         self.expect("sudo", PASSWORD, &Ran::Unlocked, "sudo, the way in for a repair")

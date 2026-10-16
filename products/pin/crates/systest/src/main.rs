@@ -2,8 +2,8 @@
 //! the real `/etc/pam.d`, the real `pam_unix` and its own setuid helper `unix_chkpwd`.
 //!
 //! It runs as root inside the container built from `testing/podman/Containerfile` (run it with
-//! `just properpin podman`), never on a real machine: it installs properpin, enables it in
-//! `/etc/pam.d/kde`, sets a PIN, and tampers with files as root.
+//! `just properpin podman`), never on a real machine: it installs properpin, which adds its lines
+//! to `/etc/pam.d/kde`, sets a PIN, and tampers with files as root.
 //!
 //! ```text
 //! properpin-systest run                    every scenario in order; exit 1 if any fails
@@ -162,7 +162,8 @@ fn run() -> ExitCode {
         ("one session serves many attempts, and the worker exits cleanly", one_session_serves_many_attempts),
         ("a killed worker never unlocks and loses no count", a_killed_worker_loses_no_count),
         ("a correct PIN waits out the minimum, and a kill meanwhile unlocks nothing", a_correct_pin_waits_out_the_minimum),
-        ("disable and uninstall leave PAM as it was", disable_and_uninstall),
+        ("installing again keeps the PIN and the lines", installing_again_keeps_the_pin),
+        ("uninstall leaves PAM as it was", uninstall_leaves_pam_as_it_was),
     ];
     let mut failed = 0;
     for (name, scenario) in scenarios {
@@ -761,17 +762,30 @@ fn a_killed_worker_loses_no_count(world: &World) -> Outcome {
     Ok(())
 }
 
-fn disable_and_uninstall(world: &World) -> Outcome {
+/// An upgrade is the same install again: properpin's lines come out and go back in, the PIN and
+/// the budget stay.
+fn installing_again_keeps_the_pin(world: &World) -> Outcome {
+    let kde = fs::read_to_string(KDE).map_err(message)?;
+    world.pin_refused("1111", "not the PIN, consecutive failure 1 of 3")?;
+    let said = install_sh(&["install", "--yes"])?;
+    if !said.contains("already has the lines this version ships") || fs::read_to_string(KDE).map_err(message)? != kde {
+        return Err(format!("install again changed {KDE}:\n{said}"));
+    }
+    world.pin_refused("2222", "not the PIN, consecutive failure 2 of 3")?;
     world.pin_unlocks()?;
-    install_sh(&["disable", "--yes"])?;
+    install_sh(&["check"]).map(drop)
+}
+
+fn uninstall_leaves_pam_as_it_was(world: &World) -> Outcome {
+    world.pin_unlocks()?;
+    install_sh(&["uninstall", "--yes"])?;
     let kde = fs::read_to_string(KDE).map_err(message)?;
     if kde != world.stock_kde {
-        return Err(format!("{KDE} after disable differs from before enable:\n{kde}"));
+        return Err(format!("{KDE} after uninstall differs from before install:\n{kde}"));
     }
     let pin = world.kde(PIN)?;
-    expect(!pin.unlocked && !pin.log.contains("pam_properpin"), "the PIN still works after disable", &pin)?;
+    expect(!pin.unlocked && !pin.log.contains("pam_properpin"), "the PIN still works after uninstall", &pin)?;
     world.password_unlocks()?;
-    install_sh(&["uninstall"])?;
     for gone in [
         "/usr/local/lib64/security/pam_properpin.so",
         "/usr/local/libexec/properpin",
@@ -804,7 +818,7 @@ struct World {
     /// The group the pinchecker runs with.
     pinchecker_gid: u32,
     syslog: Syslog,
-    /// `/etc/pam.d/kde` before enable.
+    /// `/etc/pam.d/kde` before install.
     stock_kde: String,
     /// The user file `properpin set` wrote.
     pin_file: Vec<u8>,
@@ -846,7 +860,7 @@ impl Answer {
 }
 
 impl World {
-    /// Listen on syslog, install and enable properpin, give the user a runtime directory, and set
+    /// Listen on syslog, install properpin, give the user a runtime directory, and set
     /// the PIN through the installed command.
     fn set_up() -> Outcome<Self> {
         if !Path::new("/run/.containerenv").exists() {
@@ -856,13 +870,12 @@ impl World {
         let syslog = Syslog::listen()?;
         let stock_kde = fs::read_to_string(KDE).map_err(message)?;
 
-        install_sh(&["install"])?;
-        install_sh(&["enable", "--yes"])?;
+        install_sh(&["install", "--yes"])?;
         let pinchecker_gid = group_by_name(PINCHECKER_GROUP).map_err(message)?;
 
         properpin_as_root(&["set", "--user", USER], &format!("{PIN}\n{PIN}\n"))?;
         let checked = install_sh(&["check"])?;
-        if !checked.contains("has properpin's lines") {
+        if !checked.contains("has the lines this version ships") {
             return Err(format!("install.sh check after set:\n{checked}"));
         }
         let pin_file = fs::read(format!("/etc/properpin/users/{USER}")).map_err(message)?;

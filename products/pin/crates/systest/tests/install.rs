@@ -108,14 +108,27 @@ fn built() -> &'static Path {
     })
 }
 
-#[test]
-fn install_enable_disable_uninstall_leaves_pam_as_it_was() {
+/// The PAM file once install has put properpin's lines in, the same for every fake root.
+fn installed_kde() -> String {
     let root = FakeRoot::new();
     root.ok("install");
-    assert!(root.ok("check").contains("no properpin lines"));
-    assert_eq!(fs::read_to_string(root.kde()).unwrap(), STOCK_KDE, "install must not touch PAM");
+    fs::read_to_string(root.kde()).unwrap()
+}
 
-    root.ok("enable");
+/// properpin's lines as a version before 2026-10-17 wrote them: another text after the begin
+/// marker, and arguments the module now rejects.
+const OLD_BLOCK: &str = "\
+# properpin begin: added by install.sh enable; install.sh disable removes everything down to the end marker
+auth  [success=done default=ignore]  /usr/local/lib64/security/pam_properpin.so check helper=/usr/local/libexec/properpin/properpin-helper config=/etc/properpin/config
+auth  [success=ok default=die]       pam_unix.so use_first_pass
+auth  optional                       /usr/local/lib64/security/pam_properpin.so start-accepting-pin helper=/usr/local/libexec/properpin/properpin-helper
+# properpin end
+";
+
+#[test]
+fn install_and_uninstall_leave_pam_as_it_was() {
+    let root = FakeRoot::new();
+    root.ok("install");
     let enabled = fs::read_to_string(root.kde()).unwrap();
     let lines: Vec<&str> = enabled.lines().collect();
     assert!(lines[0].starts_with("# properpin begin"), "{enabled}");
@@ -127,14 +140,11 @@ fn install_enable_disable_uninstall_leaves_pam_as_it_was() {
     assert!(lines[3].contains("pam_properpin.so housekeeping"));
     assert_eq!(lines[4], "# properpin end");
     assert!(enabled.ends_with(STOCK_KDE), "everything stock stays, below the block");
-    assert!(root.ok("check").contains("has properpin's lines"));
-    assert_eq!(fs::read_to_string(root.path("etc/properpin/kde.pam.before-enable")).unwrap(), STOCK_KDE);
+    assert!(root.ok("check").contains("has the lines this version ships"));
+    assert_eq!(fs::read_to_string(root.path("etc/properpin/kde.pam.without-properpin")).unwrap(), STOCK_KDE);
 
-    assert!(root.ok("disable").contains("exactly as it was before enable"));
+    assert!(root.ok("uninstall").contains("took properpin's lines out"));
     assert_eq!(fs::read_to_string(root.kde()).unwrap(), STOCK_KDE);
-    assert!(root.ok("disable").contains("nothing to do"));
-
-    root.ok("uninstall");
     for gone in [
         "usr/local/lib64/security/pam_properpin.so",
         "usr/local/libexec/properpin",
@@ -157,7 +167,8 @@ fn install_enable_disable_uninstall_leaves_pam_as_it_was() {
 fn install_puts_everything_in_place_and_twice_is_harmless() {
     let root = FakeRoot::new();
     root.ok("install");
-    root.ok("install");
+    assert!(root.ok("install").contains("already has the lines this version ships"));
+    assert_eq!(fs::read_to_string(root.kde()).unwrap(), installed_kde(), "the lines go in once");
     let check = root.ok("check");
     assert!(check.contains("all properpin files in place"), "{check}");
     let command = fs::read_to_string(root.path("usr/local/bin/properpin")).unwrap();
@@ -202,10 +213,10 @@ fn check_finds_what_is_wrong() {
     fs::set_permissions(&user_file, Permissions::from_mode(0o644)).unwrap();
     let problems = root.refused("check");
     assert!(problems.contains(&format!("users/{}: is 644", group())), "{problems}");
+    fs::set_permissions(&user_file, Permissions::from_mode(0o640)).unwrap();
 
     for (pinchecker, budget_dir) in [(0o755, 0o755), (0o4755, 0o700), (0o6755, 0o1777)] {
         root.ok("install");
-        fs::set_permissions(&user_file, Permissions::from_mode(0o640)).unwrap();
         fs::set_permissions(root.path("usr/local/libexec/properpin/properpin-pinchecker"), Permissions::from_mode(pinchecker)).unwrap();
         fs::set_permissions(root.path("var/lib/properpin"), Permissions::from_mode(budget_dir)).unwrap();
         fs::write(root.path("etc/tmpfiles.d/properpin.conf"), "d /var/lib/properpin 0777 root root -\n").unwrap();
@@ -227,6 +238,7 @@ fn install_removes_what_versions_with_a_pepper_left() {
     let users = root.path("etc/properpin/users");
     fs::write(users.join("old"), "hash = $y$x\ncleartext_salt_for_deriving_pepper_decryption_key = $y$s\nencrypted_pepper = 00\n").unwrap();
     fs::write(users.join("new"), "hash = $y$x\n").unwrap();
+    fs::set_permissions(users.join("new"), Permissions::from_mode(0o640)).unwrap();
     let budgets = root.path("var/lib/properpin");
     fs::write(budgets.join("1000.budget"), "pending = none\nconcerning = none\ntotal = 0\ndisabled = no\n").unwrap();
     fs::write(budgets.join("1001.budget"), "consecutive = 0\npending = none\nconcerning = none\ntotal = 0\ndisabled = no\n").unwrap();
@@ -256,55 +268,92 @@ fn check_wants_the_group() {
 }
 
 #[test]
-fn enable_refuses_anything_unexpected_and_leaves_the_file_alone() {
-    let root = FakeRoot::new();
-    assert!(root.refused("enable").contains("don't check out"), "enable before install");
-    root.ok("install");
+fn install_refuses_an_unexpected_pam_file_and_changes_nothing() {
     for (kde, why) in [
         ("auth include postlogin\n", "has 0 'auth substack password-auth' lines"),
         ("auth substack password-auth\nauth substack password-auth\n", "has 2 'auth substack password-auth' lines"),
-        ("# properpin begin: left over\nauth substack password-auth\n", "stray properpin marker"),
+        ("# properpin begin: left over\nauth substack password-auth\n", "no copy saved at install"),
     ] {
+        let root = FakeRoot::new();
         fs::write(root.kde(), kde).unwrap();
-        let said = root.refused("enable");
+        let said = root.refused("install");
         assert!(said.contains(why), "{said}");
         assert_eq!(fs::read_to_string(root.kde()).unwrap(), kde);
+        assert!(!root.path("usr").exists(), "nothing installed: {said}");
     }
+    let root = FakeRoot::new();
     fs::remove_file(root.kde()).unwrap();
-    assert!(root.refused("enable").contains("missing"));
-    assert!(!root.kde().exists(), "enable must never create the file");
+    assert!(root.refused("install").contains("missing"));
+    assert!(!root.kde().exists(), "install must never create the file");
+}
 
-    fs::write(root.kde(), STOCK_KDE).unwrap();
-    root.ok("enable");
-    assert!(root.refused("enable").contains("already has properpin's lines"));
+/// An install over an older version's lines replaces them with this version's, and takes over the
+/// copy that version saved under its old name.
+#[test]
+fn install_replaces_an_older_versions_lines() {
+    let root = FakeRoot::new();
+    root.ok("install");
+    fs::write(root.kde(), format!("{OLD_BLOCK}{STOCK_KDE}")).unwrap();
+    fs::rename(root.path("etc/properpin/kde.pam.without-properpin"), root.path("etc/properpin/kde.pam.before-enable")).unwrap();
+    assert!(root.refused("check").contains("not the ones this version ships"));
+    assert!(root.ok("install").contains("took properpin's lines out"));
+    assert_eq!(fs::read_to_string(root.kde()).unwrap(), installed_kde());
+    assert!(!root.path("etc/properpin/kde.pam.before-enable").exists());
+    assert_eq!(fs::read_to_string(root.path("etc/properpin/kde.pam.without-properpin")).unwrap(), STOCK_KDE);
+    root.ok("check");
+}
+
+/// An install that fails its check leaves properpin's lines out, so the lock screen takes the
+/// password only, and the next good install puts them back.
+#[test]
+fn a_failed_install_leaves_the_lines_out() {
+    let root = FakeRoot::new();
+    root.ok("install");
+    let config = root.path("etc/properpin/config");
+    fs::write(&config, "").unwrap();
+    fs::set_permissions(&config, Permissions::from_mode(0o600)).unwrap();
+    let said = root.refused("install");
+    assert!(said.contains("config: is 600") && said.contains("left without properpin's lines"), "{said}");
+    assert_eq!(fs::read_to_string(root.kde()).unwrap(), STOCK_KDE);
+    assert!(root.refused("check").contains("has no properpin lines"));
+    fs::set_permissions(&config, Permissions::from_mode(0o644)).unwrap();
+    root.ok("install");
+    assert_eq!(fs::read_to_string(root.kde()).unwrap(), installed_kde());
 }
 
 #[test]
-fn disable_keeps_changes_made_outside_the_block() {
+fn install_keeps_changes_made_outside_the_block() {
     let root = FakeRoot::new();
     root.ok("install");
-    root.ok("enable");
     let edited = format!("{}# added by an admin\n", fs::read_to_string(root.kde()).unwrap());
     fs::write(root.kde(), &edited).unwrap();
-    assert!(root.ok("disable").contains("changed in between"));
-    assert_eq!(fs::read_to_string(root.kde()).unwrap(), format!("{STOCK_KDE}# added by an admin\n"));
+    root.ok("install");
+    assert_eq!(fs::read_to_string(root.kde()).unwrap(), edited);
+    assert_eq!(
+        fs::read_to_string(root.path("etc/properpin/kde.pam.without-properpin")).unwrap(),
+        format!("{STOCK_KDE}# added by an admin\n"),
+        "the copy is of the file as it is now, without properpin's lines"
+    );
 }
 
+/// A block that can't be taken out cleanly: check says so, and install, like uninstall, starts
+/// from the copy it saved, keeping the damaged file.
 #[test]
-fn disable_refuses_a_damaged_block() {
+fn install_repairs_a_damaged_block() {
     let root = FakeRoot::new();
     root.ok("install");
-    root.ok("enable");
     let damaged = fs::read_to_string(root.kde()).unwrap().replace("# properpin end\n", "");
     fs::write(root.kde(), &damaged).unwrap();
-    assert!(root.refused("disable").contains("fix it by hand"));
-    assert_eq!(fs::read_to_string(root.kde()).unwrap(), damaged);
+    assert!(root.refused("check").contains("damaged around properpin's lines"));
+    assert!(root.ok("install").contains("goes back to the copy saved at install"));
+    assert_eq!(fs::read_to_string(root.kde()).unwrap(), installed_kde());
+    assert_eq!(fs::read_to_string(root.path("etc/properpin/kde.pam.damaged")).unwrap(), damaged);
 }
 
 #[test]
 fn bad_arguments_change_nothing() {
     let root = FakeRoot::new();
-    for args in [&["frobnicate"][..], &["install", "enable"], &[]] {
+    for args in [&["frobnicate"][..], &["install", "check"], &["enable"], &["disable"], &[]] {
         let output = Command::new("bash").arg(INSTALL_SH).args(args).arg("--root").arg(root.dir.path()).output().unwrap();
         assert_eq!(output.status.code(), Some(2), "{args:?}: {}", says(&output));
     }
@@ -316,7 +365,6 @@ fn bad_arguments_change_nothing() {
 fn uninstall_takes_the_lines_out_first() {
     let root = FakeRoot::new();
     root.ok("install");
-    root.ok("enable");
     let edited = format!("{}# added by an admin\n", fs::read_to_string(root.kde()).unwrap());
     fs::write(root.kde(), &edited).unwrap();
     assert!(root.ok("uninstall").contains("took properpin's lines out"));
@@ -324,16 +372,11 @@ fn uninstall_takes_the_lines_out_first() {
     assert!(!root.path("usr/local/lib64/security/pam_properpin.so").exists());
 }
 
-/// A block disable can't take out cleanly, or a file without its stock auth line: uninstall puts
-/// back the copy saved at enable, and keeps the damaged file.
+/// A block that can't be taken out cleanly, or a file without its stock auth line: uninstall puts
+/// back the copy saved at install, and keeps the damaged file.
 #[test]
 fn uninstall_restores_a_damaged_pam_file() {
-    let enabled = {
-        let root = FakeRoot::new();
-        root.ok("install");
-        root.ok("enable");
-        fs::read_to_string(root.kde()).unwrap()
-    };
+    let enabled = installed_kde();
     let block_end = enabled.find("# properpin end\n").unwrap() + "# properpin end\n".len();
     let first_line_end = enabled.find('\n').unwrap() + 1;
     let second_line_end = first_line_end + enabled[first_line_end..].find('\n').unwrap() + 1;
@@ -347,13 +390,10 @@ fn uninstall_restores_a_damaged_pam_file() {
     for (what, text) in damaged {
         let root = FakeRoot::new();
         root.ok("install");
-        root.ok("enable");
         fs::write(root.kde(), &text).unwrap();
-        if !text.is_empty() {
-            assert!(root.refused("disable").contains("fix it by hand"), "{what}");
-        }
+        root.refused("check");
         let said = root.ok("uninstall");
-        assert!(said.contains("again exactly as it was before enable"), "{what}: {said}");
+        assert!(said.contains("again exactly as it was before properpin's lines went in"), "{what}: {said}");
         assert_eq!(fs::read_to_string(root.kde()).unwrap(), STOCK_KDE, "{what}");
         assert_eq!(fs::read_to_string(root.path("etc/properpin/kde.pam.damaged")).unwrap(), text, "{what}");
         assert!(!root.path("usr/local/libexec/properpin").exists(), "{what}");
@@ -364,7 +404,6 @@ fn uninstall_restores_a_damaged_pam_file() {
 fn uninstall_restores_a_deleted_pam_file() {
     let root = FakeRoot::new();
     root.ok("install");
-    root.ok("enable");
     fs::remove_file(root.kde()).unwrap();
     root.ok("uninstall");
     assert_eq!(fs::read_to_string(root.kde()).unwrap(), STOCK_KDE);
@@ -376,11 +415,10 @@ fn uninstall_restores_a_deleted_pam_file() {
 fn uninstall_without_a_saved_copy_removes_nothing() {
     let root = FakeRoot::new();
     root.ok("install");
-    root.ok("enable");
     let damaged = fs::read_to_string(root.kde()).unwrap().replace("# properpin end\n", "");
     fs::write(root.kde(), &damaged).unwrap();
-    fs::remove_file(root.path("etc/properpin/kde.pam.before-enable")).unwrap();
-    assert!(root.refused("uninstall").contains("nothing was removed"));
+    fs::remove_file(root.path("etc/properpin/kde.pam.without-properpin")).unwrap();
+    assert!(root.refused("uninstall").contains("nothing was changed"));
     assert_eq!(fs::read_to_string(root.kde()).unwrap(), damaged);
     assert!(root.path("usr/local/lib64/security/pam_properpin.so").exists());
 }

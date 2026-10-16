@@ -16,7 +16,7 @@ just properpin demo     # set, the PIN at once, three failures pause it, the pas
 just properpin test     # every test: rules, files and hashing, the CLI, the PAM stack
 just properpin smoke    # only the PAM stack, through the system's libpam
 just properpin lint     # clippy with warnings as errors, and a formatting check
-just properpin podman   # install, enable and attack it as root in a stock Fedora 44 container
+just properpin podman   # install and attack it as root in a stock Fedora 44 container
 ```
 
 ## Crates
@@ -65,20 +65,20 @@ The format is poc-py's `key = value` lines, and the hash is the same `$y$` yescr
 
 ## Installing
 
-`packaging/install.sh` does it in two separate steps, so everything can be installed and checked while the lock screen still runs its stock stack:
+`packaging/install.sh` has three commands:
 
 ```
 cargo build --release -p pam_properpin -p properpin-pinchecker -p properpin-cli
-sudo products/pin/packaging/install.sh install    # group, module, pinchecker, command, /etc/properpin, /var/lib/properpin; PAM untouched
-sudo products/pin/packaging/install.sh check      # kind, mode, owner, bytes and SELinux label of every path; the group empty and locked
-sudo products/pin/packaging/install.sh enable     # the three lines into /etc/pam.d/kde, after a diff and a yes
+sudo products/pin/packaging/install.sh install    # after a diff and a yes: the files, then the three lines into /etc/pam.d/kde
+sudo products/pin/packaging/install.sh check      # kind, mode, owner, bytes and SELinux label of every path; the group empty and locked; the PAM lines current
+sudo products/pin/packaging/install.sh uninstall  # the lines out of /etc/pam.d/kde, then the files
 sudo properpin set                                # choose the PIN, typed twice; the lock screen takes it at once
 sudo properpin enable                             # only if too many concerning failures disabled it
 ```
 
-`disable` takes out exactly the lines `enable` added, between their two marker lines, and leaves everything else in the file as it is; it never deletes `/etc/pam.d/kde`. `enable` saves the file it changed as `/etc/properpin/kde.pam.before-enable`. `uninstall` first takes properpin out of `/etc/pam.d/kde` itself: its block, when that comes out cleanly, or else the copy saved at enable, after a diff and a yes, keeping the damaged file as `/etc/properpin/kde.pam.damaged`. Without a saved copy it refuses and removes nothing, since a PAM file naming a deleted module locks the lock screen. It then removes what `install` put in place, including the directories `install` had to create (noted in `/etc/properpin/install.created-dirs`), and keeps `/etc/properpin`, with the PINs in it, `/var/lib/properpin`, with the budgets, and the `properpin` group those files belong to. `install` creates the group with `systemd-sysusers` where it exists and `groupadd --system` otherwise; no user is ever created. `check` on the real system needs root, because it also reads `/etc/gshadow`: it fails when the group has members, is anyone's primary group, or has a password that isn't locked, since any of those would give someone the group without running the pinchecker. The installed `properpin` command is a two-line wrapper that passes this machine's paths to the real binary in `/usr/local/libexec/properpin/`.
+`install` is also how to upgrade, and running it again is harmless. It works out `/etc/pam.d/kde` with and without properpin's lines, shows the diff and asks, unless nothing changes. Then it takes properpin's lines out, installs the files, runs the same checks as `check`, and only once they pass puts back the lines this version ships, saving the file without them as `/etc/properpin/kde.pam.without-properpin`. A failure anywhere after the question leaves `/etc/pam.d/kde` without properpin's lines, so the lock screen takes the password only, and never pairs a new module with an older version's lines. With the lines in, a user who hasn't set a PIN sees no difference: the module steps aside. To turn properpin off for yourself, `sudo properpin remove`; for the whole machine, `uninstall`. properpin's lines come out between their two marker lines, and everything else in the file stays as it is; nothing ever deletes `/etc/pam.d/kde`. When the block can't come out cleanly, `install` starts from the saved copy instead, as `uninstall` does. `uninstall` first takes properpin out of `/etc/pam.d/kde`: its block, when that comes out cleanly, or else the copy saved at install, after a diff and a yes, keeping the damaged file as `/etc/properpin/kde.pam.damaged`. Without a saved copy it refuses and removes nothing, since a PAM file naming a deleted module locks the lock screen. It then removes what `install` put in place, including the directories `install` had to create (noted in `/etc/properpin/install.created-dirs`), and keeps `/etc/properpin`, with the PINs in it, `/var/lib/properpin`, with the budgets, and the `properpin` group those files belong to. `install` creates the group with `systemd-sysusers` where it exists and `groupadd --system` otherwise; no user is ever created. `check` on the real system needs root, because it also reads `/etc/gshadow`: it fails when the group has members, is anyone's primary group, or has a password that isn't locked, since any of those would give someone the group without running the pinchecker. The installed `properpin` command is a two-line wrapper that passes this machine's paths to the real binary in `/usr/local/libexec/properpin/`.
 
-Upgrading from a version with a pepper: `install` removes the PINs set then, which can't be converted without the PIN itself, every budget from then, and `/run/properpin`, and warns when `/etc/properpin/config` still sets `expiry_hours` or `seal_cost`, which now refuse the PIN until taken out. `disable` followed by `enable` then writes the new PAM line, and each user sets a new PIN.
+Upgrading from a version with a pepper: `install` removes the PINs set then, which can't be converted without the PIN itself, every budget from then, and `/run/properpin`, and warns when `/etc/properpin/config` still sets `expiry_hours` or `seal_cost`, which now refuse the PIN until taken out. The same `install` replaces the old PAM lines, and each user sets a new PIN.
 
 ## The pinchecker
 

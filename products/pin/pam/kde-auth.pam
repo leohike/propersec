@@ -1,5 +1,5 @@
 # properpin: three auth lines to insert ABOVE the stock "auth substack password-auth" line of
-# /etc/pam.d/kde. packaging/install.sh enable inserts them, between two marker lines.
+# /etc/pam.d/kde. packaging/install.sh install inserts them, between two marker lines.
 #
 # crates/pam/tests/stack.rs builds its PAM stack from this very file, swapping only paths and
 # pam_unix, so the control columns tested are the ones that would ship. The container test

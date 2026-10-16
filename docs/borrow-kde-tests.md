@@ -18,7 +18,7 @@ Under `pam_wrapper`: `LD_PRELOAD=libpam_wrapper.so`, a service directory from th
 
 ### What to change for properpin
 
-- **No `pam_wrapper`, no `pam_matrix`.** Use the real `kde` service, after `install.sh install` and `enable`, in the same Fedora container the system test already builds, running as the test user, so the module starts the real setgid pinchecker and `pam_unix` the real `unix_chkpwd`.
+- **No `pam_wrapper`, no `pam_matrix`.** Use the real `kde` service, after `install.sh install`, in the same Fedora container the system test already builds, running as the test user, so the module starts the real setgid pinchecker and `pam_unix` the real `unix_chkpwd`.
 - **Keep the time check on.** Do not set `KSCREENLOCKER_PAM_TIME_CHECK`. The 50 ms check is what `min_milliseconds_before_pin_unlock` exists for, and this would be the first time the real check meets it. A test with the variable set to `0` should exist only as a deliberate control, to show the difference.
 - **properpin's scenarios instead of upstream's two attempts:** the PIN unlocking, a wrong PIN, three consecutive failures pausing it and a password unlock unpausing it, the budget forgiving a typo, and the PIN refused once the budget disables it.
 - **Cancels, through kscreenlocker's own code:** cancel an attempt at chosen and random moments while it checks a wrong PIN, a correct PIN and the password, then check the same four points as the deferred randomized kill test in `docs/plan.md`: a readable state, the lock released, no effect from a killed attempt, and leftover temporary files counted.
