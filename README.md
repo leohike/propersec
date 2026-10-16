@@ -31,3 +31,9 @@ Planned: make ProperPin usable and secure for `sudo`, and add TPM support in a s
 Prototype, with no official releases yet. All of the code was written through agentic coding, and the security analysis, though fairly extensive, isn't yet organised for a reviewer.
 
 I believe agentic coding is inevitable and nothing to be ashamed of, but security-critical code needs several careful human reviews, and this code hasn't had a single one yet.
+
+## License
+
+Copyright 2026 Leo Hike. Licensed under either of the Apache License, Version 2.0 (`LICENSES/Apache-2.0.txt`) or the MIT license (`LICENSES/MIT.txt`), at your option.
+
+Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion in this work by you, as defined in the Apache-2.0 license, shall be dual licensed as above, without any additional terms or conditions.

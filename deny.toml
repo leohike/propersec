@@ -14,8 +14,8 @@ unsound = "all"
 yanked = "warn"
 
 [licenses]
-# The licences in use today. The workspace crates have publish = false and no licence field,
-# which private.ignore skips.
+# The licences in use today. The workspace crates are MIT OR Apache-2.0 and have
+# publish = false, which private.ignore skips.
 allow = [
     "Apache-2.0",
     "Apache-2.0 WITH LLVM-exception",

@@ -5,6 +5,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
+license.workspace = true
 
 [lib]
 # cdylib is the module libpam loads. Cargo names it libpam_properpin.so; installing renames it
