@@ -7,7 +7,7 @@ A PIN for the KDE Plasma lock screen, within limits. Two words run through every
 
 Login, sudo, polkit, TTY and SSH never see the PIN. The full rules, the threat model and the reasoning live with the Python proof of concept in `poc-py/` (its README, WALKTHROUGH.md and docs/), which this Rust version follows rule for rule, with one change of architecture: the PIN hashes and the failure counts are reachable only by a `properpin` system group with no members, and only a helper that is setgid to that group reads them, so nothing the user runs can read a hash or reset a count. The Helper section below explains it, and `docs/threat-insider-hash-leak.md` at the repo root explains why.
 
-**Status: not installed on any real machine.** Everything builds and runs in `target/`, temporary directories and a podman container. The installer, `packaging/install.sh`, exists and is tested against a fake root and, as root, inside a stock Fedora 44 container; no recipe runs it anywhere else.
+**Status: installed on one test VM, not on a machine anyone relies on.** Everything builds and runs in `target/`, temporary directories and a podman container. The installer, `packaging/install.sh`, is tested against a fake root and, as root, inside a stock Fedora 44 container; no recipe runs it anywhere else. On 2026-10-15 it was run by hand in an Aurora VM, and the PIN worked at the real Plasma 6.7.5 lock screen under SELinux enforcing; `docs/aurora-vm-test.md` at the repo root has what was tested and what wasn't.
 
 ## Try it
 
