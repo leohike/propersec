@@ -1,22 +1,32 @@
 # ProperPin
 
-I define PIN as a shorter alphanumeric password which doesn't have enough entropy to protect against bruteforce in naive implementation, but is faster and easier to type, more memorable than proper long random password and still has more entropy than traditional 4-6 digits PIN code.
+Here, a PIN means a short alphanumeric password. On its own it has too little entropy to resist brute force, but it is faster to type and easier to remember than a long random password, and it still has more entropy than a traditional 4–6 digit PIN.
 
-ProperPin UX summary: at your KDE lockscreen you can use your PIN to unlock your Linux session, 3 failures in a row temporarily disable PIN and you (or offline attacker at your keyboard) are back to using your random high-entropy account password. Extensive measures are taken to make such UX no less secure than using high entropy long passwrod alone.
+## How it works
 
-Justification summary: without ProperPin or another good UX/security addition, users in practice,  do not lock their screens most of the time or settle to short non-random account passwods, thus essentially they use PINs, not passwords, but without any of the protectoins required to make low-entropy PIN safe to use.
+At the KDE lock screen, you can unlock your Linux session with your PIN. Three failures in a row disable the PIN for a while, and you (or an attacker at your keyboard) are back to your long, random account password. A lot of effort goes into making such approach no less secure than using the long password alone.
 
-Threat model is the same as lockscreen functionality in general:
-- protect your computer from your roommate, flatmate, collegue, opportunistic attacker or prankster
+## Why
+
+Without ProperPin, or something like it, people in practice either rarely lock their screens or settle for short, non-random account passwords. They end up using a PIN (as defined above) anyway, just without any of the protections that make a low-entropy secret safe to use.
+
+## Threat model
+
+The same as for a lock screen in general. It protects your computer from:
+
+- a roommate, flatmate, colleague, opportunistic attacker or prankster;
 - ???
 
-Doesn't protect from: ... xxxx (note that strong acccount password doesn't protect from those either)
+It doesn't protect from: … xxxx (a strong account password doesn't protect from these either).
 
-Current scope:
-Lockscreen only, KDE only, extensive security analysis and testing, no TPM.
-Planned scope:
-Enhance ProperPin such that it is usable and secure to use for getting sudo rights, add TPM support while correctly managing the vulnerabilities (bugs) that would inevitable come from higher complexity code; besides, TPM are not infallible themselves. 
+## Scope
 
-Project state:
-Prototype. Preliminary security analysis is rather extensive, but codebase was never fully human reviewed even once. Agentic coding is heavily used. No "official" releases yet.
+Now: the lock screen only, KDE only, with extensive security analysis and testing, and no TPM.
 
+Planned: make ProperPin usable and secure for `sudo`, and add TPM support while keeping the bugs that more complex code inevitably brings under control. TPMs aren't infallible either.
+
+## Status
+
+Prototype. The preliminary security analysis is fairly extensive but not well structured for any potential reviewer, no human has fully reviewed the code even once, and all of it was produced using agentic coding. There are no official releases yet.
+
+I strongly believe that agentic coding is inevitable and is nothing to be ashamed of, but any critical code, especially security related, indeed should have multiple careful reviews and this was not done yet.
