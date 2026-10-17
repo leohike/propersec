@@ -58,21 +58,24 @@ fn run(args: &[OsString]) -> u8 {
         Some(Dev { log: Some(file), .. }) => Box::new(FileLog(file.clone())),
         _ => Box::new(secure::Syslog::open()),
     };
+    // status is asked by a person, who is told why; the other requests answer with the exit code.
+    let refuse = |why: &str, code: u8| {
+        log.log(why);
+        if options.request == Request::Status {
+            let _ = writeln!(std::io::stdout(), "{why}");
+        }
+        code
+    };
     let uid = current_uid();
     if options.dev.is_some() && !dev_options_allowed(secure::elevated(), uid, current_euid(), current_gid(), current_egid()) {
-        log.log(&format!("uid {uid}: refused: --dev options while running with elevated rights"));
-        return exit::USAGE;
+        return refuse(&format!("uid {uid}: refused: --dev options while running with elevated rights"), exit::USAGE);
     }
     if uid == 0 {
-        log.log("refused: root has no lock screen to unlock");
-        return exit::USAGE;
+        return refuse("refused: root has no lock screen to unlock", exit::USAGE);
     }
     let caller = match Account::by_uid(uid) {
         Ok(caller) => caller,
-        Err(error) => {
-            log.log(&format!("uid {uid}: refused: {error}"));
-            return exit::BROKEN;
-        }
+        Err(error) => return refuse(&format!("uid {uid}: refused: {error}"), exit::BROKEN),
     };
     let typed = if options.request.reads_input() {
         // Like unix_chkpwd: meant to be fed by a program through a pipe, not typed into by hand.

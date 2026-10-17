@@ -52,7 +52,7 @@ Everything still open about properpin, however small, collected while moving the
 
 ## Smaller points
 
-- **`properpin status` shows only your own PIN,** and refuses root. An administrator checking someone else's PIN would need root to read the files by hand.
+- **`properpin status` shows only your own PIN,** and refuses root. Since 2026-10-17 `sudo properpin doctor` shows whether anyone's PIN would be refused, and why, but not anyone's counts.
 - **The CLI assumes the helper's group is called `properpin`** unless told otherwise with `--group`; the installed wrapper doesn't pass it.
 - **`docs/pin-pam-copy.md` predates the helper.** What was typed now also passes through a pipe into the helper's process, which wipes its buffer on exit. The reasoning there still holds: both copies live shorter than libpam's.
 

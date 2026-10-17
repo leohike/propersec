@@ -5,12 +5,13 @@
 #                          there; install the properpin group, the module, the setgid pinchecker, the
 #                          command, /etc/properpin and /var/lib/properpin; check them; and only then add
 #                          the three lines this version ships. Installing again, or a newer version,
-#                          is the same command. Also removes what older versions left: PINs and
-#                          budgets from before the pepper was dropped, which can't be converted, and
-#                          /run/properpin
+#                          is the same command. Also removes /run/properpin, which older versions
+#                          used. Then prints what properpin doctor finds in the PINs, budgets and
+#                          config, which install never judges or changes
 #   install.sh check       every installed path: kind, mode, owner, same bytes as the build, SELinux label;
 #                          that the group has no members and a locked password; and that
-#                          /etc/pam.d/kde has exactly the lines this version ships
+#                          /etc/pam.d/kde has exactly the lines this version ships. The PINs, budgets
+#                          and config are properpin doctor's
 #   install.sh uninstall   take properpin out of /etc/pam.d/kde (its lines, or, if they are damaged,
 #                          the copy saved at install, after a diff and a yes), then remove what install
 #                          put in place; keeps /etc/properpin, /var/lib/properpin and the properpin group
@@ -98,7 +99,16 @@ end_marker="# properpin end"
 stock_auth='^auth[[:space:]]+substack[[:space:]]+password-auth([[:space:]]|$)'
 
 scratch=$(mktemp -d)
-trap 'rm -rf "$scratch"' EXIT
+# 1 while install has properpin's lines out of the PAM file, from taking them out to putting them back.
+lines_out=0
+on_exit() {
+    local status=$?
+    rm -rf "$scratch"
+    if [[ $status != 0 && $lines_out == 1 ]]; then
+        echo "install.sh: $pam_file is left without properpin's lines: the lock screen takes the password only, for every user, until install succeeds" >&2
+    fi
+}
+trap on_exit EXIT
 
 built_module=$from/libpam_properpin.so
 built_binary=$from/properpin
@@ -322,6 +332,7 @@ do_install() {
 
     # From here on, anything that fails leaves the lock screen on its stock stack.
     take_out_of_pam
+    lines_out=1
     make_dirs "$(dirname "$module_path")" "$(dirname "$command_path")" "$(dirname "$sysusers")" "$(dirname "$tmpfiles")" "$(dirname "$libexec")" "$(dirname "$budget_dir")"
     sysusers_conf | put "$sysusers" 0644
     tmpfiles_conf | put "$tmpfiles" 0644
@@ -334,7 +345,7 @@ do_install() {
     fi
     own_dir "$users" 0750 "$owner" "$pinchecker_group"
     own_dir "$budget_dir" 1770 "$owner" "$pinchecker_group"
-    remove_old_versions
+    rm -rf -- "$root$old_run_dir"
     put "$module_path" 0755 <"$built_module"
     put "$binary" 0755 <"$built_binary"
     put "$pinchecker" 2755 "$owner:$pinchecker_group" <"$built_pinchecker"
@@ -342,48 +353,20 @@ do_install() {
     relabel "$root$module_path" "$root$libexec" "$root$command_path" "$root$etc" "$root$budget_dir" "$root$sysusers" "$root$tmpfiles"
     if ! check_files; then
         printf '%s\n' "${problems[@]}"
-        fail "the installed files don't check out, so $pam_file was left without properpin's lines"
+        fail "the installed files don't check out"
     fi
 
     cp "$scratch/without" "$root$pam_backup.properpin-new"
     mv -f "$root$pam_backup.properpin-new" "$root$pam_backup"
     put "$pam_file" 0644 <"$scratch/with"
+    lines_out=0
     relabel "$root$pam_file" "$root$pam_backup"
     echo "installed under ${root:-/}; $pam_file has properpin's lines, and was saved without them as $pam_backup"
     echo "the lock screen offers the PIN to each user who sets one with: sudo properpin set"
-}
-
-# What versions with a pepper left behind. Their PINs were hashed with the pepper, so they can't be
-# converted without the PIN itself: each such user file and every budget from then goes, and each
-# user sets a new PIN. Their settings without a meaning now refuse the PIN until taken out.
-remove_old_versions() {
-    local file
-    for file in "$root$users"/*; do
-        if [[ -f $file ]] && grep -qE '^(encrypted_pepper|cleartext_salt_for_deriving_pepper_decryption_key)[[:space:]]*=' "$file"; then
-            rm -f -- "$file"
-            echo "removed the PIN of $(basename "$file"), set before properpin dropped its pepper; set a new one with: sudo properpin set"
-        fi
-    done
-    for file in "$root$budget_dir"/*.budget; do
-        if [[ -f $file ]] && ! grep -q '^consecutive = ' "$file"; then
-            rm -f -- "$file"
-        fi
-    done
-    rm -rf -- "$root$old_run_dir"
-    # Versions before 2026-10-17 created the budget and the lock file at the first attempt; now set
-    # does, and a PIN without them is refused until it runs.
-    local name uid
-    for file in "$root$users"/*; do
-        [[ -f $file ]] || continue
-        name=$(basename "$file")
-        uid=$(id -u "$name" 2>/dev/null) || continue
-        if [[ ! -f $root$budget_dir/$uid.lock || ! -f $root$budget_dir/$uid.budget ]]; then
-            echo "warning: the PIN of $name has no budget yet, so the lock screen refuses it; run: sudo properpin set --user $name"
-        fi
-    done
-    if [[ -f $root$etc/config ]] && grep -qE '^[[:space:]]*(expiry_hours|seal_cost)[[:space:]]*=' "$root$etc/config"; then
-        echo "warning: $etc/config sets expiry_hours or seal_cost, which no longer exist; take them out, or the PIN is refused"
-    fi
+    # Only reported: a PIN doctor finds fault with is refused for its user alone, never for anyone else.
+    echo "properpin doctor:"
+    "$root$binary" --etc "$root$etc" --budget "$root$budget_dir" --pinchecker "$root$pinchecker" \
+        --owner "$(id -u "$owner")" --group "$pinchecker_group" doctor | sed 's/^/  /' || true
 }
 
 problems=()
@@ -424,7 +407,8 @@ check_group() {
     [[ $password == [\!*]* ]] || problems+=("group $pinchecker_group: its password in /etc/gshadow isn't locked; it must start with ! or *")
 }
 
-# Every installed file, adding to $problems what is wrong.
+# Every installed file, adding to $problems what is wrong. Not the PINs, budgets or config, which
+# install doesn't write: properpin doctor judges them, by the pinchecker's own rules.
 check_files() {
     if ! getent group "$pinchecker_group" >/dev/null; then
         problems+=("no group named $pinchecker_group; install again")
@@ -443,9 +427,6 @@ check_files() {
     expect "$etc" dir 755 "$owner" "$group"
     expect "$users" dir 750 "$owner" "$pinchecker_group"
     expect "$budget_dir" dir 1770 "$owner" "$pinchecker_group"
-    if [[ -e $root$etc/config ]]; then
-        expect "$etc/config" file 644 "$owner" "$group"
-    fi
     if [[ -f $built_module ]]; then
         expect_bytes "$module_path" "$built_module"
         expect_bytes "$binary" "$built_binary"
@@ -461,15 +442,6 @@ check_files() {
     fi
     if [[ -f $root$tmpfiles ]] && ! diff -q <(tmpfiles_conf) "$root$tmpfiles" >/dev/null; then
         problems+=("$tmpfiles: not what install.sh writes; install again")
-    fi
-    if [[ -d $root$users ]]; then
-        local user_file name
-        for user_file in "$root$users"/*; do
-            [[ -e $user_file ]] || continue
-            name=$(basename "$user_file")
-            # Each user's file is readable by the pinchecker's group only, not by the user.
-            expect "$users/$name" file 640 "$owner" "$pinchecker_group"
-        done
     fi
     if selinux_enabled; then
         local path

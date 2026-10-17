@@ -34,7 +34,7 @@ A checklist for reviewing the setgid pinchecker: every hazard a program with mor
 | NUL bytes, invalid UTF-8, empty input | Unusable, never hashed, never counted | `core/src/attempt.rs`, `input_that_could_be_a_pin` | Same, and `unusable_input_is_never_counted` |
 | Arguments | Exactly one request word and `--dev-*` pairs; anything else is refused with exit 2 | `main.rs`, `Options::parse` | `anything_unexpected_on_the_command_line_is_refused` |
 | A terminal on stdin | Refused, like `unix_chkpwd`. This only discourages typing at it by hand | `main.rs`, `run` | Not tested (needs a terminal) |
-| Secrets in the output or the log | The exit code is the answer. Log lines carry the user name and the verdict, never input. `status` prints settings and counts for the caller only | `lib.rs`, `serve`, `status` | `status_shows_your_own_pin` (container) |
+| Secrets in the output or the log | The exit code is the answer. Log lines carry the user name and the verdict, never input. `status` prints settings and counts for the caller only, or why the caller's PIN is refused | `lib.rs`, `serve`, `status` | `status_shows_your_own_pin` (container) |
 | A panic halfway | Aborts at once, without unwinding or printing. A panic during a check comes after the failure was saved | `main.rs`, `main` | Not directly |
 
 ## Files
@@ -42,7 +42,7 @@ A checklist for reviewing the setgid pinchecker: every hazard a program with mor
 | Hazard | What the pinchecker does | Where | Tested by |
 |---|---|---|---|
 | A symlink or a non-regular file | Opened with `O_NOFOLLOW`, checked on the open file, so the file checked is the file read | `sys/src/files.rs`, `read_regular_file` | `a_symlink_is_never_followed`, `a_symlinked_user_file` (container) |
-| A user file someone else could change or read | Must be owned by root, not writable by group or others, not readable by others | `sys/src/files.rs`, `read_trusted` | `untrusted_files_are_refused`, three container scenarios |
+| A user file someone else could change or read | Must be owned by root, of the pinchecker's group, readable by that group, not writable by group or others, not readable by others. The pinchecker can't open a file its group can't read, so the group's rules only ever refuse for root, as `properpin doctor`, which judges every file by these same rules | `sys/src/files.rs`, `read_trusted` | `untrusted_files_are_refused`, four container scenarios, each checking that doctor finds the same |
 | A state directory others can reach, or without the sticky bit | Must be a directory, not a symlink, owned by root, with the group the pinchecker runs with, mode exactly `1770`. A pinchecker installed without its setgid bit runs with the caller's group, which doesn't match, and refuses | `sys/src/files.rs`, `trusted_run_dir` | `a_run_dir_with_any_other_mode_is_refused`, `a_run_dir_with_another_owner_or_group_is_refused`, `a_symlinked_run_dir_is_refused`, `a_shared_runtime_directory` (container) |
 | The user resets or reads their counts | They can't enter `/var/lib/properpin` at all | install.sh; `sys/src/files.rs` | `the_user_cannot_reach_the_files` (container) |
 | One user's run of the pinchecker, exploited, touching another's counts | Each user's state and lock files belong to that user, mode `0600`, and the directory is sticky, so another user's process can't read, write, rename or delete them | `sys/src/files.rs`; install.sh | `one_users_pinchecker_cannot_touch_anothers_counts` (container), which fails without the sticky bit |

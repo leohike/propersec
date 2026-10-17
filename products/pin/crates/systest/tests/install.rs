@@ -206,18 +206,10 @@ fn check_finds_what_is_wrong() {
     fs::set_permissions(root.path("usr/local/lib64/security/pam_properpin.so"), Permissions::from_mode(0o777)).unwrap();
     fs::write(root.path("usr/local/libexec/properpin/properpin"), "not the build").unwrap();
     fs::remove_dir(root.path("etc/properpin/users")).unwrap();
-    let user_file = root.path("etc/properpin/users").join(group());
     let problems = root.refused("check");
     assert!(problems.contains("pam_properpin.so: is 777"), "{problems}");
     assert!(problems.contains("libexec/properpin/properpin: differs from"), "{problems}");
     assert!(problems.contains("/etc/properpin/users: missing"), "{problems}");
-
-    root.ok("install");
-    fs::write(&user_file, "hash = $y$x\n").unwrap();
-    fs::set_permissions(&user_file, Permissions::from_mode(0o644)).unwrap();
-    let problems = root.refused("check");
-    assert!(problems.contains(&format!("users/{}: is 644", group())), "{problems}");
-    fs::set_permissions(&user_file, Permissions::from_mode(0o640)).unwrap();
 
     for (pinchecker, budget_dir) in [(0o755, 0o755), (0o4755, 0o700), (0o6755, 0o1777)] {
         root.ok("install");
@@ -233,27 +225,35 @@ fn check_finds_what_is_wrong() {
     }
 }
 
-/// PINs set while properpin had a pepper can't be converted, so install removes them, and every
-/// budget from then, and the per-boot directory those versions kept.
+/// A user's file, a budget or the config that doctor finds fault with refuses the PINs it concerns
+/// and no others, so install never judges them: it installs, puts properpin's lines in, and
+/// prints what doctor found.
 #[test]
-fn install_removes_what_versions_with_a_pepper_left() {
+fn install_leaves_the_pins_and_the_config_to_doctor() {
     let root = FakeRoot::new();
     root.ok("install");
-    let users = root.path("etc/properpin/users");
-    fs::write(users.join("old"), "hash = $y$x\ncleartext_salt_for_deriving_pepper_decryption_key = $y$s\nencrypted_pepper = 00\n").unwrap();
-    fs::write(users.join("new"), "hash = $y$x\n").unwrap();
-    fs::set_permissions(users.join("new"), Permissions::from_mode(0o640)).unwrap();
-    let budgets = root.path("var/lib/properpin");
-    fs::write(budgets.join("1000.budget"), "pending = none\nconcerning = none\ntotal = 0\ndisabled = no\n").unwrap();
-    fs::write(budgets.join("1001.budget"), "consecutive = 0\npending = none\nconcerning = none\ntotal = 0\ndisabled = no\n").unwrap();
-    fs::create_dir_all(root.path("run/properpin")).unwrap();
-    fs::write(root.path("etc/properpin/config"), "expiry_hours = 4\n").unwrap();
+    let user_file = root.path("etc/properpin/users").join(whoami());
+    fs::write(&user_file, "hash = $y$x\n").unwrap();
+    fs::set_permissions(&user_file, Permissions::from_mode(0o644)).unwrap();
     let said = root.ok("install");
-    assert!(said.contains("removed the PIN of old") && said.contains("sudo properpin set"), "{said}");
-    assert!(said.contains("sets expiry_hours or seal_cost, which no longer exist"), "{said}");
-    assert!(!users.join("old").exists() && users.join("new").exists());
-    assert!(!budgets.join("1000.budget").exists() && budgets.join("1001.budget").exists());
-    assert!(!root.path("run/properpin").exists());
+    assert!(said.contains(&format!("users/{}: readable by others", whoami())), "{said}");
+    assert!(said.contains(&format!("fix: sudo properpin remove --user {}, then a new PIN", whoami())), "{said}");
+    assert!(said.contains(&format!("1 problem; a PIN is set for {}", whoami())), "{said}");
+    assert_eq!(fs::read_to_string(root.kde()).unwrap(), installed_kde());
+    root.ok("check");
+
+    // What versions with a pepper left: a PIN with settings that are gone, and a config with
+    // settings that are gone. Both stay where they are, named by doctor.
+    fs::write(&user_file, "hash = $y$x\nencrypted_pepper = 00\n").unwrap();
+    fs::set_permissions(&user_file, Permissions::from_mode(0o640)).unwrap();
+    fs::write(root.path("etc/properpin/config"), "expiry_hours = 4\n").unwrap();
+    fs::create_dir_all(root.path("run/properpin")).unwrap();
+    let said = root.ok("install");
+    assert!(said.contains("unknown setting \"encrypted_pepper\"") && said.contains("unknown setting \"expiry_hours\""), "{said}");
+    assert!(said.contains("restore-defaults"), "{said}");
+    assert!(user_file.exists() && root.path("etc/properpin/config").exists());
+    assert!(!root.path("run/properpin").exists(), "/run/properpin was install's own, so it goes");
+    assert_eq!(fs::read_to_string(root.kde()).unwrap(), installed_kde());
 }
 
 #[test]
@@ -307,20 +307,21 @@ fn install_replaces_an_older_versions_lines() {
     root.ok("check");
 }
 
-/// An install that fails its check leaves properpin's lines out, so the lock screen takes the
-/// password only, and the next good install puts them back.
+/// An install that fails after taking properpin's lines out leaves them out, so the lock screen
+/// takes the password only, says so, and the next good install puts them back.
 #[test]
 fn a_failed_install_leaves_the_lines_out() {
     let root = FakeRoot::new();
     root.ok("install");
-    let config = root.path("etc/properpin/config");
-    fs::write(&config, "").unwrap();
-    fs::set_permissions(&config, Permissions::from_mode(0o600)).unwrap();
+    // Where install's directory must go, so install fails halfway.
+    let users = root.path("etc/properpin/users");
+    fs::remove_dir(&users).unwrap();
+    fs::write(&users, "").unwrap();
     let said = root.refused("install");
-    assert!(said.contains("config: is 600") && said.contains("left without properpin's lines"), "{said}");
+    assert!(said.contains("left without properpin's lines: the lock screen takes the password only, for every user"), "{said}");
     assert_eq!(fs::read_to_string(root.kde()).unwrap(), STOCK_KDE);
     assert!(root.refused("check").contains("has no properpin lines"));
-    fs::set_permissions(&config, Permissions::from_mode(0o644)).unwrap();
+    fs::remove_file(&users).unwrap();
     root.ok("install");
     assert_eq!(fs::read_to_string(root.kde()).unwrap(), installed_kde());
 }

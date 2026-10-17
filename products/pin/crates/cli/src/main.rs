@@ -1,17 +1,23 @@
 //! `properpin`: manage the PIN that unlocks the KDE lock screen.
 //!
 //! ```text
-//! sudo properpin set      choose a new PIN, typed twice; the lock screen takes it at once, and
-//!                         its budget of failures starts over
-//! sudo properpin enable   turn a PIN disabled by too many concerning failures back on
-//! sudo properpin remove   delete it; the lock screen takes the password only
-//! properpin status        your PIN: what is set, which rules apply, and whether it is enabled,
-//!                         paused or disabled
+//! sudo properpin set [--user NAME]     choose a new PIN, typed twice; the lock screen takes it at
+//!                                      once, and its budget of failures starts over
+//! sudo properpin enable [--user NAME]  turn a PIN disabled by too many concerning failures back on
+//! sudo properpin remove [--user NAME]  delete the PIN, its budget and its lock file, whatever state
+//!                                      they are in; the lock screen takes the password only
+//! sudo properpin remove --all          the same for every user, after a question
+//! sudo properpin restore-defaults      delete the global config, after a question: every setting is
+//!                                      back to its default
+//! sudo properpin doctor                what makes the lock screen refuse a PIN, for every user, and
+//!                                      the command that fixes it
+//! properpin status                     your PIN: what is set, which rules apply, and whether it is
+//!                                      enabled, paused, disabled or refused, and why
 //! ```
 //!
-//! `set`, `enable` and `remove` change files only root may change, so they run under sudo or pkexec, and
-//! getting there takes the password. That's the point: someone at an unlocked desk must not be able
-//! to plant a PIN they know. The PIN is read from the terminal, or from stdin when it isn't one,
+//! Everything but `status` reads or changes files only root may, so it runs under sudo or pkexec,
+//! and getting there takes the password. That's the point: someone at an unlocked desk must not be
+//! able to plant a PIN they know. The PIN is read from the terminal, or from stdin when it isn't one,
 //! never from the command line, where other users could see it in the process list.
 //!
 //! The hash file is written readable by the pinchecker's group only, so the user can't read it either:
@@ -27,14 +33,17 @@
 #![warn(clippy::undocumented_unsafe_blocks, clippy::indexing_slicing, clippy::cast_possible_truncation)]
 #![forbid(unsafe_code)]
 
+use std::fs;
 use std::io::{BufRead, IsTerminal, Read, Write, stdin};
 use std::path::PathBuf;
 use std::process::{Command, ExitCode, Stdio};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Parser, Subcommand};
 use properpin_core::{Budget, Clock, Hasher, MAX_PIN_BYTES, Secret, Store, exit};
-use properpin_sys::{Account, SystemClock, UserFiles, Yescrypt, current_euid, current_uid, group_by_name, shadow_hash};
+use properpin_sys::{Account, AllUsers, SystemClock, UserFiles, Yescrypt, current_euid, current_uid, group_by_name, shadow_hash};
+
+mod doctor;
 
 /// Manage the PIN that unlocks the KDE lock screen.
 #[derive(Debug, Parser)]
@@ -69,10 +78,35 @@ enum Action {
     Set(Confirmable),
     /// Turn a PIN disabled by too many concerning failures back on, keeping it
     Enable(Confirmable),
-    /// Delete the PIN; the lock screen takes the password only
-    Remove(Target),
-    /// Show your PIN: what is set, and whether it is enabled, paused or disabled right now
+    /// Delete the PIN, its budget and its lock file, whatever state they are in; the lock screen
+    /// takes the password only
+    Remove(Removal),
+    /// Delete the global config, so every setting is back to its default; PINs, the settings in
+    /// each user's own file, and budgets stay
+    RestoreDefaults(Ask),
+    /// Find what makes the lock screen refuse a PIN, for every user, and the command that fixes it
+    Doctor,
+    /// Show your PIN: what is set, and whether it is enabled, paused, disabled or refused right now
     Status,
+}
+
+#[derive(Debug, Args)]
+struct Removal {
+    #[command(flatten)]
+    target: Target,
+    /// Every user's PIN, and everything else in the PIN and budget directories
+    #[arg(long, conflicts_with = "user")]
+    all: bool,
+    /// With --all: don't ask first
+    #[arg(long, requires = "all")]
+    yes: bool,
+}
+
+#[derive(Debug, Args)]
+struct Ask {
+    /// Don't ask first
+    #[arg(long)]
+    yes: bool,
 }
 
 #[derive(Debug, Args)]
@@ -108,16 +142,25 @@ fn run(cli: &Cli) -> Result<bool> {
     match &cli.command {
         Action::Set(asked) => set(cli, &target_account(&asked.target)?, asked.yes)?,
         Action::Enable(asked) => enable(cli, &target_account(&asked.target)?, asked.yes)?,
-        Action::Remove(target) => remove(cli, &target_account(target)?)?,
+        Action::Remove(removal) => remove(cli, removal)?,
+        Action::RestoreDefaults(asked) => restore_defaults(cli, asked.yes)?,
+        Action::Doctor => return doctor(cli),
         Action::Status => return status(cli),
     }
     Ok(true)
 }
 
+fn all_users(cli: &Cli) -> Result<AllUsers> {
+    Ok(AllUsers::new(&cli.etc, cli.owner, &cli.budget, cli.owner, group_by_name(&cli.group)?))
+}
+
 fn files(cli: &Cli, account: &Account) -> Result<UserFiles> {
-    let group = group_by_name(&cli.group)?;
-    let files = UserFiles::new(&cli.etc, cli.owner, &account.name, account.uid)?;
-    Ok(files.with_budget(&cli.budget, cli.owner, group))
+    Ok(all_users(cli)?.user(&account.name, account.uid)?)
+}
+
+/// A file the PIN can't be used with, as `set` and `enable` meet it: doctor says what fixes it.
+fn see_doctor(error: properpin_core::Error) -> anyhow::Error {
+    anyhow!("{error}; sudo properpin doctor says how to fix it")
 }
 
 /// Whose PIN: the one named, else whoever called sudo or pkexec, else whoever runs this.
@@ -136,9 +179,8 @@ fn target_account(target: &Target) -> Result<Account> {
 
 fn set(cli: &Cli, account: &Account, yes: bool) -> Result<()> {
     require_owner(cli.owner)?;
-    let group = group_by_name(&cli.group)?;
     let files = files(cli, account)?;
-    let settings = files.settings()?;
+    let settings = files.settings().map_err(see_doctor)?;
     let mut input = stdin().lock();
     let pin = ask_pin_twice(&mut input)?;
     let pin = std::str::from_utf8(pin.as_bytes()).context("the PIN is not valid UTF-8")?;
@@ -173,7 +215,7 @@ fn set(cli: &Cli, account: &Account, yes: bool) -> Result<()> {
     }
     let hash = Yescrypt.hash(pin, settings.hash_cost)?;
     // Only the hash changes. Per-user settings already in the file are kept.
-    files.save_pin(&[(properpin_core::HASH_SETTING, &hash)], group)?;
+    files.save_pin(&[(properpin_core::HASH_SETTING, &hash)])?;
     // A new PIN, so no failure against the old one counts any more, and nothing stays paused or disabled.
     files.start_budget(&Budget::default())?;
     println!("PIN set for {}. The lock screen takes it from now on.", account.name);
@@ -185,12 +227,12 @@ fn set(cli: &Cli, account: &Account, yes: bool) -> Result<()> {
 fn enable(cli: &Cli, account: &Account, yes: bool) -> Result<()> {
     require_owner(cli.owner)?;
     let files = files(cli, account)?;
-    let settings = files.settings()?;
+    let settings = files.settings().map_err(see_doctor)?;
     if settings.pin_hash.is_empty() {
         bail!("no PIN is set for {}", account.name);
     }
     let judge = || -> Result<_> {
-        let mut budget = files.load_budget()?;
+        let mut budget = files.load_budget().map_err(see_doctor)?;
         let judged = budget.judge(SystemClock.now()?, &settings);
         if budget.total >= settings.max_concerning_total {
             bail!(
@@ -228,18 +270,95 @@ fn enable(cli: &Cli, account: &Account, yes: bool) -> Result<()> {
     Ok(())
 }
 
-fn remove(cli: &Cli, account: &Account) -> Result<()> {
+fn remove(cli: &Cli, removal: &Removal) -> Result<()> {
     require_owner(cli.owner)?;
-    let files = files(cli, account)?;
-    if !files.remove_pin()? {
-        bail!("no PIN is set for {}", account.name);
+    let all = all_users(cli)?;
+    if removal.all {
+        return remove_all(&all, removal.yes);
     }
-    files.remove_budget()?;
-    println!("PIN removed for {}. The lock screen takes the password only.", account.name);
+    // A name given is taken as it is, so the file of an account that no longer exists can go too.
+    let name = match &removal.target.user {
+        Some(name) => name.clone(),
+        None => target_account(&removal.target)?.name,
+    };
+    match remove_one(&all, &name)? {
+        (true, _) => println!("PIN removed for {name}. The lock screen takes the password only."),
+        (false, true) => println!("{name} had no PIN; its budget and lock file are removed."),
+        (false, false) => bail!("no PIN is set for {name}, and no budget is left either; nothing was changed"),
+    }
     Ok(())
 }
 
-/// The pinchecker prints the status: only it can read the hash file and the counts.
+/// Everything of `name`'s: the user's file, and, while an account has that name, its budget and
+/// lock file, under the lock. Whether there was a file, and whether there was a budget or lock file.
+fn remove_one(all: &AllUsers, name: &str) -> Result<(bool, bool)> {
+    let Some(account) = Account::by_name(name).ok().filter(|account| account.uid != 0) else {
+        return Ok((all.remove_user_file(name)?, false));
+    };
+    let files = all.user(name, account.uid)?;
+    let file = files.remove_pin()?;
+    let budget = files.remove_budget().with_context(|| format!("{name}'s file is gone, but not the budget"))?;
+    Ok((file, budget))
+}
+
+/// Every user's PIN, each the way `remove` takes it, then whatever else is left in the two
+/// directories: the blank page, for a machine nobody wants to untangle.
+fn remove_all(all: &AllUsers, yes: bool) -> Result<()> {
+    let names = all.names()?;
+    if !names.is_empty() {
+        let warning = format!(
+            "This removes the PINs of {}, with their budgets, so the lock screen takes the password only, for everyone, \
+             until a new PIN is set.",
+            names.join(", ")
+        );
+        confirm(&mut stdin().lock(), yes, &warning)?;
+    }
+    for name in &names {
+        remove_one(all, name)?;
+    }
+    all.remove_everything_left()?;
+    match names.as_slice() {
+        [] => println!("No PIN was set, and nothing else is left in {} or the budget directory.", all.users_dir().display()),
+        _ => println!("Every PIN is removed. The lock screen takes the password only, for everyone."),
+    }
+    Ok(())
+}
+
+/// The config deleted, after showing what goes: every setting back to its default.
+fn restore_defaults(cli: &Cli, yes: bool) -> Result<()> {
+    require_owner(cli.owner)?;
+    let all = all_users(cli)?;
+    let config = all.config();
+    let shown = match fs::symlink_metadata(&config) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            println!("There is no {}, so every setting already has its default.", config.display());
+            return Ok(());
+        }
+        Ok(info) if info.is_file() => match fs::read_to_string(&config) {
+            Ok(text) => format!("{} holds:\n{text}", config.display()),
+            Err(error) => format!("{} can't be read: {error}", config.display()),
+        },
+        _ => format!("{} is not a regular file.", config.display()),
+    };
+    let warning = format!(
+        "{shown}\nDeleting it puts every setting back to its default. PINs, the settings in each user's own file, and budgets stay."
+    );
+    confirm(&mut stdin().lock(), yes, &warning)?;
+    all.remove_config()?;
+    println!("Deleted {}. Every setting has its default.", config.display());
+    Ok(())
+}
+
+/// Every problem doctor finds, printed. `Ok(false)` when there is any.
+fn doctor(cli: &Cli) -> Result<bool> {
+    require_owner(cli.owner)?;
+    let found = doctor::examine(&all_users(cli)?, &Yescrypt, &SystemClock)?;
+    print!("{}", doctor::report(&found));
+    Ok(found.problems.is_empty())
+}
+
+/// The pinchecker prints the status: only it can read the hash file and the counts. It says why
+/// when it can't.
 fn status(cli: &Cli) -> Result<bool> {
     if current_uid() == 0 {
         bail!("status shows your own PIN; run it as yourself, without sudo");
@@ -252,7 +371,8 @@ fn status(cli: &Cli) -> Result<bool> {
     print!("{}", String::from_utf8_lossy(&output.stdout));
     match output.status.code().and_then(|code| u8::try_from(code).ok()) {
         Some(exit::YES) => Ok(true),
-        _ => bail!("{} failed ({}); the system log says why", cli.pinchecker.display(), output.status),
+        _ if output.stdout.is_empty() => bail!("{} failed ({}) without saying why", cli.pinchecker.display(), output.status),
+        _ => bail!("{} failed ({})", cli.pinchecker.display(), output.status),
     }
 }
 
