@@ -11,9 +11,10 @@ default:
 build:
     cargo build -p properpin-cli -p properpin-pinchecker -p pam_properpin
 
-# The release build of the module, the setgid pinchecker and the command, made with Fedora 44's own toolchain in a podman container whatever this machine has (Homebrew's included), into target/properpin, where install.sh looks by default; then checked to load only the system's libraries, as install checks it again
+# The release build of the module, the setgid pinchecker and the command, made with Fedora 44's own toolchain in a podman container whatever this machine has (Homebrew's included), into target/properpin, where install.sh looks by default; then checked to load only the system's libraries, as install checks it again. podman leaves target/properpin 0700, so it takes target's mode instead: a checkout shared through its group stays usable by the next user who builds, and no checkout gives anyone more than it already does
 release:
     podman build --ignorefile testing/podman/Containerfile.containerignore -f packaging/Containerfile -o target/properpin .
+    chmod --reference=target target/properpin
     packaging/install.sh check-build --from target/properpin
 
 # Build the release and install it on this machine, or update an earlier install: install.sh shows the change to /etc/pam.d/kde and asks first, then everything is checked. Installs whatever is checked out, uncommitted edits included. Run as yourself, not with sudo, so podman builds in your own image store
