@@ -16,7 +16,7 @@
 //!                                    forgiven and the consecutive count starts over, which unpauses
 //!                                    the PIN
 //! properpin-pinchecker status        prints the caller's PIN settings, and whether the PIN is
-//!                                    enabled, paused or disabled
+//!                                    enabled, paused, disabled or refused, and why
 //! ```
 //!
 //! The caller is always the real user id the kernel reports. The pinchecker never takes a user name or
@@ -121,24 +121,27 @@ pub struct Context<'a, H, C, P, L: ?Sized> {
 }
 
 /// Answer one request from `caller`. `typed` is what came on stdin, for `check` and `housekeeping`.
-/// Every outcome is logged here, and every error is a refusal.
+/// Every outcome is logged here, and every error is a refusal. `status` is asked by a person, so
+/// it also prints why.
 pub fn serve<H: Hasher, C: Clock, P: PasswordCheck, L: Log + ?Sized>(
     request: Request,
     caller: &Account,
     typed: &Secret,
     context: &Context<'_, H, C, P, L>,
 ) -> Reply {
+    let broken = |what: &str, error: Error| {
+        let line = format!("{}: {what}: {error}", caller.name);
+        context.log.log(&line);
+        Reply { code: exit::BROKEN, output: if request == Request::Status { line + "\n" } else { String::new() } }
+    };
     let files = match context.places.files(caller) {
         Ok(files) => files,
-        Err(error) => {
-            context.log.log(&format!("{}: refused: {error}", caller.name));
-            return Reply::code(exit::BROKEN);
-        }
+        Err(error) => return broken("refused", error),
     };
     let result = match request {
         Request::Check => check_pin(&files, caller, typed, context),
         Request::Housekeeping => housekeeping(&files, caller, typed, context),
-        Request::Status => status(&files, context.clock).map(|output| Reply { code: exit::YES, output }),
+        Request::Status => status(&files, context.hasher, context.clock).map(|output| Reply { code: exit::YES, output }),
     };
     result.unwrap_or_else(|error| {
         let what = match request {
@@ -146,8 +149,7 @@ pub fn serve<H: Hasher, C: Clock, P: PasswordCheck, L: Log + ?Sized>(
             Request::Housekeeping => "housekeeping failed",
             Request::Status => "status failed",
         };
-        context.log.log(&format!("{}: {what}: {error}", caller.name));
-        Reply::code(exit::BROKEN)
+        broken(what, error)
     })
 }
 
@@ -200,13 +202,16 @@ fn housekeeping<H, C: Clock, P: PasswordCheck, L: Log + ?Sized>(
     Ok(Reply::code(exit::YES))
 }
 
-/// What is set, which rules apply, and whether the PIN is enabled, paused or disabled right now.
-fn status(files: &UserFiles, clock: &impl Clock) -> Result<String, Error> {
+/// What is set, which rules apply, and whether the PIN is enabled, paused or disabled right now,
+/// or refused whatever is typed, and why: every file an attempt reads, checked the way it checks
+/// them.
+fn status(files: &UserFiles, hasher: &impl Hasher, clock: &impl Clock) -> Result<String, Error> {
+    const FIX: &str = "sudo properpin doctor says how to fix it";
     let mut out = format!("user       {}\n", files.user());
     let settings = match files.settings() {
         Ok(settings) if settings.pin_hash.is_empty() => return Ok(out + "PIN        none set\n"),
         Ok(settings) => settings,
-        Err(error) => return Ok(out + &format!("PIN        unusable: {error}\n")),
+        Err(error) => return Ok(out + &format!("PIN        unusable: {error}; {FIX}\n")),
     };
     out += &format!("PIN        set, in {}\n", files.user_file().display());
     out += &format!("policy     paused after {} consecutive failures, until a password unlock\n", settings.max_failures);
@@ -215,6 +220,9 @@ fn status(files: &UserFiles, clock: &impl Clock) -> Result<String, Error> {
         rules += &format!(", {} English letters", settings.min_letters);
     }
     out += &format!("set rules  {rules}, yescrypt cost {}\n", settings.hash_cost);
+    if let Err(error) = hasher.verify("", &settings.pin_hash).and_then(|_| files.check_budget()) {
+        return Ok(out + &format!("right now  refused, whatever is typed: {error}; {FIX}\n"));
+    }
     // Judged as the next attempt would, without saving: status changes nothing.
     let mut budget = files.load_budget()?;
     let judged = budget.judge(clock.now()?, &settings);
@@ -480,6 +488,27 @@ mod tests {
         assert!(output.contains("right now  paused after 3 consecutive failures; unlocking with the password resumes it"), "{output}");
         fs::remove_file(sandbox.places.etc.join("users/alice")).unwrap();
         assert!(sandbox.ask(Request::Status, "").1.contains("none set"));
+    }
+
+    /// Whatever would refuse the PIN, status says, instead of failing; and what it can't answer
+    /// at all, it prints too.
+    #[test]
+    fn status_says_why_the_pin_is_refused() {
+        let sandbox = sandbox();
+        fs::remove_file(sandbox.budget_file()).unwrap();
+        let (code, output, _) = sandbox.ask(Request::Status, "");
+        assert_eq!(code, exit::YES);
+        assert!(output.contains("right now  refused, whatever is typed: "), "{output}");
+        assert!(output.contains(".budget: missing; sudo properpin doctor says how to fix it"), "{output}");
+        sandbox.write_user_file("hash = not a hash\n");
+        assert!(sandbox.ask(Request::Status, "").1.contains("not a yescrypt hash; sudo properpin doctor"));
+        fs::set_permissions(sandbox.places.etc.join("users/alice"), Permissions::from_mode(0o644)).unwrap();
+        let output = sandbox.ask(Request::Status, "").1;
+        assert!(output.contains("PIN        unusable: ") && output.contains("readable by others; sudo properpin doctor"), "{output}");
+        let sneaky = Account { name: "../alice".into(), ..sandbox.caller.clone() };
+        let (code, output, _) = sandbox.ask_as(&sneaky, Request::Status, "");
+        assert_eq!(code, exit::BROKEN);
+        assert!(output.contains("not a usable user name"), "{output}");
     }
 
     /// Guesses nobody forgives, a wrong password included, are judged later, logged, and disable

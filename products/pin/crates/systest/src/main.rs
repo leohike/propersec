@@ -170,6 +170,8 @@ fn run() -> ExitCode {
         ("a corrupt config is refused", a_corrupt_config),
         ("a hash in the global config is refused", a_hash_in_the_global_config),
         ("a shared budget directory is refused", a_shared_budget_directory),
+        ("a user file its group can't read is refused, and doctor, as root, sees why", a_user_file_its_group_cannot_read),
+        ("a lock file its owner can't open is refused, and doctor, as root, sees why", a_lock_file_its_owner_cannot_open),
         ("the user can't read their hash or touch their counts", the_user_cannot_reach_the_files),
         ("another user can't use or spend someone's PIN", another_user_gets_nothing),
         ("--dev options are refused under setgid", dev_options_are_refused_under_setgid),
@@ -328,6 +330,20 @@ fn a_hash_in_the_global_config(world: &World) -> Outcome {
 fn a_shared_budget_directory(world: &World) -> Outcome {
     fs::set_permissions(BUDGET_DIR, Permissions::from_mode(0o1777)).map_err(message)?;
     world.fails_closed("mode 1777, not 1770")
+}
+
+/// The pinchecker can't open these, so it never sees why; doctor reads everything, as root, and
+/// must find them all the same.
+fn a_user_file_its_group_cannot_read(world: &World) -> Outcome {
+    chown(world.user_file(), None, Some(0)).map_err(message)?;
+    world
+        .fails_closed_for(&format!("{}: Permission denied", world.user_file().display()), &format!("group 0, not {}", world.pinchecker_gid))
+}
+
+fn a_lock_file_its_owner_cannot_open(world: &World) -> Outcome {
+    let lock = format!("{BUDGET_DIR}/{}.lock", world.user.uid);
+    fs::set_permissions(&lock, Permissions::from_mode(0o400)).map_err(message)?;
+    world.fails_closed_for(&format!("{lock}: Permission denied"), "not readable and writable by its owner")
 }
 
 /// The point of the pinchecker: nothing the user runs can read the hash, or reset the counts.
@@ -676,7 +692,8 @@ fn a_damaged_or_planted_budget(world: &World) -> Outcome {
     // Planted by bob's pinchecker: private to bob, it can't even be opened; readable, its owner is wrong.
     let bob = Account::by_name("bob").map_err(message)?;
     write_file(&world.budget_file(), &Budget::default().format(), bob.uid, world.pinchecker_gid, 0o600)?;
-    world.fails_closed(&format!("{}: Permission denied", world.budget_file().display()))?;
+    let owner = format!("owned by uid {}, not {}", bob.uid, world.user.uid);
+    world.fails_closed_for(&format!("{}: Permission denied", world.budget_file().display()), &owner)?;
     write_file(&world.budget_file(), &Budget::default().format(), bob.uid, world.pinchecker_gid, 0o644)?;
     world.fails_closed(&format!("owned by uid {}, not {}", bob.uid, world.user.uid))
 }
@@ -810,6 +827,9 @@ fn installing_again_keeps_the_pin(world: &World) -> Outcome {
     if !said.contains("already has the lines this version ships") || fs::read_to_string(KDE).map_err(message)? != kde {
         return Err(format!("install again changed {KDE}:\n{said}"));
     }
+    if !said.contains(&format!("no problems; a PIN is set for {USER}")) {
+        return Err(format!("install didn't print what properpin doctor found:\n{said}"));
+    }
     world.pin_refused("2222", "not the PIN, consecutive failure 2 of 3")?;
     world.pin_unlocks()?;
     install_sh(&["check"]).map(drop)
@@ -922,6 +942,11 @@ impl World {
         let checked = install_sh(&["check"])?;
         if !checked.contains("has the lines this version ships") {
             return Err(format!("install.sh check after set:\n{checked}"));
+        }
+        // The positive control for every scenario's doctor_finds: a clean system, judged clean.
+        let doctor = properpin_as_root(&["doctor"], "")?;
+        if !doctor.contains(&format!("no problems; a PIN is set for {USER}")) {
+            return Err(format!("properpin doctor after set:\n{doctor}"));
         }
         let pin_file = fs::read(format!("/etc/properpin/users/{USER}")).map_err(message)?;
         Ok(Self { user, pinchecker_gid, syslog, stock_kde, pin_file })
@@ -1146,10 +1171,18 @@ impl World {
         expect(!attempt.unlocked && found, &format!("{module:?} and {pinchecker:?} didn't both find a line"), &attempt)
     }
 
-    /// Something is wrong with the files: the PIN is refused for `why`, the password still works.
+    /// Something is wrong with the files: the PIN is refused for `why`, the password still works,
+    /// and doctor says the same.
     fn fails_closed(&self, why: &str) -> Outcome {
+        self.fails_closed_for(why, why)
+    }
+
+    /// The same, for a file the pinchecker can't open, so that only doctor, which reads it as root,
+    /// sees what is wrong with it: `doctor_why`.
+    fn fails_closed_for(&self, why: &str, doctor_why: &str) -> Outcome {
         self.pin_refused(PIN, why)?;
-        self.password_unlocks()
+        self.password_unlocks()?;
+        doctor_finds(doctor_why)
     }
 }
 
@@ -1315,6 +1348,15 @@ fn properpin_as_root(args: &[&str], typed: &str) -> Outcome<String> {
         .map_err(message)?;
     let said = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
     if output.status.success() { Ok(said) } else { Err(format!("properpin {}: {said}", args.join(" "))) }
+}
+
+/// `properpin doctor`, as root, finds `why`: judged by the pinchecker's rules, with root's eyes.
+fn doctor_finds(why: &str) -> Outcome {
+    match properpin_as_root(&["doctor"], "") {
+        Ok(said) => Err(format!("properpin doctor found nothing wrong:\n{said}")),
+        Err(said) if said.contains(why) => Ok(()),
+        Err(said) => Err(format!("properpin doctor didn't say {why:?}:\n{said}")),
+    }
 }
 
 /// Run `packaging/install.sh` against the real root, from the container's build.

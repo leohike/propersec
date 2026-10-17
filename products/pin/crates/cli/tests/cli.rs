@@ -274,6 +274,114 @@ fn enable_and_set_bring_a_disabled_pin_back() {
     assert!(!budget.exists() && !lock.exists(), "remove leaves no budget or lock file behind");
 }
 
+/// Doctor finds whatever an attempt would refuse, and names the command that fixes it; status
+/// says why too, and both agree with what the lock screen does.
+#[test]
+fn doctor_and_status_say_why_a_pin_is_refused() {
+    let sandbox = Sandbox::new();
+    let me = user();
+    says(&sandbox.properpin(&["doctor"], "").success(), "no problems; no PIN is set");
+    sandbox.properpin(&["set"], &new_pin("4859", "4859")).success();
+    says(&sandbox.properpin(&["doctor"], "").success(), &format!("no problems; a PIN is set for {me}"));
+
+    let file = sandbox.0.path().join("etc/users").join(&me);
+    fs::set_permissions(&file, Permissions::from_mode(0o644)).unwrap();
+    assert!(!unlocks(&sandbox, "4859"));
+    let doctor = sandbox.properpin(&["doctor"], "").failure();
+    says(&doctor, &format!("users/{me}: readable by others\n    the lock screen refuses {me}'s PIN\n"));
+    says(&doctor, &format!("fix: sudo properpin remove --user {me}, then a new PIN with: sudo properpin set --user {me}"));
+    says(&doctor, &format!("1 problem; a PIN is set for {me}"));
+    says(&sandbox.properpin(&["status"], "").success(), "readable by others; sudo properpin doctor says how to fix it");
+    says(&sandbox.properpin(&["set"], &new_pin("4860", "4860")).failure(), "readable by others; sudo properpin doctor says how to fix it");
+    sandbox.properpin(&["remove", "--user", &me], "").success();
+    sandbox.properpin(&["set"], &new_pin("4859", "4859")).success();
+    assert!(unlocks(&sandbox, "4859"), "the fix doctor named works");
+
+    let budget = sandbox.0.path().join(format!("var/{}.budget", current_uid()));
+    fs::remove_file(&budget).unwrap();
+    assert!(!unlocks(&sandbox, "4859"));
+    let doctor = sandbox.properpin(&["doctor"], "").failure();
+    says(&doctor, &format!("{}: missing", budget.display()));
+    says(&doctor, &format!("fix: sudo properpin set --user {me}, with the same PIN or a new one"));
+    says(&sandbox.properpin(&["status"], "").success(), "right now  refused, whatever is typed:");
+    sandbox.properpin(&["set", "--yes"], &new_pin("4859", "4859")).success();
+
+    sandbox.write_budget(&Budget { disabled: Some(Disabled { limit: Limit::Day(10), at: 1_800_000_000 }), ..Budget::default() });
+    let doctor = sandbox.properpin(&["doctor"], "").failure();
+    says(&doctor, &format!("{me}'s PIN is disabled after 10 concerning failures within 24 hours"));
+    says(&doctor, &format!("fix: sudo properpin enable --user {me} keeps the PIN"));
+    sandbox.properpin(&["enable", "--yes"], "").success();
+
+    fs::write(&file, "hash = not a hash\n").unwrap();
+    fs::set_permissions(&file, Permissions::from_mode(0o640)).unwrap();
+    says(&sandbox.properpin(&["doctor"], "").failure(), "not a yescrypt hash");
+    says(&sandbox.properpin(&["status"], "").success(), "not a yescrypt hash");
+    sandbox.properpin(&["remove"], "").success();
+    sandbox.properpin(&["set"], &new_pin("4859", "4859")).success();
+
+    // The config refuses everyone's PIN, and is reported once, not once per user.
+    let config = sandbox.0.path().join("etc/config");
+    fs::write(&config, "expiry_hours = 4\n").unwrap();
+    fs::set_permissions(&config, Permissions::from_mode(0o644)).unwrap();
+    assert!(!unlocks(&sandbox, "4859"));
+    let doctor = sandbox.properpin(&["doctor"], "").failure();
+    says(&doctor, "unknown setting \"expiry_hours\"\n    the lock screen refuses every PIN\n");
+    says(&doctor, "1 problem;");
+    sandbox.properpin(&["restore-defaults", "--yes"], "").success();
+    assert!(unlocks(&sandbox, "4859"));
+
+    // A file whose account is gone: nobody's PIN, until an account takes the name.
+    let ghost = sandbox.0.path().join("etc/users/no-such-user-properpin");
+    fs::copy(&file, &ghost).unwrap();
+    says(&sandbox.properpin(&["doctor"], "").failure(), "no account is named no-such-user-properpin");
+    says(&sandbox.properpin(&["remove", "--user", "no-such-user-properpin"], "").success(), "PIN removed for no-such-user-properpin");
+    assert!(!ghost.exists());
+    says(&sandbox.properpin(&["doctor"], "").success(), "no problems");
+}
+
+/// `remove` takes whatever is there, and only says no when there is nothing at all.
+#[test]
+fn remove_takes_whatever_is_left() {
+    let sandbox = Sandbox::new();
+    sandbox.properpin(&["set"], &new_pin("4859", "4859")).success();
+    fs::remove_file(sandbox.0.path().join("etc/users").join(user())).unwrap();
+    says(&sandbox.properpin(&["remove"], "").success(), "had no PIN; its budget and lock file are removed");
+    assert_eq!(fs::read_dir(sandbox.0.path().join("var")).unwrap().count(), 0);
+    says(&sandbox.properpin(&["remove"], "").failure(), "nothing was changed");
+}
+
+/// The blank page: every PIN and budget gone, after a question; and the config, separately.
+#[test]
+fn remove_all_and_restore_defaults_ask_first() {
+    let sandbox = Sandbox::new();
+    sandbox.properpin(&["set"], &new_pin("4859", "4859")).success();
+    fs::write(sandbox.0.path().join("etc/users/.leftover"), "").unwrap();
+    let config = sandbox.0.path().join("etc/config");
+    fs::write(&config, "max_failures = 5\n").unwrap();
+    fs::set_permissions(&config, Permissions::from_mode(0o644)).unwrap();
+
+    let assert = sandbox.properpin(&["remove", "--all"], "").failure();
+    says(&assert, &format!("This removes the PINs of {}", user()));
+    says(&assert, "--yes skips the question");
+    assert!(unlocks(&sandbox, "4859"), "nothing changed without a yes");
+    says(&sandbox.properpin(&["remove", "--all", "--yes"], "").success(), "Every PIN is removed");
+    for dir in ["etc/users", "var"] {
+        assert_eq!(fs::read_dir(sandbox.0.path().join(dir)).unwrap().count(), 0, "{dir} isn't empty");
+    }
+    assert!(!unlocks(&sandbox, "4859"));
+    says(&sandbox.properpin(&["remove", "--all"], "").success(), "No PIN was set");
+    sandbox.properpin(&["remove", "--all", "--user", &user()], "").failure();
+
+    assert!(config.exists(), "remove --all keeps the config");
+    let assert = sandbox.properpin(&["restore-defaults"], "").failure();
+    says(&assert, "max_failures = 5");
+    says(&assert, "--yes skips the question");
+    assert!(config.exists());
+    says(&sandbox.properpin(&["restore-defaults", "--yes"], "").success(), "Every setting has its default");
+    assert!(!config.exists());
+    says(&sandbox.properpin(&["restore-defaults"], "").success(), "already has its default");
+}
+
 #[test]
 fn paths_are_never_defaulted() {
     Command::cargo_bin("properpin").unwrap().arg("status").assert().failure();

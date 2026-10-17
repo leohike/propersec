@@ -1,6 +1,7 @@
 //! properpin on a real machine. This crate implements `properpin-core`'s traits:
 //!
 //! - [`UserFiles`]: one user's settings, hash, budget and lock file, and the rules for trusting them;
+//! - [`AllUsers`]: every user's files at once, for `properpin doctor`, `remove --all` and `restore-defaults`;
 //! - [`Account`], [`group_by_name`] and [`shadow_hash`]: the passwd, group and shadow databases;
 //! - [`Yescrypt`]: hashing through the system's libxcrypt, the library `/etc/shadow` uses;
 //! - [`UnixChkpwd`]: the account password, checked the way pam_unix checks it;
@@ -25,7 +26,7 @@ pub use accounts::{Account, current_egid, current_euid, current_gid, current_uid
 pub use chkpwd::UnixChkpwd;
 pub use clock::SystemClock;
 pub use crypt::Yescrypt;
-pub use files::{UserFiles, global_settings};
+pub use files::{AllUsers, UserFiles, global_settings};
 pub use log::FileLog;
 
 use properpin_core::Error;
