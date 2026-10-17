@@ -3,7 +3,7 @@
 A PIN for the KDE Plasma lock screen, within limits. Two words run through everything here:
 
 - **password:** your account password. It is long, it works everywhere, always, and stock `pam_unix` checks it.
-- **PIN:** a short extra secret, digits or letters. It unlocks the lock screen and nothing else, from boot on, while it is **enabled**. Three consecutive failures **pause** it: the password is required, and the next password unlock at the lock screen unpauses it. Failures nobody forgave, counted across days and reboots, **disable** it until root turns it back on or sets a new PIN, as the failure budget section below explains.
+- **PIN:** a short extra secret, of any characters. It unlocks the lock screen and nothing else, from boot on, while it is **enabled**. Three consecutive failures **pause** it: the password is required, and the next password unlock at the lock screen unpauses it. Failures nobody forgave, counted across days and reboots, **disable** it until root turns it back on or sets a new PIN, as the failure budget section below explains.
 
 Login, sudo, polkit, TTY and SSH never see the PIN. The full rules, the threat model and the reasoning live with the Python proof of concept in `poc-py/` (its README, WALKTHROUGH.md and docs/), which this Rust version followed rule for rule until it dropped the pepper, the expiry and the password after every boot (`docs/security-target.md` at the repo root says why), and with one change of architecture: the PIN hashes and the failure counts are reachable only by a `properpin` system group with no members, and only a pinchecker that is setgid to that group reads them, so nothing the user runs can read a hash or reset a count. The Pinchecker section below explains it, and `docs/threat-insider-hash-leak.md` at the repo root explains why.
 
@@ -52,16 +52,16 @@ A correct PIN never unlocks sooner than 75 ms after the `check` line was called:
 
 | Path | Holds | Owner and mode |
 |---|---|---|
-| `/etc/properpin/config` | Global settings, optional | `root:root 0644` |
+| `/etc/properpin/config` | Every setting, one policy for all users; optional | `root:root 0644` |
 | `/etc/properpin/users/` | One file per user with a PIN | `root:properpin 0750` |
-| `/etc/properpin/users/<user>` | That user's yescrypt hash, plus optional per-user settings | `root:properpin 0640`: the pinchecker reads it, nobody else but root |
+| `/etc/properpin/users/<user>` | That user's yescrypt hash, and nothing else | `root:properpin 0640`: the pinchecker reads it, nobody else but root |
 | `/var/lib/properpin/` | Every user's failure budget, on disk, so it survives reboots; kept in shape by `/etc/tmpfiles.d/properpin.conf` | `root:properpin 1770`: only the group can enter, and the sticky bit lets each file be replaced or deleted only by its owner |
 | `/var/lib/properpin/<uid>.budget` | The consecutive count, failures waiting to be forgiven, concerning failures of the last 7 days, the total since the PIN was set, and whether it is disabled | `<uid>:properpin 0600`: the user it describes owns it, but can't enter the directory to reach it |
 | `/var/lib/properpin/<uid>.lock` | Keeps two attempts from interleaving | `<uid>:properpin 0600` |
 | `/usr/local/libexec/properpin/properpin-pinchecker` | The pinchecker | `root:properpin 2755` (setgid only) |
 | `/etc/sysusers.d/properpin.conf` | The `properpin` system group (`g properpin -`): no members, no account | `root:root 0644` |
 
-The format is poc-py's `key = value` lines, and the hash is the same `$y$` yescrypt string, so a poc-py user file's `hash = ...` line carries over as is. Settings were renamed to the new vocabulary: `max_failed_unlocks` is now `max_failures`, `max_short_password_len` is `max_pin_length`, `min_length` is `min_pin_length`; `min_letters` and `hash_cost` are unchanged; `expiry_hours` is gone. An unknown setting is an error, so an old name can't be silently ignored.
+The format is poc-py's `key = value` lines, and the hash is the same `$y$` yescrypt string, so a poc-py user file's `hash = ...` line carries over as is. Settings were renamed to the new vocabulary: `max_failed_unlocks` is now `max_failures`, `min_length` is `min_pin_length`, `min_letters` became `required_non_digits_count`, and `hash_cost` is unchanged; `max_short_password_len` (later `max_pin_length`) and `expiry_hours` are gone, and so are per-user settings. An unknown setting is an error, and so is any setting in a user's file, so an old name or an old file can't be silently ignored.
 
 ## Installing
 
@@ -101,7 +101,9 @@ For local tests, the pinchecker accepts `--dev-etc`, `--dev-budget`, `--dev-owne
 
 ## Setting a PIN
 
-`sudo properpin set` asks for the PIN twice, after one line saying it should differ from all the user's account passwords, and never for the password itself: it runs as root, so it compares the PIN with the user's own hash in `/etc/shadow`, whatever scheme that hash uses, and refuses a match. A user with no entry there (LDAP, systemd-homed) gets a warning instead. Setting the PIN that is already set starts its budget over, total included, so `set` says so and asks first; `sudo properpin enable` of a disabled PIN asks too, since the failures that disabled it may have been someone guessing it. Without a terminal both refuse, unless given `--yes`.
+`sudo properpin set` asks for the PIN twice, after one line saying it may be up to 64 characters and should differ from all the user's account passwords, and never for the password itself: it runs as root, so it compares the PIN with the user's own hash in `/etc/shadow`, whatever scheme that hash uses, and refuses a match. A user with no entry there (LDAP, systemd-homed) gets a warning instead. Setting the PIN that is already set starts its budget over, total included, so `set` says so and asks first; `sudo properpin enable` of a disabled PIN asks too, since the failures that disabled it may have been someone guessing it. Without a terminal both refuse, unless given `--yes`.
+
+A PIN has 4 to 64 characters (`min_pin_length`; the 64 is fixed), of which at least 3 aren't the digits 0 to 9 (`required_non_digits_count`, 0 to turn it off): letters of any script, punctuation and spaces all count. Only control characters are refused. These rules apply only at `set`; at the lock screen, everything typed is checked as the PIN, the password included, whatever its length, since a PIN may be as long as a passphrase.
 
 The PIN is hashed with yescrypt at `hash_cost`, and that is all: no pepper, no expiry and nothing in memory, so the PIN works right after a reboot, and a password change leaves it alone. `docs/security-target.md` at the repo root explains why the pepper went: it only protected the hash from someone holding a copy of the disk but not the running machine, who gains next to nothing from a PIN.
 
@@ -117,7 +119,7 @@ The consecutive count stops a burst of guesses, but a correct PIN starts it over
 - **It survives reboots:** the budget, consecutive count included, is in `/var/lib/properpin`, stamped with the wall clock. Whoever can set the clock could age failures out of the 24-hour and 7-day windows, but never out of the total; setting it takes root, which wins anyway, and `docs/current-concerns.md` at the repo root says why the network and a reboot don't change that.
 - **A damaged or foreign budget refuses the PIN** instead of being read as a fresh one; `set` starts it over.
 
-The five settings may only be set in `/etc/properpin/config`, never per user. `properpin status` shows the counts, and the journal has a line for each failure that becomes concerning and for the moment the PIN is disabled. The total limit is what bounds an attacker: whatever their pace, about 60 guesses per PIN, against 60 million two-word PINs or 10,000 four-digit ones.
+Like every setting, the five live in `/etc/properpin/config`. `properpin status` shows the counts, and the journal has a line for each failure that becomes concerning and for the moment the PIN is disabled. The total limit is what bounds an attacker: whatever their pace, about 60 guesses per PIN, against 60 million two-word PINs or 10,000 four-digit ones.
 
 ## Like the lock screen
 

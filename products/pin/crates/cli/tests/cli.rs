@@ -131,7 +131,7 @@ fn built_pinchecker() -> &'static Path {
 #[test]
 fn set_then_status_then_remove() {
     let sandbox = Sandbox::new();
-    says(&sandbox.properpin(&["set"], &new_pin("4859", "4859")).success(), "The lock screen takes it from now on");
+    says(&sandbox.properpin(&["set"], &new_pin("cat4859", "cat4859")).success(), "The lock screen takes it from now on");
     let [file] = &sandbox.user_files()[..] else { panic!("expected one user file") };
     assert_eq!(fs::metadata(file).unwrap().mode() & 0o777, 0o640);
     assert_eq!(fs::metadata(file).unwrap().gid(), pinchecker_gid(), "readable by the pinchecker's group");
@@ -141,19 +141,19 @@ fn set_then_status_then_remove() {
     // The PIN works at once, with no password unlock first.
     let status = stdout(&sandbox.properpin(&["status"], "").success());
     assert!(status.contains("PIN        set") && status.contains("right now  enabled"), "{status}");
-    assert!(unlocks(&sandbox, "4859"));
-    assert!(!unlocks(&sandbox, "4860"));
+    assert!(unlocks(&sandbox, "cat4859"));
+    assert!(!unlocks(&sandbox, "cat4860"));
 
     sandbox.properpin(&["remove"], "").success();
     sandbox.properpin(&["remove"], "").failure();
     assert!(stdout(&sandbox.properpin(&["status"], "").success()).contains("none set"));
-    assert!(!unlocks(&sandbox, "4859"));
+    assert!(!unlocks(&sandbox, "cat4859"));
 }
 
 #[test]
 fn set_refuses_mismatches_and_weak_pins() {
     let sandbox = Sandbox::new();
-    says(&sandbox.properpin(&["set"], &new_pin("4859", "4860")).failure(), "the two entries differ");
+    says(&sandbox.properpin(&["set"], &new_pin("cat4859", "cat4860")).failure(), "the two entries differ");
     says(&sandbox.properpin(&["set"], &new_pin("48", "48")).failure(), "at least 4 characters");
     assert!(sandbox.user_files().is_empty());
 }
@@ -161,9 +161,6 @@ fn set_refuses_mismatches_and_weak_pins() {
 #[test]
 fn the_pin_may_not_be_the_password() {
     let sandbox = Sandbox::new();
-    let config = sandbox.0.path().join("etc/config");
-    fs::create_dir_all(config.parent().unwrap()).unwrap();
-    fs::write(&config, "max_pin_length = 64\n").unwrap();
     says(&sandbox.properpin(&["set"], &new_pin(PASSWORD, PASSWORD)).failure(), "the PIN must not be the password");
     assert!(sandbox.user_files().is_empty());
 }
@@ -173,8 +170,8 @@ fn the_pin_may_not_be_the_password() {
 fn without_a_shadow_entry_the_pin_is_not_compared() {
     let sandbox = Sandbox::new();
     fs::write(sandbox.0.path().join("shadow"), "root:!:20000::::::\n").unwrap();
-    says(&sandbox.properpin(&["set"], &new_pin("4859", "4859")).success(), "wasn't compared with the password");
-    assert!(unlocks(&sandbox, "4859"));
+    says(&sandbox.properpin(&["set"], &new_pin("cat4859", "cat4859")).success(), "wasn't compared with the password");
+    assert!(unlocks(&sandbox, "cat4859"));
 }
 
 /// The same PIN again starts its budget over, so set asks first; without a terminal, only --yes
@@ -182,37 +179,37 @@ fn without_a_shadow_entry_the_pin_is_not_compared() {
 #[test]
 fn setting_the_same_pin_again_asks_first() {
     let sandbox = Sandbox::new();
-    sandbox.properpin(&["set"], &new_pin("4859", "4859")).success();
+    sandbox.properpin(&["set"], &new_pin("cat4859", "cat4859")).success();
     sandbox.write_budget(&Budget { total: 7, ..Budget::default() });
-    let assert = sandbox.properpin(&["set"], &new_pin("4859", "4859")).failure();
+    let assert = sandbox.properpin(&["set"], &new_pin("cat4859", "cat4859")).failure();
     says(&assert, "This is the PIN already set");
     says(&assert, "forgets its 7 concerning failures");
     says(&assert, "--yes skips the question");
     assert!(stdout(&sandbox.properpin(&["status"], "").success()).contains("7 since the PIN was set"));
-    sandbox.properpin(&["set", "--yes"], &new_pin("4859", "4859")).success();
+    sandbox.properpin(&["set", "--yes"], &new_pin("cat4859", "cat4859")).success();
     assert!(stdout(&sandbox.properpin(&["status"], "").success()).contains("0 since the PIN was set"));
     // A different PIN needs no question.
-    sandbox.properpin(&["set"], &new_pin("4860", "4860")).success();
+    sandbox.properpin(&["set"], &new_pin("cat4860", "cat4860")).success();
 }
 
 /// The PIN works right after set, and after a reboot too: nothing about it lives in memory.
 #[test]
 fn a_reboot_changes_nothing() {
     let sandbox = Sandbox::new();
-    sandbox.properpin(&["set"], &new_pin("4859", "4859")).success();
+    sandbox.properpin(&["set"], &new_pin("cat4859", "cat4859")).success();
     for wrong in ["1111", "2222", "3333"] {
         assert!(!unlocks(&sandbox, wrong));
     }
     // Paused, and still paused whatever happens to memory; the password unpauses it.
-    assert!(!unlocks(&sandbox, "4859"));
+    assert!(!unlocks(&sandbox, "cat4859"));
     sandbox.housekeeping();
-    assert!(unlocks(&sandbox, "4859"));
+    assert!(unlocks(&sandbox, "cat4859"));
 }
 
 #[test]
 fn status_shows_what_the_pinchecker_sees() {
     let sandbox = Sandbox::new();
-    sandbox.properpin(&["set"], &new_pin("4859", "4859")).success();
+    sandbox.properpin(&["set"], &new_pin("cat4859", "cat4859")).success();
     let status = stdout(&sandbox.properpin(&["status"], "").success());
     assert!(status.contains("enabled, 0 of 3 consecutive failures so far"), "{status}");
     fs::remove_file(sandbox.0.path().join("pinchecker")).unwrap();
@@ -226,7 +223,7 @@ fn set_needs_the_pinchecker_group_to_exist() {
         .unwrap()
         .args(["--etc", sandbox.0.path().join("etc").to_str().unwrap(), "--pinchecker", "/nonexistent", "--budget", "/nonexistent"])
         .args(["--owner", &current_uid().to_string(), "--group", "no-such-group-properpin", "set"])
-        .write_stdin(new_pin("4859", "4859"))
+        .write_stdin(new_pin("cat4859", "cat4859"))
         .assert()
         .failure();
     says(&assert, "no group named");
@@ -239,20 +236,20 @@ fn set_needs_the_pinchecker_group_to_exist() {
 fn enable_and_set_bring_a_disabled_pin_back() {
     let sandbox = Sandbox::new();
     says(&sandbox.properpin(&["enable"], "").failure(), "no PIN is set");
-    sandbox.properpin(&["set"], &new_pin("4859", "4859")).success();
+    sandbox.properpin(&["set"], &new_pin("cat4859", "cat4859")).success();
     let disabled = Some(Disabled { limit: Limit::Day(10), at: 1_800_000_000 });
     sandbox.write_budget(&Budget { concerning: vec![1_800_000_000], total: 10, disabled, ..Budget::default() });
-    assert!(!unlocks(&sandbox, "4859"), "a disabled PIN never unlocks");
+    assert!(!unlocks(&sandbox, "cat4859"), "a disabled PIN never unlocks");
     sandbox.housekeeping();
-    assert!(!unlocks(&sandbox, "4859"), "the password doesn't bring a disabled PIN back");
+    assert!(!unlocks(&sandbox, "cat4859"), "the password doesn't bring a disabled PIN back");
     says(&sandbox.properpin(&["status"], "").success(), "disabled after 10 concerning failures within 24 hours");
 
     let assert = sandbox.properpin(&["enable"], "").failure();
     says(&assert, "may have been someone guessing it");
     says(&assert, "--yes skips the question");
-    assert!(!unlocks(&sandbox, "4859"));
+    assert!(!unlocks(&sandbox, "cat4859"));
     says(&sandbox.properpin(&["enable", "--yes"], "").success(), "PIN enabled again");
-    assert!(unlocks(&sandbox, "4859"), "enable brings the same PIN back at once");
+    assert!(unlocks(&sandbox, "cat4859"), "enable brings the same PIN back at once");
     let status = stdout(&sandbox.properpin(&["status"], "").success());
     assert!(status.contains("right now  enabled") && status.contains("10 since the PIN was set (of 60)"), "{status}");
     says(&sandbox.properpin(&["enable"], "").success(), "wasn't disabled");
@@ -263,7 +260,7 @@ fn enable_and_set_bring_a_disabled_pin_back() {
         ..Budget::default()
     });
     says(&sandbox.properpin(&["enable", "--yes"], "").failure(), "choose a new one with: properpin set");
-    sandbox.properpin(&["set"], &new_pin("4860", "4860")).success();
+    sandbox.properpin(&["set"], &new_pin("cat4860", "cat4860")).success();
     let status = stdout(&sandbox.properpin(&["status"], "").success());
     assert!(status.contains("right now  enabled") && status.contains("0 since the PIN was set"), "{status}");
 
@@ -281,30 +278,33 @@ fn doctor_and_status_say_why_a_pin_is_refused() {
     let sandbox = Sandbox::new();
     let me = user();
     says(&sandbox.properpin(&["doctor"], "").success(), "no problems; no PIN is set");
-    sandbox.properpin(&["set"], &new_pin("4859", "4859")).success();
+    sandbox.properpin(&["set"], &new_pin("cat4859", "cat4859")).success();
     says(&sandbox.properpin(&["doctor"], "").success(), &format!("no problems; a PIN is set for {me}"));
 
     let file = sandbox.0.path().join("etc/users").join(&me);
     fs::set_permissions(&file, Permissions::from_mode(0o644)).unwrap();
-    assert!(!unlocks(&sandbox, "4859"));
+    assert!(!unlocks(&sandbox, "cat4859"));
     let doctor = sandbox.properpin(&["doctor"], "").failure();
     says(&doctor, &format!("users/{me}: readable by others\n    the lock screen refuses {me}'s PIN\n"));
     says(&doctor, &format!("fix: sudo properpin remove --user {me}, then a new PIN with: sudo properpin set --user {me}"));
     says(&doctor, &format!("1 problem; a PIN is set for {me}"));
     says(&sandbox.properpin(&["status"], "").success(), "readable by others; sudo properpin doctor says how to fix it");
-    says(&sandbox.properpin(&["set"], &new_pin("4860", "4860")).failure(), "readable by others; sudo properpin doctor says how to fix it");
+    says(
+        &sandbox.properpin(&["set"], &new_pin("cat4860", "cat4860")).failure(),
+        "readable by others; sudo properpin doctor says how to fix it",
+    );
     sandbox.properpin(&["remove", "--user", &me], "").success();
-    sandbox.properpin(&["set"], &new_pin("4859", "4859")).success();
-    assert!(unlocks(&sandbox, "4859"), "the fix doctor named works");
+    sandbox.properpin(&["set"], &new_pin("cat4859", "cat4859")).success();
+    assert!(unlocks(&sandbox, "cat4859"), "the fix doctor named works");
 
     let budget = sandbox.0.path().join(format!("var/{}.budget", current_uid()));
     fs::remove_file(&budget).unwrap();
-    assert!(!unlocks(&sandbox, "4859"));
+    assert!(!unlocks(&sandbox, "cat4859"));
     let doctor = sandbox.properpin(&["doctor"], "").failure();
     says(&doctor, &format!("{}: missing", budget.display()));
     says(&doctor, &format!("fix: sudo properpin set --user {me}, with the same PIN or a new one"));
     says(&sandbox.properpin(&["status"], "").success(), "right now  refused, whatever is typed:");
-    sandbox.properpin(&["set", "--yes"], &new_pin("4859", "4859")).success();
+    sandbox.properpin(&["set", "--yes"], &new_pin("cat4859", "cat4859")).success();
 
     sandbox.write_budget(&Budget { disabled: Some(Disabled { limit: Limit::Day(10), at: 1_800_000_000 }), ..Budget::default() });
     let doctor = sandbox.properpin(&["doctor"], "").failure();
@@ -317,18 +317,18 @@ fn doctor_and_status_say_why_a_pin_is_refused() {
     says(&sandbox.properpin(&["doctor"], "").failure(), "not a yescrypt hash");
     says(&sandbox.properpin(&["status"], "").success(), "not a yescrypt hash");
     sandbox.properpin(&["remove"], "").success();
-    sandbox.properpin(&["set"], &new_pin("4859", "4859")).success();
+    sandbox.properpin(&["set"], &new_pin("cat4859", "cat4859")).success();
 
     // The config refuses everyone's PIN, and is reported once, not once per user.
     let config = sandbox.0.path().join("etc/config");
     fs::write(&config, "expiry_hours = 4\n").unwrap();
     fs::set_permissions(&config, Permissions::from_mode(0o644)).unwrap();
-    assert!(!unlocks(&sandbox, "4859"));
+    assert!(!unlocks(&sandbox, "cat4859"));
     let doctor = sandbox.properpin(&["doctor"], "").failure();
     says(&doctor, "unknown setting \"expiry_hours\"\n    the lock screen refuses every PIN\n");
     says(&doctor, "1 problem;");
     sandbox.properpin(&["restore-defaults", "--yes"], "").success();
-    assert!(unlocks(&sandbox, "4859"));
+    assert!(unlocks(&sandbox, "cat4859"));
 
     // A file whose account is gone: nobody's PIN, until an account takes the name.
     let ghost = sandbox.0.path().join("etc/users/no-such-user-properpin");
@@ -343,7 +343,7 @@ fn doctor_and_status_say_why_a_pin_is_refused() {
 #[test]
 fn remove_takes_whatever_is_left() {
     let sandbox = Sandbox::new();
-    sandbox.properpin(&["set"], &new_pin("4859", "4859")).success();
+    sandbox.properpin(&["set"], &new_pin("cat4859", "cat4859")).success();
     fs::remove_file(sandbox.0.path().join("etc/users").join(user())).unwrap();
     says(&sandbox.properpin(&["remove"], "").success(), "had no PIN; its budget and lock file are removed");
     assert_eq!(fs::read_dir(sandbox.0.path().join("var")).unwrap().count(), 0);
@@ -354,7 +354,7 @@ fn remove_takes_whatever_is_left() {
 #[test]
 fn remove_all_and_restore_defaults_ask_first() {
     let sandbox = Sandbox::new();
-    sandbox.properpin(&["set"], &new_pin("4859", "4859")).success();
+    sandbox.properpin(&["set"], &new_pin("cat4859", "cat4859")).success();
     fs::write(sandbox.0.path().join("etc/users/.leftover"), "").unwrap();
     let config = sandbox.0.path().join("etc/config");
     fs::write(&config, "max_failures = 5\n").unwrap();
@@ -363,12 +363,12 @@ fn remove_all_and_restore_defaults_ask_first() {
     let assert = sandbox.properpin(&["remove", "--all"], "").failure();
     says(&assert, &format!("This removes the PINs of {}", user()));
     says(&assert, "--yes skips the question");
-    assert!(unlocks(&sandbox, "4859"), "nothing changed without a yes");
+    assert!(unlocks(&sandbox, "cat4859"), "nothing changed without a yes");
     says(&sandbox.properpin(&["remove", "--all", "--yes"], "").success(), "Every PIN is removed");
     for dir in ["etc/users", "var"] {
         assert_eq!(fs::read_dir(sandbox.0.path().join(dir)).unwrap().count(), 0, "{dir} isn't empty");
     }
-    assert!(!unlocks(&sandbox, "4859"));
+    assert!(!unlocks(&sandbox, "cat4859"));
     says(&sandbox.properpin(&["remove", "--all"], "").success(), "No PIN was set");
     sandbox.properpin(&["remove", "--all", "--user", &user()], "").failure();
 

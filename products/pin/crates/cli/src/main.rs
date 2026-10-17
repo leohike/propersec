@@ -40,7 +40,7 @@ use std::process::{Command, ExitCode, Stdio};
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Parser, Subcommand};
-use properpin_core::{Budget, Clock, Hasher, MAX_PIN_BYTES, Secret, Store, exit};
+use properpin_core::{Budget, Clock, Hasher, MAX_PIN_BYTES, MAX_PIN_CHARS, Secret, Store, exit};
 use properpin_sys::{Account, AllUsers, SystemClock, UserFiles, Yescrypt, current_euid, current_uid, group_by_name, shadow_hash};
 
 mod doctor;
@@ -81,8 +81,7 @@ enum Action {
     /// Delete the PIN, its budget and its lock file, whatever state they are in; the lock screen
     /// takes the password only
     Remove(Removal),
-    /// Delete the global config, so every setting is back to its default; PINs, the settings in
-    /// each user's own file, and budgets stay
+    /// Delete the config, so every setting is back to its default; PINs and budgets stay
     RestoreDefaults(Ask),
     /// Find what makes the lock screen refuse a PIN, for every user, and the command that fixes it
     Doctor,
@@ -214,8 +213,7 @@ fn set(cli: &Cli, account: &Account, yes: bool) -> Result<()> {
         )?;
     }
     let hash = Yescrypt.hash(pin, settings.hash_cost)?;
-    // Only the hash changes. Per-user settings already in the file are kept.
-    files.save_pin(&[(properpin_core::HASH_SETTING, &hash)])?;
+    files.save_pin(&hash)?;
     // A new PIN, so no failure against the old one counts any more, and nothing stays paused or disabled.
     files.start_budget(&Budget::default())?;
     println!("PIN set for {}. The lock screen takes it from now on.", account.name);
@@ -340,9 +338,7 @@ fn restore_defaults(cli: &Cli, yes: bool) -> Result<()> {
         },
         _ => format!("{} is not a regular file.", config.display()),
     };
-    let warning = format!(
-        "{shown}\nDeleting it puts every setting back to its default. PINs, the settings in each user's own file, and budgets stay."
-    );
+    let warning = format!("{shown}\nDeleting it puts every setting back to its default. PINs and budgets stay.");
     confirm(&mut stdin().lock(), yes, &warning)?;
     all.remove_config()?;
     println!("Deleted {}. Every setting has its default.", config.display());
@@ -406,7 +402,8 @@ fn confirm(input: &mut impl BufRead, yes: bool, warning: &str) -> Result<()> {
 
 /// The new PIN, typed twice. Both entries are wiped when dropped.
 fn ask_pin_twice(input: &mut impl BufRead) -> Result<Secret> {
-    let first = ask_secret(input, "The PIN should differ from all your account passwords.\nChoose a PIN: ", MAX_PIN_BYTES)?;
+    let prompt = format!("Up to {MAX_PIN_CHARS} characters; it should differ from all your account passwords.\nChoose a PIN: ");
+    let first = ask_secret(input, &prompt, MAX_PIN_BYTES)?;
     let second = ask_secret(input, "Same again: ", MAX_PIN_BYTES)?;
     if first.as_bytes() != second.as_bytes() {
         bail!("the two entries differ; nothing was changed");

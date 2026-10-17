@@ -38,7 +38,8 @@ use std::path::PathBuf;
 
 pub use properpin_core::PasswordCheck;
 use properpin_core::{
-    Clock, Error, Hasher, Judged, Log, MAX_INPUT_BYTES, Secret, Store, exit, housekeeping_after_password_unlock, try_unlock_with_pin,
+    Clock, Error, Hasher, Judged, Log, MAX_INPUT_BYTES, MAX_PIN_CHARS, Secret, Store, exit, housekeeping_after_password_unlock,
+    try_unlock_with_pin,
 };
 pub use properpin_sys::UnixChkpwd;
 use properpin_sys::{Account, UserFiles};
@@ -215,9 +216,9 @@ fn status(files: &UserFiles, hasher: &impl Hasher, clock: &impl Clock) -> Result
     };
     out += &format!("PIN        set, in {}\n", files.user_file().display());
     out += &format!("policy     paused after {} consecutive failures, until a password unlock\n", settings.max_failures);
-    let mut rules = format!("{} to {} characters", settings.min_pin_length, settings.max_pin_length);
-    if settings.min_letters > 0 {
-        rules += &format!(", {} English letters", settings.min_letters);
+    let mut rules = format!("{} to {MAX_PIN_CHARS} characters", settings.min_pin_length);
+    if settings.required_non_digits_count > 0 {
+        rules += &format!(", {} of them not digits", settings.required_non_digits_count);
     }
     out += &format!("set rules  {rules}, yescrypt cost {}\n", settings.hash_cost);
     if let Err(error) = hasher.verify("", &settings.pin_hash).and_then(|_| files.check_budget()) {
@@ -517,6 +518,9 @@ mod tests {
     fn concerning_failures_are_logged_and_disable_the_pin() {
         let sandbox = sandbox();
         let alice = &sandbox.caller;
+        // Three failures in a row would pause the PIN, the wrong password among them, since it is
+        // checked as a PIN too; this test is about the budget, not the pause.
+        sandbox.write_config("max_failures = 4\n");
         for wrong in ["1111", "2222", "not the password at all"] {
             sandbox.ask(Request::Check, wrong);
         }

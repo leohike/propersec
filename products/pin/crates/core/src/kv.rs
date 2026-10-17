@@ -31,15 +31,6 @@ pub fn format(pairs: &[(String, String)]) -> String {
     pairs.iter().map(|(key, value)| format!("{key} = {value}\n")).collect()
 }
 
-/// `pairs` with `key` set to `value`: replaced where it was, or added at the end.
-pub fn with(mut pairs: Pairs, key: &str, value: &str) -> Pairs {
-    match pairs.iter_mut().find(|(existing, _)| existing == key) {
-        Some((_, existing)) => *existing = value.into(),
-        None => pairs.push((key.into(), value.into())),
-    }
-    pairs
-}
-
 /// Plain ASCII digits only: no sign, no spaces, no "²".
 pub(crate) fn digits<T: std::str::FromStr>(text: &str) -> Option<T> {
     text.bytes().all(|byte| byte.is_ascii_digit()).then(|| text.parse().ok()).flatten()
@@ -68,8 +59,8 @@ mod tests {
     }
 
     #[test]
-    fn round_trips_and_replaces_in_place() {
-        let pairs = with(parse("hash = old\nmax_failures = 2\n", "f").unwrap(), "hash", "new");
-        assert_eq!(format(&pairs), "hash = new\nmax_failures = 2\n");
+    fn round_trips() {
+        let pairs = parse("hash = old\nmax_failures = 2\n", "f").unwrap();
+        assert_eq!(format(&pairs), "hash = old\nmax_failures = 2\n");
     }
 }

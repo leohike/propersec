@@ -2,30 +2,27 @@ use std::fmt;
 use std::str::FromStr;
 
 use crate::kv::Pairs;
-use crate::{Error, HASH_SETTING, USER_ONLY};
+use crate::{Error, HASH_SETTING, MAX_PIN_CHARS};
 
 /// Everything that decides one user's PIN: its hash, and the rules for it.
 ///
-/// Built in layers: these defaults, then the global config, then the user's own file, each
-/// [`Settings::apply`] winning over the layer before. Only the user's own file may hold the hash.
-/// Like a line of `/etc/shadow`, that file keeps the secret and the rules for it together, where
-/// only root can change them.
+/// Built in layers: these defaults, then the global config, the one place for every rule, then the
+/// user's own file, which holds the hash and nothing else. Each [`Settings::apply`] wins over the
+/// layer before.
 ///
-/// The unlock path uses the hash, the next two fields and the budget's five; `set` uses the three
-/// in between. The PAM module itself reads `min_milliseconds_before_pin_unlock`. The budget's
-/// settings and `min_milliseconds_before_pin_unlock` may only come from the global config.
+/// The unlock path uses the hash, `max_failures` and the budget's five; `set` uses the three in
+/// between. The PAM module itself reads `min_milliseconds_before_pin_unlock`.
 #[derive(Clone, PartialEq)]
 pub struct Settings {
     /// Empty: no PIN is set. Otherwise the PIN's yescrypt hash.
     pub pin_hash: String,
     /// Consecutive failures that pause the PIN until the next password unlock.
     pub max_failures: u32,
-    /// Longest PIN, in characters. Longer input is never hashed or counted.
-    pub max_pin_length: usize,
-    /// Shortest PIN `set` accepts.
+    /// Shortest PIN `set` accepts, in characters. The longest is [`MAX_PIN_CHARS`].
     pub min_pin_length: usize,
-    /// English letters `set` requires; 0 turns the rule off.
-    pub min_letters: usize,
+    /// Characters other than the digits 0 to 9 that `set` requires, whitespace included; 0 turns
+    /// the rule off.
+    pub required_non_digits_count: usize,
     /// yescrypt cost `set` hashes with: 5 takes about 20 ms, 8 about 160 ms.
     pub hash_cost: u32,
     /// Seconds before a correct PIN in which failures are forgiven as the user's own typos.
@@ -41,30 +38,18 @@ pub struct Settings {
     /// The shortest time a correct PIN takes to unlock, counted from when the PAM module is called;
     /// the module waits out the rest. kscreenlocker 6.8 takes an answer within 50 ms for a broken
     /// authenticator, so below that the PIN stops unlocking. Only a correct PIN waits: anything
-    /// else goes on to pam_unix, which is slow anyway. The PAM module reads it, as the user, so it
-    /// may only come from the global config, which everyone can read.
+    /// else goes on to pam_unix, which is slow anyway. The PAM module reads it, as the user, from
+    /// the global config, which everyone can read.
     pub min_milliseconds_before_pin_unlock: u64,
 }
-
-/// The budget's settings (one policy for the machine, never per user), and the PAM module's wait,
-/// which the module reads as the user, who can't read their own file.
-const GLOBAL_ONLY: &[&str] = &[
-    "forgive_before_correct_pin",
-    "forgive_before_correct_password",
-    "max_concerning_24h",
-    "max_concerning_7d",
-    "max_concerning_total",
-    "min_milliseconds_before_pin_unlock",
-];
 
 impl Default for Settings {
     fn default() -> Self {
         Self {
             pin_hash: String::new(),
             max_failures: 3,
-            max_pin_length: 12,
             min_pin_length: 4,
-            min_letters: 0,
+            required_non_digits_count: 3,
             hash_cost: 5,
             forgive_before_correct_pin: 45,
             forgive_before_correct_password: 90,
@@ -82,9 +67,8 @@ impl fmt::Debug for Settings {
         f.debug_struct("Settings")
             .field("pin_hash", &if self.pin_hash.is_empty() { "<none>" } else { "<set>" })
             .field("max_failures", &self.max_failures)
-            .field("max_pin_length", &self.max_pin_length)
             .field("min_pin_length", &self.min_pin_length)
-            .field("min_letters", &self.min_letters)
+            .field("required_non_digits_count", &self.required_non_digits_count)
             .field("hash_cost", &self.hash_cost)
             .field("forgive_before_correct_pin", &self.forgive_before_correct_pin)
             .field("forgive_before_correct_password", &self.forgive_before_correct_password)
@@ -101,25 +85,27 @@ impl Settings {
     /// for errors. A value outside its range is an error, never clamped: a typo must not quietly
     /// allow 50 failures.
     ///
-    /// Only a user's own file may set the hash (`may_set_hash`). Anywhere else, one
-    /// line would give every user the same PIN. The user's own file may not set the budget's
-    /// settings.
-    pub fn apply(&mut self, pairs: &Pairs, source: &str, may_set_hash: bool) -> Result<(), Error> {
+    /// A user's own file (`user_file`) holds the hash and nothing else: the rules are one policy
+    /// for the machine. Anywhere else the hash is refused, since one line would give every user the
+    /// same PIN.
+    pub fn apply(&mut self, pairs: &Pairs, source: &str, user_file: bool) -> Result<(), Error> {
         for (key, raw) in pairs {
             let key = key.as_str();
-            if may_set_hash && GLOBAL_ONLY.contains(&key) {
-                return Err(Error::GlobalOnly { file: source.into(), key: key.into() });
-            }
             match key {
-                _ if !may_set_hash && USER_ONLY.contains(&key) => {
-                    return Err(Error::OutsideUserFile { file: source.into(), key: key.into() });
+                HASH_SETTING if user_file => self.pin_hash.clone_from(raw),
+                HASH_SETTING => return Err(Error::OutsideUserFile { file: source.into(), key: key.into() }),
+                _ if user_file => {
+                    // A real setting is in the wrong file; anything else, like a key a version with
+                    // a pepper left, is unknown wherever it is.
+                    let known = Settings::default().apply(&vec![(key.to_owned(), raw.clone())], source, false);
+                    return Err(match known {
+                        Err(Error::UnknownSetting { .. }) => Error::UnknownSetting { file: source.into(), key: key.into() },
+                        _ => Error::OnlyTheHash { file: source.into(), key: key.into() },
+                    });
                 }
-                HASH_SETTING => self.pin_hash.clone_from(raw),
                 "max_failures" => self.max_failures = in_range(source, key, raw, 1, 10)?,
-                // 64 characters fit MAX_PIN_BYTES even at 4 bytes each.
-                "max_pin_length" => self.max_pin_length = in_range(source, key, raw, 1, 64)?,
-                "min_pin_length" => self.min_pin_length = in_range(source, key, raw, 1, 64)?,
-                "min_letters" => self.min_letters = in_range(source, key, raw, 0, 64)?,
+                "min_pin_length" => self.min_pin_length = in_range(source, key, raw, 1, MAX_PIN_CHARS)?,
+                "required_non_digits_count" => self.required_non_digits_count = in_range(source, key, raw, 0, MAX_PIN_CHARS)?,
                 "hash_cost" => self.hash_cost = in_range(source, key, raw, 1, 11)?,
                 "forgive_before_correct_pin" => self.forgive_before_correct_pin = in_range(source, key, raw, 0, 3600)?,
                 "forgive_before_correct_password" => self.forgive_before_correct_password = in_range(source, key, raw, 0, 3600)?,
@@ -138,16 +124,16 @@ impl Settings {
     /// What a proposed PIN is missing, phrased to follow "the PIN needs".
     pub fn pin_problems(&self, pin: &str) -> Vec<String> {
         let length = pin.chars().count();
-        let letters = pin.chars().filter(char::is_ascii_alphabetic).count();
+        let non_digits = pin.chars().filter(|c| !c.is_ascii_digit()).count();
         let mut problems = Vec::new();
         if length < self.min_pin_length {
             problems.push(format!("at least {} characters", self.min_pin_length));
         }
-        if length > self.max_pin_length {
-            problems.push(format!("at most {} characters", self.max_pin_length));
+        if length > MAX_PIN_CHARS {
+            problems.push(format!("at most {MAX_PIN_CHARS} characters"));
         }
-        if letters < self.min_letters {
-            problems.push(format!("at least {} English letters", self.min_letters));
+        if non_digits < self.required_non_digits_count {
+            problems.push(format!("at least {} characters that aren't digits", self.required_non_digits_count));
         }
         if pin.chars().any(char::is_control) {
             problems.push("no control characters".into());
@@ -191,14 +177,13 @@ mod tests {
 
     #[test]
     fn every_setting_is_read() {
-        let text = "max_failures = 5\nmax_pin_length = 8\nmin_pin_length = 6\nmin_letters = 1\nhash_cost = 6\n\
+        let text = "max_failures = 5\nmin_pin_length = 6\nrequired_non_digits_count = 1\nhash_cost = 6\n\
                     forgive_before_correct_pin = 30\nforgive_before_correct_password = 60\nmax_concerning_24h = 5\n\
                     max_concerning_7d = 15\nmax_concerning_total = 50\nmin_milliseconds_before_pin_unlock = 200\n";
         let expected = Settings {
             max_failures: 5,
-            max_pin_length: 8,
             min_pin_length: 6,
-            min_letters: 1,
+            required_non_digits_count: 1,
             hash_cost: 6,
             forgive_before_correct_pin: 30,
             forgive_before_correct_password: 60,
@@ -228,22 +213,21 @@ mod tests {
     }
 
     #[test]
-    fn the_budget_is_set_globally_only() {
-        assert_eq!(apply("max_concerning_24h = 5\nforgive_before_correct_pin = 30\n", false).unwrap().max_concerning_24h, 5);
-        for text in [
-            "max_concerning_24h = 50",
-            "forgive_before_correct_password = 10",
-            "max_concerning_total = 1000",
-            "min_milliseconds_before_pin_unlock = 0",
-        ] {
-            assert!(matches!(apply(text, true), Err(Error::GlobalOnly { .. })), "{text}");
+    fn a_user_file_holds_the_hash_and_no_rule() {
+        for text in ["max_failures = 2", "min_pin_length = 6", "max_concerning_24h = 50", "min_milliseconds_before_pin_unlock = 0"] {
+            assert!(matches!(apply(text, true), Err(Error::OnlyTheHash { .. })), "{text}");
         }
+        let error = apply("hash = $y$j9T$abc$def\nmax_failures = 2\n", true).unwrap_err().to_string();
+        assert_eq!(error, "f: holds max_failures, but a user's own file may only hold the hash; the setting belongs in the config");
         assert!(matches!(apply("max_concerning_7d = 201", false), Err(Error::BadValue { .. })));
+        assert!(matches!(apply("hash = $y$x\nencrypted_pepper = 00\n", true), Err(Error::UnknownSetting { .. })));
     }
 
     #[test]
-    fn refuses_unknown_settings() {
-        assert!(matches!(apply("max_short_password_len = 5", false), Err(Error::UnknownSetting { .. })));
+    fn refuses_unknown_and_removed_settings() {
+        for text in ["max_short_password_len = 5", "max_pin_length = 12", "min_letters = 1"] {
+            assert!(matches!(apply(text, false), Err(Error::UnknownSetting { .. })), "{text}");
+        }
     }
 
     #[test]
@@ -254,21 +238,39 @@ mod tests {
 
     #[test]
     fn counts_characters_not_bytes() {
-        // Twelve Cyrillic letters are 24 bytes and still fit the default 12.
-        assert!(Settings::default().pin_problems("абвгдежзийкл").is_empty());
-        assert_eq!(Settings::default().pin_problems("абвгдежзийклм"), ["at most 12 characters"]);
+        // 64 Cyrillic letters are 128 bytes and still fit.
+        let longest = "ж".repeat(MAX_PIN_CHARS);
+        assert!(Settings::default().pin_problems(&longest).is_empty());
+        assert_eq!(Settings::default().pin_problems(&format!("{longest}ж")), ["at most 64 characters"]);
+        assert_eq!(Settings::default().pin_problems("жж1"), ["at least 4 characters", "at least 3 characters that aren't digits"]);
+    }
+
+    #[test]
+    fn everything_but_a_digit_counts_as_a_non_digit() {
+        // Letters of any script, punctuation, and whitespace, spaces between words included.
+        for pin in ["ab1c", "жы!7", "1 2 3 4", "\u{a0}-x9", "glider panorama"] {
+            assert!(Settings::default().pin_problems(pin).is_empty(), "{pin:?}");
+        }
+        // Only 0 to 9 are digits; other scripts' digits are not.
+        assert!(Settings::default().pin_problems("٣٤٥1").is_empty());
+        assert_eq!(Settings::default().pin_problems("12ab"), ["at least 3 characters that aren't digits"]);
+        let numeric = Settings { required_non_digits_count: 0, ..Settings::default() };
+        assert!(numeric.pin_problems("4859").is_empty());
     }
 
     #[test]
     fn a_pin_of_exactly_the_shortest_length_is_accepted() {
-        assert!(Settings::default().pin_problems("4859").is_empty());
-        assert_eq!(Settings::default().pin_problems("485"), ["at least 4 characters"]);
+        assert!(Settings::default().pin_problems("abc9").is_empty());
+        assert_eq!(Settings::default().pin_problems("abc"), ["at least 4 characters"]);
     }
 
     #[test]
     fn lists_every_problem() {
-        let settings = Settings { min_letters: 2, ..Settings::default() };
-        assert_eq!(settings.pin_problems("1\t"), ["at least 4 characters", "at least 2 English letters", "no control characters"]);
+        let settings = Settings { required_non_digits_count: 2, ..Settings::default() };
+        assert_eq!(
+            settings.pin_problems("1\t"),
+            ["at least 4 characters", "at least 2 characters that aren't digits", "no control characters"]
+        );
     }
 
     #[test]

@@ -46,7 +46,7 @@ mod uninstall;
 const PRODUCT: &str = "/opt/properpin";
 const USER: &str = "alice";
 const PASSWORD: &str = "correct horse battery staple";
-const PIN: &str = "4859";
+const PIN: &str = "cat4859";
 const KDE: &str = "/etc/pam.d/kde";
 const PINCHECKER: &str = "/usr/local/libexec/properpin/properpin-pinchecker";
 const MODULE: &str = "/usr/local/lib64/security/pam_properpin.so";
@@ -249,17 +249,16 @@ fn a_wrong_password_never_unpauses_the_pin(world: &World) -> Outcome {
 /// `set` compares the PIN with alice's hash in the real /etc/shadow, as root, so it never asks for
 /// the password, and the new PIN works at once.
 fn set_refuses_the_password_and_the_pin_works_at_once(world: &World) -> Outcome {
-    write_file(&world.config(), "max_pin_length = 64\n", 0, 0, 0o644)?;
     match properpin_as_root(&["set", "--user", USER], &format!("{PASSWORD}\n{PASSWORD}\n")) {
         Err(said) if said.contains("the PIN must not be the password") => {}
         other => return Err(format!("set took the password as a PIN: {other:?}")),
     }
-    let said = properpin_as_root(&["set", "--user", USER], "4860\n4860\n")?;
+    let said = properpin_as_root(&["set", "--user", USER], "cat4860\ncat4860\n")?;
     if !said.contains("The lock screen takes it from now on") {
         return Err(format!("set said: {said}"));
     }
     world.pin_refused(PIN, "not the PIN, consecutive failure 1 of 3")?;
-    let attempt = world.kde("4860")?;
+    let attempt = world.kde("cat4860")?;
     expect(attempt.unlocked && attempt.log.contains("unlocked with the PIN"), "the new PIN didn't unlock", &attempt)
 }
 
@@ -679,8 +678,8 @@ fn the_lifetime_limit_takes_a_new_pin(world: &World) -> Outcome {
         Err(said) if said.contains("choose a new one with: properpin set") => {}
         other => return Err(format!("enable lifted the lifetime limit: {other:?}")),
     }
-    properpin_as_root(&["set", "--user", USER], "4860\n4860\n")?;
-    let attempt = world.kde("4860")?;
+    properpin_as_root(&["set", "--user", USER], "cat4860\ncat4860\n")?;
+    let attempt = world.kde("cat4860")?;
     expect(attempt.unlocked, "the new PIN didn't unlock", &attempt)
 }
 

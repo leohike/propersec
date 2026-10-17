@@ -45,14 +45,14 @@ demo:
     step() { printf '\n\033[1m%s\033[0m\n' "$*"; }
     said() { tail -n 1 "$root/log"; }
     lock_screen() { step "lock screen: $1"; echo -n "$1" | "$root/pinchecker" check || true; said; }
-    step "properpin set (4859, typed twice)"; printf '4859\n4859\n' | properpin set
+    step "properpin set (cat4859, typed twice)"; printf 'cat4859\ncat4859\n' | properpin set
     step "properpin status"; properpin status
-    lock_screen 4859
+    lock_screen cat4859
     for wrong in 1111 2222 3333; do lock_screen "$wrong"; done
-    lock_screen 4859
+    lock_screen cat4859
     step "lock screen: the correct password, so the housekeeping line runs"
     echo -n "correct horse battery staple" | "$root/pinchecker" housekeeping; said
-    lock_screen 4859
+    lock_screen cat4859
     step "properpin status"; properpin status
 
 # Everything for real in a stock Fedora 44 container: install.sh, the real /etc/pam.d, pam_unix and unix_chkpwd. Never touches this machine's PAM

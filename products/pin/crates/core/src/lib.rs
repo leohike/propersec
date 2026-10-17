@@ -3,7 +3,7 @@
 //! Two words run through all of it:
 //!
 //! - **password**: the account password. It works everywhere, always, and pam_unix checks it.
-//! - **PIN**: a short extra secret, digits or letters, that unlocks the lock screen and nothing
+//! - **PIN**: a short extra secret, of any characters, that unlocks the lock screen and nothing
 //!   else. It is in one of three states:
 //!   - *enabled*: the lock screen takes it, from boot on;
 //!   - *paused* (password required): after too many consecutive failures, until the next password
@@ -39,9 +39,13 @@ pub use refusal::Refusal;
 pub use secret::Secret;
 pub use settings::Settings;
 
-/// A hard cap, in bytes, on input that is read and hashed, whatever the settings say.
+/// The longest PIN `set` accepts, in characters. Not a setting: a PIN is a secret short enough to
+/// type often, and this is only a sanity bound, said once when `set` asks for the PIN.
+pub const MAX_PIN_CHARS: usize = 64;
+
+/// A hard cap, in bytes, on input that is read and hashed: [`MAX_PIN_CHARS`] even at 4 bytes each.
 /// libpam passes at most `PAM_MAX_RESP_SIZE` (512).
-pub const MAX_PIN_BYTES: usize = 256;
+pub const MAX_PIN_BYTES: usize = 4 * MAX_PIN_CHARS;
 
 /// Config, user and budget files are a few lines; anything longer is not one of ours.
 pub const MAX_FILE_BYTES: usize = 4096;
@@ -49,11 +53,8 @@ pub const MAX_FILE_BYTES: usize = 4096;
 /// yescrypt, the same scheme `/etc/shadow` uses on Fedora.
 pub const HASH_PREFIX: &str = "$y$";
 
-/// The setting that holds the PIN hash. Only a user's own file may have it.
+/// The setting that holds the PIN hash, the only one a user's own file may have.
 pub const HASH_SETTING: &str = "hash";
-
-/// The settings only a user's own file may hold: what `set` writes for a new PIN.
-pub const USER_ONLY: &[&str] = &[HASH_SETTING];
 
 /// The setgid pinchecker's exit codes, which are all it answers: the PAM module and the CLI read them.
 pub mod exit {

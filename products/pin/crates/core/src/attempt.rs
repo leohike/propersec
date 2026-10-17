@@ -54,16 +54,13 @@ pub enum Verdict {
     /// Input that can never be a PIN (see [`input_that_could_be_a_pin`]). Not counted as
     /// consecutive.
     Unusable,
-    /// Longer than any PIN may be: almost always the password. Not hashed, not counted as
-    /// consecutive.
-    TooLong { max: usize },
     /// The PIN is paused or disabled; the input wasn't checked, or recorded.
     Refused(Refusal),
     /// Checked, and not the PIN.
     WrongPin { consecutive: u32, max: u32 },
 }
 
-/// What [`try_unlock_with_pin`] came to. `Unusable`, `TooLong` and `WrongPin` are also failures in
+/// What [`try_unlock_with_pin`] came to. `Unusable` and `WrongPin` are also failures in
 /// the budget, waiting to be forgiven; `judged` says what the budget looked like.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnlockAttemptOutcome {
@@ -84,7 +81,6 @@ impl fmt::Display for Verdict {
             Self::Empty => write!(f, "nothing typed, refused"),
             Self::NoPinSet => write!(f, "no PIN is set, refused"),
             Self::Unusable => write!(f, "input that can't be a PIN, refused; not counted as consecutive"),
-            Self::TooLong { max } => write!(f, "longer than {max} characters, so not the PIN; not counted as consecutive"),
             Self::Refused(refusal) => write!(f, "{refusal}"),
             Self::WrongPin { consecutive, max } => {
                 write!(f, "not the PIN, consecutive failure {consecutive} of {max}")?;
@@ -143,11 +139,9 @@ pub fn try_unlock_with_pin(
         }
         return Ok(UnlockAttemptOutcome { verdict: Verdict::Refused(refusal), judged });
     }
-    let pin = match input_that_could_be_a_pin(typed) {
-        Some(pin) if pin.chars().count() > settings.max_pin_length => Err(Verdict::TooLong { max: settings.max_pin_length }),
-        Some(pin) => Ok(pin),
-        None => Err(Verdict::Unusable),
-    };
+    // Whatever could be a PIN is checked as one, the password included: a PIN may be as long as
+    // a passphrase, so length says nothing about which of the two was typed.
+    let pin = input_that_could_be_a_pin(typed).ok_or(Verdict::Unusable);
     // Every input is a failure until it unlocks, and an input about to be checked is also one more
     // consecutive failure, both saved before the hash is checked, and taken back on a match. An
     // attempt abandoned halfway (Plasma 6.8 cancels authenticators it switches away from) still
@@ -305,22 +299,13 @@ mod tests {
     }
 
     #[test]
-    fn longer_input_is_not_a_pin_and_not_consecutive() {
+    fn long_input_is_checked_as_a_pin() {
         let (store, clock) = enabled();
-        assert_eq!(try_pin(&store, &clock, "correct horse battery"), Verdict::TooLong { max: 12 });
-        assert_eq!((store.consecutive(), store.pending()), (0, 1));
-    }
-
-    #[test]
-    fn input_exactly_at_a_length_limit_is_still_checked() {
-        let (store, clock) = enabled();
-        assert_eq!(try_pin(&store, &clock, "123456789012"), Verdict::WrongPin { consecutive: 1, max: 3 });
-        // The longest PIN the settings allow, 64 characters of four bytes each, fills MAX_PIN_BYTES.
-        let (mut store, clock) = enabled();
-        store.settings.max_pin_length = 64;
-        let longest = "\u{10348}".repeat(64);
+        assert_eq!(try_pin(&store, &clock, "correct horse battery staple"), Verdict::WrongPin { consecutive: 1, max: 3 });
+        // The longest PIN set allows, 64 characters of four bytes each, fills MAX_PIN_BYTES.
+        let longest = "\u{10348}".repeat(crate::MAX_PIN_CHARS);
         assert_eq!(longest.len(), MAX_PIN_BYTES);
-        assert_eq!(try_pin(&store, &clock, &longest), Verdict::WrongPin { consecutive: 1, max: 3 });
+        assert_eq!(try_pin(&store, &clock, &longest), Verdict::WrongPin { consecutive: 2, max: 3 });
     }
 
     #[test]
@@ -341,10 +326,10 @@ mod tests {
         assert_eq!(store.budget.borrow().total, 0);
     }
 
-    /// A password short enough to be a PIN is checked as one and counts as consecutive, until the
-    /// password unlock that follows takes it back.
+    /// The password is checked as a PIN and counts as consecutive, until the password unlock that
+    /// follows takes it back.
     #[test]
-    fn a_short_password_costs_nothing_once_it_unlocks() {
+    fn the_password_costs_nothing_once_it_unlocks() {
         let (store, clock) = enabled();
         try_pin(&store, &clock, "1111");
         try_pin(&store, &clock, "2222");

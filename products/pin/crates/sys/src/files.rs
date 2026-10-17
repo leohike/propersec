@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use nix::fcntl::{Flock, FlockArg};
 use nix::libc::O_NOFOLLOW;
-use properpin_core::{Budget, Error, MAX_FILE_BYTES, Settings, Store, kv};
+use properpin_core::{Budget, Error, HASH_SETTING, MAX_FILE_BYTES, Settings, Store, kv};
 
 use crate::system;
 
@@ -111,21 +111,21 @@ impl UserFiles {
         self.read_pairs(&self.user_file(), Readers::Group(self.group()?))
     }
 
-    /// The user's own file alone, on top of the defaults, by the rules [`Store::settings`] applies
-    /// to it: `properpin doctor`, which tells a problem with this file from one with the config.
+    /// The user's own file alone, its hash on top of the defaults, by the rules [`Store::settings`]
+    /// applies to it: `properpin doctor`, which tells a problem with this file from one with the
+    /// config.
     pub fn user_settings(&self) -> Result<Settings, Error> {
         let mut settings = Settings::default();
         settings.apply(&self.user_pairs()?, &self.user_file().display().to_string(), true)?;
         Ok(settings)
     }
 
-    /// Atomically write a new PIN's settings (its hash) into the user's file: owned by the owner,
-    /// readable by the pinchecker's group, mode 0640. The user's other settings in the file are
-    /// kept as they are.
-    pub fn save_pin(&self, new: &[(&str, &str)]) -> Result<(), Error> {
+    /// Atomically write a new PIN's hash as the user's whole file: owned by the owner, readable by
+    /// the pinchecker's group, mode 0640. Whatever the file held before is gone.
+    pub fn save_pin(&self, hash: &str) -> Result<(), Error> {
         let path = self.user_file();
         let group = self.group()?;
-        let pairs = new.iter().fold(self.user_pairs()?, |pairs, (key, value)| kv::with(pairs, key, value));
+        let pairs = [(HASH_SETTING.to_owned(), hash.to_owned())];
         let dir = path.parent().expect("the user file is inside users/");
         // Made as install makes it, should it be missing: the owner's and the group's, mode 0750.
         if fs::symlink_metadata(dir).is_err_and(|error| error.kind() == ErrorKind::NotFound) {
@@ -149,7 +149,7 @@ impl UserFiles {
         write().map_err(|error| system(path.display(), error))
     }
 
-    /// Delete the user's file, hash and settings both, whatever stands there, and what a killed
+    /// Delete the user's file, whatever stands there, and what a killed
     /// `set` left beside it. `false` when there was no file.
     pub fn remove_pin(&self) -> Result<bool, Error> {
         remove_user_file(&self.etc, &self.user)
@@ -625,12 +625,15 @@ mod tests {
     }
 
     #[test]
-    fn settings_layer_config_then_user_file() {
+    fn settings_come_from_the_config_and_the_hash_from_the_user_file() {
         let Scratch { files, .. } = &scratch();
         write(&files.config(), "max_failures = 5\nhash_cost = 6\n", 0o644);
-        write(&files.user_file(), "hash = $y$j9T$abc$def\nmax_failures = 2\n", 0o640);
+        write(&files.user_file(), "hash = $y$j9T$abc$def\n", 0o640);
         let settings = files.settings().unwrap();
-        assert_eq!((settings.max_failures, settings.hash_cost, settings.pin_hash.as_str()), (2, 6, "$y$j9T$abc$def"));
+        assert_eq!((settings.max_failures, settings.hash_cost, settings.pin_hash.as_str()), (5, 6, "$y$j9T$abc$def"));
+        write(&files.user_file(), "hash = $y$j9T$abc$def\nmax_failures = 2\n", 0o640);
+        assert!(matches!(files.settings(), Err(Error::OnlyTheHash { .. })));
+        assert!(matches!(files.user_settings(), Err(Error::OnlyTheHash { .. })), "doctor's rules are the pinchecker's");
     }
 
     #[test]
@@ -692,7 +695,7 @@ mod tests {
     #[test]
     fn saving_a_hash_makes_the_users_directory_as_install_does() {
         let Scratch { files, .. } = &scratch();
-        files.save_pin(&[("hash", "$y$new")]).unwrap();
+        files.save_pin("$y$new").unwrap();
         let info = fs::metadata(files.etc.join("users")).unwrap();
         assert_eq!((info.mode() & 0o7777, info.gid()), (0o750, current_egid()));
         let all = AllUsers::new(&files.etc, files.etc_owner, &files.budget.as_ref().unwrap().path, files.etc_owner, current_egid());
@@ -702,11 +705,12 @@ mod tests {
     }
 
     #[test]
-    fn saving_a_hash_keeps_other_settings_and_sets_the_mode() {
+    fn saving_a_hash_replaces_the_whole_file_and_sets_the_mode() {
         let Scratch { files, .. } = &scratch();
+        // A file from a version with per-user settings, which the pinchecker now refuses.
         write(&files.user_file(), "hash = $y$old\nmax_failures = 2\n", 0o640);
-        files.save_pin(&[("hash", "$y$new")]).unwrap();
-        assert_eq!(fs::read_to_string(files.user_file()).unwrap(), "hash = $y$new\nmax_failures = 2\n");
+        files.save_pin("$y$new").unwrap();
+        assert_eq!(fs::read_to_string(files.user_file()).unwrap(), "hash = $y$new\n");
         assert_eq!(fs::metadata(files.user_file()).unwrap().mode() & 0o777, 0o640);
         assert!(files.remove_pin().unwrap());
         assert!(!files.remove_pin().unwrap());
@@ -936,7 +940,7 @@ mod tests {
     fn removing_everything_left_empties_both_directories_and_nothing_else() {
         let Scratch { files, _dir } = &scratch();
         let all = all_users(files);
-        files.save_pin(&[("hash", "$y$x")]).unwrap();
+        files.save_pin("$y$x").unwrap();
         files.start_budget(&Budget::default()).unwrap();
         write(&files.etc.join("users/.tester.Ab3dE9"), "", 0o640);
         write(&files.config(), "max_failures = 2\n", 0o644);

@@ -197,7 +197,8 @@ fn the_pin_unlocks_from_the_start() {
 fn the_password_unlocks_and_does_the_housekeeping() {
     let sandbox = Sandbox::new();
     sandbox.unlock_with_password();
-    assert!(sandbox.log().contains("longer than 12 characters, so not the PIN"), "{}", sandbox.log());
+    // The password is checked as a PIN first, whatever its length, and the housekeeping forgives it.
+    assert!(sandbox.log().contains("not the PIN, consecutive failure 1 of 3"), "{}", sandbox.log());
     assert!(sandbox.log().contains("password correct, PIN enabled"), "{}", sandbox.log());
 }
 

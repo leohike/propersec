@@ -12,7 +12,7 @@ When the password leaks and the user changes it, the old one still unlocks the l
 
 ## The password hash becomes readable by the pinchecker's group
 
-`/etc/shadow` needs root; the PIN file needs only the `properpin` group, which an exploit of the setgid pinchecker gives to any local user. With several users, bob could then read alice's PIN hash, which is her password, and crack it offline: it is at most 12 characters (`max_pin_length`), or it couldn't be a PIN. He gets her login and `sudo`, not just her lock screen. This is the one way properpin with such a PIN is strictly worse than no properpin at all.
+`/etc/shadow` needs root; the PIN file needs only the `properpin` group, which an exploit of the setgid pinchecker gives to any local user. With several users, bob could then read alice's PIN hash, which is her password, and crack it offline, as easily as the hash in `/etc/shadow` he could never read. He gets her login and `sudo`, not just her lock screen. This is the one way properpin with such a PIN is strictly worse than no properpin at all.
 
 ## Left at that
 
