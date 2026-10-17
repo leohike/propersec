@@ -18,6 +18,8 @@ Before, `/run/properpin` was emptied at every boot; nothing in `/var/lib/properp
 
 The fix: `enable` clears the lock file too; the pinchecker deletes its own temporary files older than a minute; the refused path saves the budget only when judging changed it.
 
+Fixed on 2026-10-17, partly otherwise. Every write of the budget, made under the lock when no other write of the user's is under way, first deletes the user's leftover temporary files, whatever their age; their names stay random, since a fixed name could be planted the way the lock file was. A refused attempt writes only what judging changed. `enable` and `remove` take the lock, and an attempt that waited on a lock file deleted meanwhile is refused.
+
 ## The tests can be trusted a little less than before
 
 - The system test looked for the pinchecker's process under its old name (`properpin-helpe`) after the rename, so "no pinchecker left running" checked nothing until it was noticed. Nothing guards against an assertion like that going silently empty again.

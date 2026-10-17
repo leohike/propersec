@@ -127,16 +127,20 @@ pub fn try_unlock_with_pin(
     let _lock = store.lock()?;
     let now = clock.now()?;
     let mut budget = store.load_budget()?;
+    let loaded = budget.clone();
     let judged = budget.judge(now, &settings);
     // Paused or disabled: refused without a look. Nothing is checked, so nothing is guessed, and
-    // nothing is recorded: the password typed next can't add to the budget.
+    // nothing is recorded: the password typed next can't add to the budget. Only what judging
+    // changed by itself is saved, if anything: failures it moved or dropped, the PIN it disabled.
     let refusal = match judged.disabled {
         Some(limit) => Some(Refusal::Disabled(limit)),
         None if budget.paused(&settings) => Some(Refusal::Paused { consecutive: budget.consecutive }),
         None => None,
     };
     if let Some(refusal) = refusal {
-        store.save_budget(&budget)?;
+        if budget != loaded {
+            store.save_budget(&budget)?;
+        }
         return Ok(UnlockAttemptOutcome { verdict: Verdict::Refused(refusal), judged });
     }
     let pin = match input_that_could_be_a_pin(typed) {
@@ -198,12 +202,13 @@ mod tests {
     struct MemoryStore {
         settings: Settings,
         budget: RefCell<Budget>,
+        saves: Cell<usize>,
     }
 
     impl MemoryStore {
         fn with_pin() -> Self {
             let settings = Settings { pin_hash: format!("plain:{PIN}"), ..Settings::default() };
-            Self { settings, budget: RefCell::default() }
+            Self { settings, budget: RefCell::default(), saves: Cell::new(0) }
         }
 
         fn pending(&self) -> usize {
@@ -228,6 +233,7 @@ mod tests {
         }
         fn save_budget(&self, budget: &Budget) -> Result<(), Error> {
             *self.budget.borrow_mut() = budget.clone();
+            self.saves.set(self.saves.get() + 1);
             Ok(())
         }
     }
@@ -439,6 +445,25 @@ mod tests {
             assert!(matches!(try_pin(&store, &clock, typed), Verdict::Refused(Refusal::Disabled(_))));
         }
         assert_eq!((store.consecutive(), store.pending()), (0, 0));
+    }
+
+    /// A refused attempt writes nothing, unless judging changed the budget by itself: here, the
+    /// three failures nobody forgave turn concerning once the forgiveness windows have passed.
+    #[test]
+    fn a_refused_attempt_saves_only_what_judging_changed() {
+        let (store, clock) = enabled();
+        for wrong in ["1111", "2222", "3333"] {
+            try_pin(&store, &clock, wrong);
+        }
+        let saves = store.saves.get();
+        try_pin(&store, &clock, PIN);
+        assert_eq!(store.saves.get(), saves, "nothing changed, nothing written");
+        clock.advance(store.settings.forgive_before_correct_pin.max(store.settings.forgive_before_correct_password) + 1);
+        try_pin(&store, &clock, PIN);
+        assert_eq!(store.saves.get(), saves + 1, "the failures turned concerning, and that is saved");
+        assert_eq!((store.pending(), store.budget.borrow().total), (0, 3));
+        try_pin(&store, &clock, PIN);
+        assert_eq!(store.saves.get(), saves + 1);
     }
 
     #[test]

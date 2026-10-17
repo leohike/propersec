@@ -2,16 +2,7 @@
 
 What was still open on 2026-10-17, after the pepper was dropped and `install` became the one command that edits PAM. Most come from `docs/review-of-dropping-the-pepper.md`, which has the details; the last two came out of the install change. Listed most serious first, each with the fix that seems right. The older, longer list is `docs/concerns.md`.
 
-## State in /var/lib/properpin is never cleared
-
-`/run/properpin` used to be emptied at every boot; nothing in `/var/lib/properpin` ever is.
-
-- Stray `.<uid>.*` temporary files from attempts killed mid-write pile up for good.
-- Every attempt, even one refused while the PIN is paused or disabled, saves the budget and syncs the file and the directory while the lock screen waits.
-
-The planted lock file that was listed here first is gone: since 2026-10-17 `set` creates the lock file and the budget, and the pinchecker never creates either.
-
-The fix: the pinchecker writes the budget through one fixed temporary name, so a killed write leaves at most one file, overwritten next time; a refused attempt saves the budget only when judging changed it.
+The first concern listed that day, state in `/var/lib/properpin` that nothing ever cleared, was fixed the same day: `set` creates the lock file and the budget and the pinchecker never creates either, so neither can be planted; a write clears the temporary files that killed writes left; a refused attempt writes only what judging changed; and `enable` and `remove` take the lock.
 
 ## The tests can be trusted a little less
 

@@ -155,15 +155,22 @@ impl UserFiles {
     }
 
     /// Delete the budget and the lock file: `remove`, which leaves none behind. Root can delete
-    /// both whoever owns them.
+    /// both whoever owns them. Under the lock, when there is one of the user's to take: an attempt
+    /// under way finishes first, and one waiting behind it then finds its lock file gone.
     pub fn remove_budget(&self) -> Result<bool, Error> {
         let dir = self.trusted_budget_dir()?;
+        let path = dir.join(format!("{}.lock", self.uid));
+        let _lock = match self.open_lock(&path) {
+            Ok(file) => Some(flock(file, &path)?),
+            Err(_) => None,
+        };
         let remove = |path: PathBuf| match fs::remove_file(&path) {
             Ok(()) => Ok(true),
             Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
             Err(error) => Err(system(path.display(), error)),
         };
-        remove(dir.join(format!("{}.lock", self.uid)))?;
+        self.remove_leftovers(dir);
+        remove(path)?;
         remove(dir.join(format!("{}.budget", self.uid)))
     }
 
@@ -172,6 +179,27 @@ impl UserFiles {
     fn trusted_budget_dir(&self) -> Result<&Path, Error> {
         let budget = self.budget.as_ref().ok_or_else(|| Error::System("no budget directory given".into()))?;
         trusted_dir(budget, "budget directory")
+    }
+
+    /// How the user's temporary budget files start: `.<uid>.`, followed by a random name.
+    fn leftover_prefix(&self) -> String {
+        format!(".{}.", self.uid)
+    }
+
+    /// Delete the temporary files that writes of the user's budget left when they were killed.
+    /// Called under the lock, when no other write of the user's is under way, so every such file
+    /// is a leftover. Best effort: what can't be deleted stays, such as a file someone else
+    /// planted under the user's prefix, which the sticky bit keeps the user's own runs from
+    /// deleting and root's next write deletes. The names are random, unlike the lock file's and
+    /// the budget's, so nobody can plant the one the next write takes.
+    fn remove_leftovers(&self, dir: &Path) {
+        let prefix = self.leftover_prefix();
+        let Ok(entries) = fs::read_dir(dir) else { return };
+        for entry in entries.flatten() {
+            if entry.file_name().to_str().is_some_and(|name| name.starts_with(&prefix)) {
+                let _ = fs::remove_file(entry.path());
+            }
+        }
     }
 
     /// The user's lock file at `path`, which must exist, be a regular file and be the user's own.
@@ -253,13 +281,16 @@ impl Store for UserFiles {
     }
 
     /// Written for the user and the pinchecker's group whoever writes it: the pinchecker, as the user, or
-    /// `properpin enable`, as root. Synced, file and directory, since it must survive a power cut.
+    /// `properpin set` and `enable`, as root, always under the lock. Synced, file and directory, since
+    /// it must survive a power cut. A write killed halfway leaves its temporary file behind, so the
+    /// next one clears any of the user's first (see [`UserFiles::remove_leftovers`]).
     fn save_budget(&self, budget: &Budget) -> Result<(), Error> {
         let dir = self.trusted_budget_dir()?;
         let group = self.budget.as_ref().expect("checked by trusted_budget_dir").group;
         let path = dir.join(format!("{}.budget", self.uid));
+        self.remove_leftovers(dir);
         let write = || -> std::io::Result<()> {
-            let mut file = tempfile::Builder::new().prefix(&format!(".{}.", self.uid)).tempfile_in(dir)?;
+            let mut file = tempfile::Builder::new().prefix(&self.leftover_prefix()).tempfile_in(dir)?;
             fchown(file.as_file(), Some(self.uid), Some(group))?;
             file.as_file().set_permissions(Permissions::from_mode(0o600))?;
             file.write_all(budget.format().as_bytes())?;
@@ -271,12 +302,21 @@ impl Store for UserFiles {
     }
 }
 
-/// An exclusive lock on `file`, waiting at most [`LOCK_TIMEOUT`] for whoever holds it.
+/// An exclusive lock on `file`, the lock file at `path`, waiting at most [`LOCK_TIMEOUT`] for
+/// whoever holds it. Refused when `path` no longer names `file` by then: `remove` deleted it while
+/// this waited, perhaps followed by a `set` that created a new one, and a lock on the old file
+/// would keep nobody out.
 fn flock(mut file: File, path: &Path) -> Result<Flock<File>, Error> {
     let deadline = Instant::now() + LOCK_TIMEOUT;
     loop {
         match Flock::lock(file, FlockArg::LockExclusiveNonblock) {
-            Ok(lock) => return Ok(lock),
+            Ok(lock) => {
+                let held = lock.metadata().map_err(|error| system(path.display(), error))?;
+                return match fs::symlink_metadata(path) {
+                    Ok(now) if (now.dev(), now.ino()) == (held.dev(), held.ino()) => Ok(lock),
+                    _ => Err(Error::System(format!("{}: deleted or replaced while waiting for it", path.display()))),
+                };
+            }
             Err((_, errno)) if Instant::now() >= deadline => return Err(system(path.display(), errno)),
             Err((returned, _)) => file = returned,
         }
@@ -511,10 +551,9 @@ mod tests {
         files.save_budget(&budget).unwrap();
         assert_eq!(files.load_budget().unwrap(), budget);
         assert_eq!(fs::metadata(files.budget_file().unwrap()).unwrap().mode() & 0o7777, 0o600);
-        let lock = files.lock().unwrap();
+        assert_eq!(fs::metadata(files.lock_file().unwrap()).unwrap().mode() & 0o7777, 0o600);
         assert!(files.remove_budget().unwrap());
         assert!(!files.lock_file().unwrap().exists(), "the lock file goes with the budget");
-        drop(lock);
         assert!(!files.remove_budget().unwrap());
         assert!(files.load_budget().is_err());
     }
@@ -560,6 +599,46 @@ mod tests {
         assert!(files.load_budget().unwrap_err().to_string().contains("budget directory"));
         assert!(files.save_budget(&Budget::default()).is_err());
         assert!(files.remove_budget().is_err());
+    }
+
+    /// A write killed halfway leaves its temporary file; the next write, or `remove`, clears it,
+    /// and only the user's own.
+    #[test]
+    fn a_killed_writes_leftover_goes_at_the_next_write() {
+        let Scratch { files, .. } = &scratch();
+        files.start_budget(&Budget::default()).unwrap();
+        let dir = files.budget_file().unwrap().parent().unwrap().to_path_buf();
+        let (mine, theirs) = (dir.join(format!(".{}.k1lled", files.uid)), dir.join(format!(".{}0.k1lled", files.uid)));
+        for path in [&mine, &theirs] {
+            write(path, "consecutive = 0\n", 0o600);
+        }
+        files.save_budget(&Budget::default()).unwrap();
+        assert!(!mine.exists() && theirs.exists());
+        write(&mine, "", 0o600);
+        files.remove_budget().unwrap();
+        assert!(!mine.exists() && theirs.exists());
+        let left: Vec<_> = fs::read_dir(&dir).unwrap().map(|entry| entry.unwrap().file_name()).collect();
+        assert_eq!(left, [theirs.file_name().unwrap()], "remove leaves nothing of the user's");
+    }
+
+    /// `remove` waits for an attempt that holds the lock, and an attempt that was waiting on a
+    /// lock file deleted meanwhile, and perhaps created anew by `set`, is refused.
+    #[test]
+    fn remove_waits_for_the_lock_and_a_replaced_lock_file_is_refused() {
+        let Scratch { files, .. } = &scratch();
+        files.start_budget(&Budget::default()).unwrap();
+        let held = files.lock().unwrap();
+        assert!(files.remove_budget().is_err());
+        assert!(files.budget_file().unwrap().exists() && files.lock_file().unwrap().exists(), "nothing removed");
+        drop(held);
+
+        let path = files.lock_file().unwrap();
+        let waiting = files.open_lock(&path).unwrap();
+        files.remove_budget().unwrap();
+        files.start_budget(&Budget::default()).unwrap();
+        let error = flock(waiting, &path).unwrap_err().to_string();
+        assert!(error.contains("deleted or replaced while waiting"), "{error}");
+        assert!(files.lock().is_ok(), "the new lock file works");
     }
 
     #[test]

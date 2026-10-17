@@ -189,16 +189,21 @@ fn enable(cli: &Cli, account: &Account, yes: bool) -> Result<()> {
     if settings.pin_hash.is_empty() {
         bail!("no PIN is set for {}", account.name);
     }
-    let mut budget = files.load_budget()?;
-    let judged = budget.judge(SystemClock.now()?, &settings);
-    if budget.total >= settings.max_concerning_total {
-        bail!(
-            "{} concerning failures since this PIN was set, and {} are allowed; choose a new one with: properpin set",
-            budget.total,
-            settings.max_concerning_total
-        );
-    }
-    if let Some(limit) = judged.disabled {
+    let judge = || -> Result<_> {
+        let mut budget = files.load_budget()?;
+        let judged = budget.judge(SystemClock.now()?, &settings);
+        if budget.total >= settings.max_concerning_total {
+            bail!(
+                "{} concerning failures since this PIN was set, and {} are allowed; choose a new one with: properpin set",
+                budget.total,
+                settings.max_concerning_total
+            );
+        }
+        Ok((budget, judged))
+    };
+    // Asked without the lock, so the lock screen never waits on the question.
+    let (_, asked) = judge()?;
+    if let Some(limit) = asked.disabled {
         confirm(
             &mut stdin().lock(),
             yes,
@@ -207,6 +212,13 @@ fn enable(cli: &Cli, account: &Account, yes: bool) -> Result<()> {
                  instead."
             ),
         )?;
+    }
+    // Then written under the lock, from the budget as it is by now, so an attempt at this moment
+    // can neither be lost nor overwrite it.
+    let _lock = files.lock()?;
+    let (budget, judged) = judge()?;
+    if judged.disabled != asked.disabled {
+        bail!("the PIN's budget changed while asking; nothing was changed, so run enable again");
     }
     files.save_budget(&budget.enabled())?;
     match judged.disabled {
