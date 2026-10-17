@@ -54,7 +54,7 @@ Ways out, to decide before 6.8 reaches the real machine:
   - several attempts on one handle, as both versions do (done);
   - `pam_setcred(PAM_REFRESH_CRED)` after a success (done);
   - check that every attempt process exited normally, not by a signal (done);
-  - a scenario that kills attempts at random points and then checks that the state still parses and the failure count never went down. The first step is done, 16 kills of a worker checking a wrong PIN; the longer run is in `docs/plan.md`. The counting order itself is already pinned down by unit tests in `crates/core/src/attempt.rs`;
+  - a scenario that kills attempts at random points and then checks that the state still parses and the failure count never went down. The first step is done, 16 kills of a worker checking a wrong PIN; the longer run is in `docs/chaos/plan.md`. The counting order itself is already pinned down by unit tests in `crates/core/src/attempt.rs`;
   - time a correct PIN through the real stack, and fail the test below the minimum (done: 75 ms by default).
 - **In properpin:** done on 2026-10-03, with the first way out: the module makes a correct PIN wait out `min_milliseconds_before_pin_unlock` (75 ms by default, global config only) from the moment it is called, and nothing else waits. The container run fails if a correct PIN answers sooner, and a worker killed during the wait unlocks nothing. The hash cost stays at 5; the timer doesn't depend on the CPU.
 - **On the real lock screen** (a VM or the real machine): with 6.8, the worker logs "N ms elapsed during pam_authenticate call for service kde" at warning level, so the journal shows the real timings for the PIN, the password and a wrong PIN. Also check what happens when a PIN is typed during the failure delay.

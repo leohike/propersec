@@ -1,6 +1,6 @@
 # Complexity as layers
 
-A short note, written on 2026-10-16, on how added complexity in properpin could make it safer rather than riskier: by making each new piece an extra check that must also agree, never a replacement for an existing one. It came out of weighing a TPM against the simplicity of the current design (`docs/competition.md` has the comparison with pinpam that led here). Nothing here is built; it records a design direction for the plan's TPM row and for any future use of the PIN for `sudo`.
+A short note, written on 2026-10-16, on how added complexity in properpin could make it safer rather than riskier: by making each new piece an extra check that must also agree, never a replacement for an existing one. It came out of weighing a TPM against the simplicity of the current design (`docs/chaos/competition.md` has the comparison with pinpam that led here). Nothing here is built; it records a design direction for the plan's TPM row and for any future use of the PIN for `sudo`.
 
 ## The idea
 

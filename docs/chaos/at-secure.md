@@ -39,7 +39,7 @@ The container scenario "--dev options are refused under setgid" fails when this 
 
 ## The second guard
 
-Since the setgid helper (`docs/spec-setgid-helper.md`, built 2026-10-03), that check has an independent partner: the `--dev` options are allowed only when the real and effective user ids are equal and the real and effective group ids are equal.
+Since the setgid helper (`docs/chaos/spec-setgid-helper.md`, built 2026-10-03), that check has an independent partner: the `--dev` options are allowed only when the real and effective user ids are equal and the real and effective group ids are equal.
 
 - Run by tests: both pairs match, so the options are allowed.
 - Installed setgid: the real group is the caller's, the effective group is `properpin`, so they differ and the options are refused.

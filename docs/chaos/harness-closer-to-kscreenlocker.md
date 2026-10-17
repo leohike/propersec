@@ -1,6 +1,6 @@
 # A test harness closer to the real lock screen
 
-A report from 2026-10-03 on the plan row "Harness closer to kscreenlocker": what the real lock screen does that properpin's tests don't, why that matters more since the PIN check moved into a helper, what the work would be, and what it is likely to find. The report was written from source first; the work was then done the same day, and What was done, and what it found, right below the short version, records the outcome. `docs/kscreenlocker-pam-contract.md` has the wider comparison of how kscreenlocker calls PAM; this report is about the lifecycle and the host process.
+A report from 2026-10-03 on the plan row "Harness closer to kscreenlocker": what the real lock screen does that properpin's tests don't, why that matters more since the PIN check moved into a helper, what the work would be, and what it is likely to find. The report was written from source first; the work was then done the same day, and What was done, and what it found, right below the short version, records the outcome. `docs/chaos/kscreenlocker-pam-contract.md` has the wider comparison of how kscreenlocker calls PAM; this report is about the lifecycle and the host process.
 
 Sources, in the clone at `/home/shared/projects/kscreenlocker`:
 
@@ -27,7 +27,7 @@ What it found:
 - **The race between threads is real.** Four threads, each on its own session, lost the host's SIGCHLD handler in the first run, exactly as in the table under Two threads at once. It is latent for the real lock screen: properpin runs on one thread there, and on Fedora the fingerprint and smartcard stacks (`pam_env`, `pam_fprintd`, `pam_deny`, `pam_debug`) start no children. The fix is small: a process-wide mutex in `DefaultSigchld`, held from saving to restoring, so properpin's own attempts take turns. Another module doing the same dance on another thread could still race with it, as with pam_unix, which the pipe fix below would end.
 - **A thread looping on `waitpid(-1)` wins every time.** All five correct PINs were refused in each run, the wrong PINs never unlocked, and the password still worked: fail closed, as predicted. Left as documented behaviour.
 - **Everything else passed at once:** SIGCHLD ignored, a reaping handler (which never saw the helper), the host's own child, the panic, one session for many attempts, and the 16 kills, where the guess reached the helper in 13 or 14 rounds and not in the others, and logs, state and budget always agreed.
-- **A correct PIN takes about 20 to 25 ms** through the real stack in the container, under the 50 ms that 6.8 calls too quick. The minimum-duration row in `docs/plan.md` now has a measurement behind it.
+- **A correct PIN takes about 20 to 25 ms** through the real stack in the container, under the 50 ms that 6.8 calls too quick. The minimum-duration row in `docs/chaos/plan.md` now has a measurement behind it.
 - **The clean-exit check doesn't catch the unload crash in a worker.** With `-z nodelete` removed, every container scenario still passed: glibc keeps a library mapped while it has thread-local destructors pending, so the crash needs a thread that exits after `pam_end`, which the load/unload test in `stack.rs` covers. The check stays, for any other crash at exit.
 
 Checked by breaking things on purpose: with the guard's restore skipped during a panic, the panic test fails; without the mutex, the four-thread test fails. The pipe fix was not made: the one problem the tests found has a smaller fix, and the remaining hazards are a host thread stealing exit statuses and another module racing on another thread, neither of which the real lock screen does today.
@@ -80,14 +80,14 @@ When a child process exits, the kernel keeps its exit code until the parent coll
 
 ### One session, many attempts
 
-- **libpam clears the typed text after every attempt.** `_pam_sanitize`, called at the end of `pam_authenticate` (`libpam/pam_misc.c`, read for `docs/kscreenlocker-pam-contract.md`), clears `PAM_AUTHTOK`, so a reused session can't hand one attempt's input to the next. properpin's module keeps no memory of its own between attempts.
+- **libpam clears the typed text after every attempt.** `_pam_sanitize`, called at the end of `pam_authenticate` (`libpam/pam_misc.c`, read for `docs/chaos/kscreenlocker-pam-contract.md`), clears `PAM_AUTHTOK`, so a reused session can't hand one attempt's input to the next. properpin's module keeps no memory of its own between attempts.
 - **What is untested is the lifecycle around that.** The second attempt on a session must ask for the PIN again rather than find something left over. The module must keep working across many attempts while loaded once (it is never unloaded, thanks to `-z nodelete`). `pam_setcred` after a success must be harmless (`pam_sm_setcred` returns `PAM_IGNORE`).
 - **A panic must not leave SIGCHLD changed.** The guard restores SIGCHLD when it is dropped, which also happens while a panic unwinds, and the entry points turn a panic into `PAM_IGNORE`. The existing panic test (`test_panic`) panics before the guard is even set, so the restore-on-panic path has never run.
 
 ### Killed attempts, in 6.8
 
 - **The helper outlives a killed worker.** `PR_SET_PDEATHSIG` isn't inherited across `fork`, and the kernel clears it anyway when a setgid program starts. So when the greeter kills the worker, the helper keeps running alone, finishes its check, writes its counts and exits, and the system reaps it. For counting that is good: a guess that reached the helper is recorded even if the attempt was cancelled. A correct PIN whose attempt was cancelled still resets the failures in a row and forgives the budget's recent failures, which only someone who knows the PIN can cause.
-- **None of it is tested.** A killed attempt must never unlock. The count must stay saved. No helper may hang, and none does as long as its own one-second lock timeout holds. The next worker must get the lock within that second. The deferred randomized kill test in `docs/plan.md` was written for exactly this and needs the long-lived worker described below.
+- **None of it is tested.** A killed attempt must never unlock. The count must stay saved. No helper may hang, and none does as long as its own one-second lock timeout holds. The next worker must get the lock within that second. The deferred randomized kill test in `docs/chaos/plan.md` was written for exactly this and needs the long-lived worker described below.
 
 ### Crashes at exit go unnoticed
 

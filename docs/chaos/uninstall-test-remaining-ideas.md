@@ -1,6 +1,6 @@
 # Uninstall test: remaining ideas
 
-Cases and checks left out of the first round of uninstall cases (2026-10-03), tabled rather than forgotten. `docs/install-uninstall-with-a-broken-properpin.md` describes what was built; `crates/systest/src/uninstall.rs` holds the cases.
+Cases and checks left out of the first round of uninstall cases (2026-10-03), tabled rather than forgotten. `docs/chaos/install-uninstall-with-a-broken-properpin.md` describes what was built; `crates/systest/src/uninstall.rs` holds the cases.
 
 ## Broken installs not covered yet
 
@@ -19,4 +19,4 @@ Cases and checks left out of the first round of uninstall cases (2026-10-03), ta
 - **The confirmation prompt.** Every case runs `uninstall --yes`. The interactive path, where uninstall shows the diff and asks, is untested: it needs a terminal, or a pty in the test.
 - **The SELinux labels** of a restored `/etc/pam.d/kde` and of everything uninstall leaves. Only the VM enforces them.
 - **A repair from a TTY.** In the container, `sudo` stands in for the way back in. The VM rehearsal should lock itself out with one of the broken variants for real, then repair it from a text console.
-- **A purge.** Uninstall keeps `/etc/properpin`, `/var/lib/properpin` and the group, and the cases allow exactly those. `docs/uninstall-should-purge-pin-hashes.md` argues that the PIN hashes, at least, should go.
+- **A purge.** Uninstall keeps `/etc/properpin`, `/var/lib/properpin` and the group, and the cases allow exactly those. `docs/chaos/uninstall-should-purge-pin-hashes.md` argues that the PIN hashes, at least, should go.

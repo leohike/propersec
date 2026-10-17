@@ -35,7 +35,7 @@ A brief for adding GitHub Actions CI to propersec, written so an agent (or a per
   `just properpin podman-uninstall` then runs `products/pin/testing/podman/uninstall-cases.sh`, which starts a fresh container per uninstall case (13 so far), and CI runs it after the scenarios.
 
   Inside the container it runs its scenarios (35 as of the harness closer to kscreenlocker) as root: it installs properpin with `install.sh`, listens on `/dev/log`, and runs attempts through the setuid `unix_chkpwd`. The Containerfile uses `RUN --mount=type=cache`, which needs a buildah/podman recent enough to support it.
-- **Read first:** `CLAUDE.md`, the root `Cargo.toml`, `products/pin/properpin.just`, `products/pin/docs/README.md`, `products/pin/testing/podman/Containerfile`, and `docs/plan.md`.
+- **Read first:** `CLAUDE.md`, the root `Cargo.toml`, `products/pin/properpin.just`, `products/pin/docs/README.md`, `products/pin/testing/podman/Containerfile`, and `docs/chaos/plan.md`.
 
 ## What CI should do
 
@@ -89,7 +89,7 @@ Sources: [Managing your personal access tokens](https://docs.github.com/en/authe
 ## Docs to update
 
 - **The product README:** add a short CI section to `products/pin/docs/README.md` saying what runs, what blocks, and where to look.
-- **The plan:** update the CI and dependency-checks rows in `docs/plan.md` to reflect what is done.
+- **The plan:** update the CI and dependency-checks rows in `docs/chaos/plan.md` to reflect what is done.
 
 ## Report at the end
 

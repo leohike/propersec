@@ -1,6 +1,6 @@
 # Edge case: a PIN that is the password
 
-A note from 2026-10-03 on what goes wrong when a user sets their password as their PIN, and what properpin could do about it. Low priority: it needs a user to make that choice, and the fixes are small whenever they are wanted. `set` refuses an exact match, and raising the lowest allowed `hash_cost` was dismissed on 2026-10-17, so `docs/plan.md` no longer has a row for it.
+A note from 2026-10-03 on what goes wrong when a user sets their password as their PIN, and what properpin could do about it. Low priority: it needs a user to make that choice, and the fixes are small whenever they are wanted. `set` refuses an exact match, and raising the lowest allowed `hash_cost` was dismissed on 2026-10-17, so `docs/chaos/plan.md` no longer has a row for it.
 
 ## What is not the problem
 

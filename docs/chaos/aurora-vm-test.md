@@ -1,6 +1,6 @@
 # First install on a real KDE: the Aurora VM
 
-properpin installed, enabled and used at the real Plasma lock screen for the first time, on 2026-10-15, in a VM running Aurora. Everything earlier ran in `target/`, temporary directories and podman containers. This note records how it was done, what was tested, what the journal and the files showed, what was found, and what is still untested on a real system. The plan row "Verify on a real system" in `docs/plan.md` points here.
+properpin installed, enabled and used at the real Plasma lock screen for the first time, on 2026-10-15, in a VM running Aurora. Everything earlier ran in `target/`, temporary directories and podman containers. This note records how it was done, what was tested, what the journal and the files showed, what was found, and what is still untested on a real system. The plan row "Verify on a real system" in `docs/chaos/plan.md` points here.
 
 ## Summary
 
@@ -200,10 +200,10 @@ right now  PIN armed for another 7h56m, 0 of 3 failures so far
 ## What was found
 
 - **The SELinux labels came out right on ostree.** The worry before the install was that `matchpathcon` expects `lib_t` for `/usr/local/lib64/security/…` but `usr_t` for the same file through `/var/usrlocal/lib64/security/…`, so `restorecon` through the symlink could set one while `install.sh check` expected the other, and `enable` would refuse. It didn't happen: the module is `lib_t`, `matchpathcon -V` verifies it, and `check` passed.
-- **No policy of its own was needed.** The lock screen runs unconfined, and the generic labels (`usr_t` for the helper, `var_run_t` and `var_lib_t` for the state and the budget) let it run the setgid helper and the helper write its files. A confined user (`user_t`, `staff_t`) is still untested, as `docs/concerns.md` says.
+- **No policy of its own was needed.** The lock screen runs unconfined, and the generic labels (`usr_t` for the helper, `var_run_t` and `var_lib_t` for the state and the budget) let it run the setgid helper and the helper write its files. A confined user (`user_t`, `staff_t`) is still untested, as `docs/chaos/concerns.md` says.
 - **`systemd-sysusers` created the group on a real system,** and `check`'s reading of `/etc/gshadow` passed: no members, nobody's primary group, a locked password.
 - **The tmpfiles rule is right,** shown by the first real boot after install.
-- **kscreenlocker 6.7.5 behaves as `docs/kscreenlocker-pam-contract.md` read it:** one prompt per attempt, the PIN or the password in the same field, a new greeter per lock, and pam_unix's 2-second delay after each failure, wrong PINs included, since a wrong PIN also fails as a password.
+- **kscreenlocker 6.7.5 behaves as `docs/chaos/kscreenlocker-pam-contract.md` read it:** one prompt per attempt, the PIN or the password in the same field, a new greeter per lock, and pam_unix's 2-second delay after each failure, wrong PINs included, since a wrong PIN also fails as a password.
 - **Each wrong PIN costs a `unix_chkpwd` run,** logged as `password check failed`, because the direct `pam_unix` line checks every input the PIN didn't accept. `kscreenlocker_greet` itself logs `pam_unix(kde:auth): authentication failure` only for the first failure of each greeter, while `unix_chkpwd` logs every one.
 - **A Homebrew toolchain builds usable binaries,** linked only against the system's libraries. That has to be checked for each build, since it isn't guaranteed.
 
@@ -217,7 +217,7 @@ Nothing was found that needs a code change.
 - **A password change,** which should stop the PIN silently until the next `set`.
 - **Suspend and resume** with the PIN armed.
 - **Other services refusing the PIN,** beyond `sudo`: polkit, SDDM, a TTY login, SSH.
-- **A repair from a text console** after a deliberately broken install, as `docs/uninstall-test-remaining-ideas.md` asks for.
+- **A repair from a text console** after a deliberately broken install, as `docs/chaos/uninstall-test-remaining-ideas.md` asks for.
 - **kscreenlocker 6.8:** its worker process, the 50 ms timing check and the minimum wait before a PIN unlock, the "ms elapsed during pam_authenticate" warnings, and a PIN typed during the failure delay. Aurora ships 6.7.5; 6.8 will come with an image update, which replaces `/usr` but keeps the edited `/etc/pam.d/kde`.
 - **An ostree image update with properpin enabled,** and `ostree admin config-diff` before and after uninstall.
 - **The fingerprint and smartcard services** alongside the PIN; this VM has neither.

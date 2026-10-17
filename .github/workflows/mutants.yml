@@ -4,7 +4,7 @@
 # demand. Mutants in core and sys are tested against the pinchecker's tests too, which drive much of
 # core (the log lines, the status text). Report only: missed mutants don't fail the job, but the
 # list lands in the job summary and in the artifact. What is left to decide is in
-# docs/tooling-remaining-ideas.md.
+# docs/chaos/tooling-remaining-ideas.md.
 
 name: Mutants
 

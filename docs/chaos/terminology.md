@@ -1,6 +1,6 @@
 # Terminology
 
-The words for the PIN's states, fixed on 2026-10-16 when the pepper, the expiry and the password after every boot were dropped (`docs/security-target.md` says why). Earlier the same day, and before, the code and the docs said the lock screen was "accepting the PIN" after a password unlock, and "password required" otherwise; before that, that the PIN was "armed" and "disarmed". With the PIN working from boot on, nothing starts accepting it any more, so the words now describe the PIN itself. Older notes, the dated ones and everything in `docs/chaotic/`, still use the old words.
+The words for the PIN's states, fixed on 2026-10-16 when the pepper, the expiry and the password after every boot were dropped (`docs/chaos/security-target.md` says why). Earlier the same day, and before, the code and the docs said the lock screen was "accepting the PIN" after a password unlock, and "password required" otherwise; before that, that the PIN was "armed" and "disarmed". With the PIN working from boot on, nothing starts accepting it any more, so the words now describe the PIN itself. Older notes, the dated ones and everything in `docs/chaos/chaotic/`, still use the old words.
 
 ## The three states
 

@@ -1,6 +1,6 @@
 # Tools that check Rust code automatically
 
-A survey made on 2026-10-03 of linters, analysers and verifiers that could check properpin's code beyond what it used then, with a recommended order. The first three steps were built the same day as proofs of concept; `docs/tooling-remaining-ideas.md` says what each does and what was left for later. Everything would run in CI or in a podman container, so nothing gets installed on the development machine; trying a tool locally (each is one cargo crate) is to be agreed with the owner first.
+A survey made on 2026-10-03 of linters, analysers and verifiers that could check properpin's code beyond what it used then, with a recommended order. The first three steps were built the same day as proofs of concept; `docs/chaos/tooling-remaining-ideas.md` says what each does and what was left for later. Everything would run in CI or in a podman container, so nothing gets installed on the development machine; trying a tool locally (each is one cargo crate) is to be agreed with the owner first.
 
 ## What properpin already has
 
@@ -23,7 +23,7 @@ One gap: **clippy and rustfmt didn't run in CI,** so nothing stopped a commit th
 
 ## Tools that run the code to find bugs
 
-- **cargo-mutants (mutation testing):** breaks the code on purpose, one change at a time, and reports every change no test notices. Already a row in `docs/plan.md`, and the best single sign of how far the tests can be trusted.
+- **cargo-mutants (mutation testing):** breaks the code on purpose, one change at a time, and reports every change no test notices. Already a row in `docs/chaos/plan.md`, and the best single sign of how far the tests can be trusted.
 - **cargo-fuzz:** feeds random input to a function, millions of times. Good targets: the settings parser (`kv.rs`), the state, budget and hex parsers, and `decode_hash`. It needs the nightly toolchain, which is fine in CI.
 - **Miri:** an interpreter that catches undefined behaviour in `unsafe` code. It is of limited use here: it can't run calls into foreign C libraries such as libxcrypt and libpam, and that is where properpin's `unsafe` code is; the rest has no `unsafe` code at all.
 - **cargo-careful:** runs the tests against a standard library with extra internal checks turned on. Cheap, and it works around FFI. Nightly only.
@@ -37,13 +37,13 @@ One gap: **clippy and rustfmt didn't run in CI,** so nothing stopped a commit th
 - **cargo-vet:** records that a person reviewed each dependency.
 - **cargo-geiger:** counts the `unsafe` code in the dependencies.
 - **cargo-machete:** finds dependencies no longer used; fast, since it doesn't compile anything. cargo-udeps is the more accurate, slower, nightly-only alternative.
-- **`cargo deny`'s licence, ban and source checks as errors** instead of warnings, already a row in `docs/plan.md`.
+- **`cargo deny`'s licence, ban and source checks as errors** instead of warnings, already a row in `docs/chaos/plan.md`.
 
 ## The recommended order
 
 - **First, clippy and rustfmt in CI.** Trivial, and it closes a real gap. Done.
 - **Then a handful of restriction lints:** `undocumented_unsafe_blocks`, `indexing_slicing` and `cast_possible_truncation`, at least for properpin-sys and the pinchecker. Expect a short round of fixes or justified exceptions. Done, for all the shipped crates.
-- **Then cargo-mutants in CI,** as `docs/plan.md` already plans. Done, weekly and report only.
+- **Then cargo-mutants in CI,** as `docs/chaos/plan.md` already plans. Done, weekly and report only.
 - **Then cargo-fuzz targets** for the parsers and `decode_hash`, in CI.
 - **Later, Kani proofs** for `decode_hash`, the hex and XOR functions, and perhaps the budget.
 

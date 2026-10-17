@@ -1,6 +1,6 @@
 # Tooling: what is in, and what is tabled
 
-The first three items of `docs/plan-tools.md` were built on 2026-10-03 as proofs of concept: clippy and rustfmt in CI, three stricter clippy lints in the shipped crates, and weekly mutation testing. This file says what each does now and what was left for later.
+The first three items of `docs/chaos/plan-tools.md` were built on 2026-10-03 as proofs of concept: clippy and rustfmt in CI, three stricter clippy lints in the shipped crates, and weekly mutation testing. This file says what each does now and what was left for later.
 
 ## Clippy and rustfmt in CI
 
@@ -46,6 +46,6 @@ The other 29 stay, as either equivalent or low value:
 - **Running only on changed code** (`cargo mutants --in-diff`) on pull requests, cheap enough for every push.
 - **The container scenarios as a test command,** so mutants in the helper and the PAM module face the real PAM stack. Possible through `--test-tool` or a custom script, but slow: minutes per mutant.
 
-## Next from `docs/plan-tools.md`
+## Next from `docs/chaos/plan-tools.md`
 
 Fuzzing the parsers and `decode_hash` with cargo-fuzz, and Kani proofs for `decode_hash`, the hex and XOR functions and the budget, are the next steps, unchanged.

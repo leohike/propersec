@@ -1,10 +1,10 @@
 # Competition
 
-What else gives a Linux desktop a PIN, and how properpin compares, written on 2026-10-15. It brings together a web search made that day and the wider sweep of 2026-10-01 in `docs/chaotic/lockscreen-pin-existing-implementations.md`, which has more detail, the duress tools and the full source list. The point is positioning: anyone advanced enough to try properpin will ask "why not pinpam?" or "why not two lines of `pam_pwdfile`?", and the README should answer before they ask. Behaviour of other projects is taken from their READMEs and posts, not their source code, unless said otherwise.
+What else gives a Linux desktop a PIN, and how properpin compares, written on 2026-10-15. It brings together a web search made that day and the wider sweep of 2026-10-01 in `docs/chaos/chaotic/lockscreen-pin-existing-implementations.md`, which has more detail, the duress tools and the full source list. The point is positioning: anyone advanced enough to try properpin will ask "why not pinpam?" or "why not two lines of `pam_pwdfile`?", and the README should answer before they ask. Behaviour of other projects is taken from their READMEs and posts, not their source code, unless said otherwise.
 
 ## The short answer
 
-Nothing else does what properpin does: a PIN for the lock screen only, paused after three consecutive failures until a password unlock, with the user's own typos forgiven, other people's failures limited over days and in total, and the hash out of reach of everything the user runs. The closest projects either limit attempts well but let the PIN work everywhere (pinpam, libpamtpmpin), or work at the lock screen with a timed lockout but nothing that brings the password back in (pam_pinlock). Until 2026-10-16 properpin also refused the PIN after every reboot and after 8 hours, and peppered its hash; `docs/security-target.md` says why those went. The hand-made `pam_pwdfile` recipe has none of it. Upstream desktops have the plumbing for switchable authenticators, but no PIN.
+Nothing else does what properpin does: a PIN for the lock screen only, paused after three consecutive failures until a password unlock, with the user's own typos forgiven, other people's failures limited over days and in total, and the hash out of reach of everything the user runs. The closest projects either limit attempts well but let the PIN work everywhere (pinpam, libpamtpmpin), or work at the lock screen with a timed lockout but nothing that brings the password back in (pam_pinlock). Until 2026-10-16 properpin also refused the PIN after every reboot and after 8 hours, and peppered its hash; `docs/chaos/security-target.md` says why those went. The hand-made `pam_pwdfile` recipe has none of it. Upstream desktops have the plumbing for switchable authenticators, but no PIN.
 
 ## The hand-made recipe: pam_pwdfile
 
@@ -18,7 +18,7 @@ auth  requisite   pam_deny.so
 
 As the Arch post puts it, this tells the locker "to check the input with your pin password first, but still allows unlocking on your user password". The threads are mostly about getting it to work at all: the PIN works at SDDM but not at the lock screen, because the lock screen has its own PAM service; on Arch-based systems the file has to be copied from `/usr/lib/pam.d/kde` to `/etc/pam.d/kde` first; Kubuntu 23.04 doesn't use the `kde` service name.
 
-Against properpin's threat model (`docs/security-target.md`):
+Against properpin's threat model (`docs/chaos/security-target.md`):
 
 - **No attempt limit.** Someone at the keyboard can guess forever, slowed only by pam_unix's failure delay.
 - **Always accepted,** right after a reboot too; nothing ever asks for the password again.
@@ -27,7 +27,7 @@ Against properpin's threat model (`docs/security-target.md`):
 
 These users are properpin's clearest audience: they already want a PIN and accepted editing PAM to get one.
 
-One more point, unverified: a crypt check takes only a few milliseconds, so if kscreenlocker 6.8 treats answers under 50 ms as coming from a broken authenticator, as `docs/kscreenlocker-pam-contract.md` reads it, these setups may stop working with Plasma 6.8. Check on the 6.8.0 tag before saying so publicly.
+One more point, unverified: a crypt check takes only a few milliseconds, so if kscreenlocker 6.8 treats answers under 50 ms as coming from a broken authenticator, as `docs/chaos/kscreenlocker-pam-contract.md` reads it, these setups may stop working with Plasma 6.8. Check on the 6.8.0 tag before saying so publicly.
 
 ## pinpam
 
@@ -47,7 +47,7 @@ github.com/0xr0bert/libpamtpmpin. Also Rust and TPM2, unrelated to pinpam: two N
 
 github.com/saltnpepper97/pam_pinlock. C, MIT, release 1.2.1 in June 2026, with an AUR package and a fork. Found in the 2026-10-01 sweep, which calls it the closest to properpin's rules.
 
-- **An Argon2id hash** in `~/.pinlock`, or root-managed in `/var/lib/pinlock`. In the user's home, anything the user runs can read the hash, the insider leak `docs/threat-insider-hash-leak.md` describes.
+- **An Argon2id hash** in `~/.pinlock`, or root-managed in `/var/lib/pinlock`. In the user's home, anything the user runs can read the hash, the insider leak `docs/chaos/threat-insider-hash-leak.md` describes.
 - **Rate limiting and an optional timed lockout** (`max_attempts`, `rate_limit_window`, `lockout_duration=900`), cleared by time or `pinlockctl unlock`, with a fallback to the password.
 - **No sign of the password resetting the PIN's failures,** no expiry, and nothing on reboots: since it returns before `pam_unix` runs, a password success probably never reaches it. Inferred from the README.
 - **Documented for hyprlock and KDE,** and usable with any PAM locker.
@@ -79,7 +79,7 @@ github.com/saltnpepper97/pam_pinlock. C, MIT, release 1.2.1 in June 2026, with a
 - **The answer to "why not pinpam?"** is scope and lifetime. A PIN that works for `sudo` and polkit gives root to whoever watches it being typed; properpin's PIN unlocks the lock screen and nothing else, and only within hours of a password unlock. pinpam's TPM counter is stronger than anything properpin has, and the README should say so honestly; the plan's TPM-backed counter row is where properpin would close that gap.
 - **The answer to "why not pam_pwdfile?"** is every bullet in its section above, and a tested way back out.
 - **Talk to pinpam's author.** Two Rust PAM PIN modules exist; whether the right outcome is sharing code (the TPM counter as an option for properpin, the rules for when to accept the PIN as an option for pinpam) or two tools for two threat models, it is a better story to tell KDE than two strangers working in parallel.
-- **KDE's authenticator framework** is the upstream opening, and also a compatibility question for 6.8; both belong with the 6.8 work in `docs/before-anybody-uses-this.md` and `docs/borrow-kde-tests.md`.
+- **KDE's authenticator framework** is the upstream opening, and also a compatibility question for 6.8; both belong with the 6.8 work in `docs/chaos/before-anybody-uses-this.md` and `docs/chaos/borrow-kde-tests.md`.
 - **Keyring unlocking** is the one feature both pinpam and GNOME's design treat as part of the job and properpin doesn't. At the lock screen KWallet is already open, so it matters less for properpin's scope; worth one sentence in the README.
 
 ## Sources
@@ -95,4 +95,4 @@ github.com/saltnpepper97/pam_pinlock. C, MIT, release 1.2.1 in June 2026, with a
 - libpamtpmpin: https://github.com/0xr0bert/libpamtpmpin
 - pam_pinlock: https://github.com/saltnpepper97/pam_pinlock
 - GNOME PIN design page: https://wiki.gnome.org/Design/OS/ScreenLock/PinAuthentication
-- The 2026-10-01 sweep, with the KDE, COSMIC and ChromeOS sources: `docs/chaotic/lockscreen-pin-existing-implementations.md`
+- The 2026-10-01 sweep, with the KDE, COSMIC and ChromeOS sources: `docs/chaos/chaotic/lockscreen-pin-existing-implementations.md`

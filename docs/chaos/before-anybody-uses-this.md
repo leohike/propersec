@@ -1,10 +1,10 @@
 # Before anybody uses this
 
-What has to happen before properpin is offered to anyone but its author, written on 2026-10-15, the day of the first install on a real KDE (`docs/aurora-vm-test.md`). Documentation and a website are taken for granted and left out; this is everything else: legal, security process, testing, code, packaging, CI, integration with upstream, and outside review. It draws on the plan, the open concerns, the tooling notes, the Aurora VM report and some reading on how open-source security tools are usually brought to users. `docs/plan.md` stays the list of engineering work; this file is the gate in front of other people's machines, and items that turn into work should become rows there.
+What has to happen before properpin is offered to anyone but its author, written on 2026-10-15, the day of the first install on a real KDE (`docs/chaos/aurora-vm-test.md`). Documentation and a website are taken for granted and left out; this is everything else: legal, security process, testing, code, packaging, CI, integration with upstream, and outside review. It draws on the plan, the open concerns, the tooling notes, the Aurora VM report and some reading on how open-source security tools are usually brought to users. `docs/chaos/plan.md` stays the list of engineering work; this file is the gate in front of other people's machines, and items that turn into work should become rows there.
 
 ## Where things stand
 
-The engineering is further along than the project's outward face. The PAM module is tested through the real libpam the way kscreenlocker drives it, the setgid pinchecker is attacked as root and as other users in a container, 13 deliberately broken builds check that one uninstall repairs the system, mutation testing runs weekly, the threat model is written down in `docs/security-target.md`, and the PIN now works at a real Plasma 6.7.5 lock screen under SELinux enforcing. What is missing is almost everything a stranger needs in order to use it safely: permission to use it at all, a way to report a hole, a package instead of a cargo build, a tested way back out, and somebody other than the author having looked at the pinchecker.
+The engineering is further along than the project's outward face. The PAM module is tested through the real libpam the way kscreenlocker drives it, the setgid pinchecker is attacked as root and as other users in a container, 13 deliberately broken builds check that one uninstall repairs the system, mutation testing runs weekly, the threat model is written down in `docs/chaos/security-target.md`, and the PIN now works at a real Plasma 6.7.5 lock screen under SELinux enforcing. What is missing is almost everything a stranger needs in order to use it safely: permission to use it at all, a way to report a hole, a package instead of a cargo build, a tested way back out, and somebody other than the author having looked at the pinchecker.
 
 ## Blockers
 
@@ -20,14 +20,14 @@ A setgid pinchecker and a module inside the lock screen are exactly what people 
 
 ### Recovery, written for users and tested
 
-The worst thing properpin can do is lock its user out of their own lock screen: a module libpam can't load fails the whole `kde` stack, the right password included, as the Installing part of `docs/concerns.md` says. The repair exists (a TTY or SSH, then `install.sh uninstall`, which restores `/etc/pam.d/kde`) but is described only in test documents. Users need a short page, read before installing, that says:
+The worst thing properpin can do is lock its user out of their own lock screen: a module libpam can't load fails the whole `kde` stack, the right password included, as the Installing part of `docs/chaos/concerns.md` says. The repair exists (a TTY or SSH, then `install.sh uninstall`, which restores `/etc/pam.d/kde`) but is described only in test documents. Users need a short page, read before installing, that says:
 
 - make sure you can reach a text console (Ctrl+Alt+F3) or SSH in before you install it, and that you know your password there;
 - keep a copy of `/etc/pam.d/kde` from before, and where `install` keeps its own (`/etc/properpin/kde.pam.without-properpin`);
 - the one command that takes properpin out, and the one line to delete from `/etc/pam.d/kde` by hand if even that is not possible;
 - on an atomic desktop, that `ostree admin config-diff` shows what changed in `/etc`, and that an older deployment can be booted.
 
-The repair from a text console should then actually be done in the VM, as `docs/uninstall-test-remaining-ideas.md` already asks, so the page describes something that was tried.
+The repair from a text console should then actually be done in the VM, as `docs/chaos/uninstall-test-remaining-ideas.md` already asks, so the page describes something that was tried.
 
 ### Uninstall on a real system
 
@@ -35,7 +35,7 @@ The repair from a text console should then actually be done in the VM, as `docs/
 
 ### Purge the PIN hashes on uninstall
 
-Already a row in the plan and described in `docs/uninstall-should-purge-pin-hashes.md`. Before anyone else has hashes on disk, uninstall should delete them, so they don't live on in backups and disk images after the user thinks properpin is gone. A four-digit PIN behind a leaked hash falls in seconds, and PINs are reused on phones and cards.
+Already a row in the plan and described in `docs/chaos/uninstall-should-purge-pin-hashes.md`. Before anyone else has hashes on disk, uninstall should delete them, so they don't live on in backups and disk images after the user thinks properpin is gone. A four-digit PIN behind a leaked hash falls in seconds, and PINs are reused on phones and cards.
 
 ### kscreenlocker 6.8
 
@@ -56,7 +56,7 @@ These get much more expensive once anyone has properpin installed, because every
 
 ### The pinchecker protocol
 
-`docs/concerns.md` notes, under the PAM module's side, that reading the pinchecker's answer from a pipe instead of from its exit code would remove the process-wide SIGCHLD guard, its mutex, and the three remaining races with other threads and modules, at the cost of a protocol change. Today the module and the pinchecker ship together from one tree and nobody has either installed, so the change costs one commit. After a release, a new module talking to an old pinchecker (or the reverse, between a package update and a re-lock) becomes a case to handle. Decide it now, and whatever the answer, put a protocol version into the exchange so a mismatch fails closed with a clear log line.
+`docs/chaos/concerns.md` notes, under the PAM module's side, that reading the pinchecker's answer from a pipe instead of from its exit code would remove the process-wide SIGCHLD guard, its mutex, and the three remaining races with other threads and modules, at the cost of a protocol change. Today the module and the pinchecker ship together from one tree and nobody has either installed, so the change costs one commit. After a release, a new module talking to an old pinchecker (or the reverse, between a package update and a re-lock) becomes a case to handle. Decide it now, and whatever the answer, put a protocol version into the exchange so a mismatch fails closed with a clear log line.
 
 ### Versioned file formats
 
@@ -102,7 +102,7 @@ CI already runs the tests on Fedora 44 and on the declared Rust version, clippy 
 
 - **Protect `main`:** required status checks, no force-pushes, no deletion, and changes through pull requests even when the author is the only reviewer, so CI always runs before anything lands. Turn on two-factor authentication for every account with write access.
 - **OpenSSF Scorecard,** as a GitHub Action. It checks branch protection, workflow permissions, pinned dependencies, signed releases, a security policy and more, and much of it properpin already meets; the rest is a ready-made to-do list. The OpenSSF Best Practices badge is a similar self-assessment that users and distributions recognise.
-- **`shellcheck` for `install.sh`** and the podman scripts, tabled in `docs/tooling-remaining-ideas.md`. `install.sh` runs as root and edits PAM; it is the most dangerous file the project ships after the pinchecker.
+- **`shellcheck` for `install.sh`** and the podman scripts, tabled in `docs/chaos/tooling-remaining-ideas.md`. `install.sh` runs as root and edits PAM; it is the most dangerous file the project ships after the pinchecker.
 - **`cargo-deny` failing on licences, bans, duplicates and sources,** already a plan row, and natural to finish together with choosing the licence.
 - **A release workflow** that builds, tests, packages and attests, triggered by a signed tag.
 - **The VM test, scripted.** Today's Aurora test was done by hand over an afternoon. A script that boots a snapshot of an Incus VM, installs a build, runs what can be run without a human (the pinchecker, `install.sh check`, `ausearch`, the journal, a reboot, uninstall) and leaves the lock screen part as a short manual checklist, would make it cheap enough to repeat for every release and every new kscreenlocker. Driving the real greeter headless is possible in principle (kscreenlocker_greet has a testing mode) but is a project of its own.
@@ -110,13 +110,13 @@ CI already runs the tests on Fedora 44 and on the declared Rust version, clippy 
 
 ## Upstream and integration
 
-- **Talk to KDE.** properpin depends on details of kscreenlocker that nobody promised to keep: one prompt per attempt, the PIN and the password in the same field, the new 50 ms check. A post on KDE Discuss, or an issue on kscreenlocker's GitLab, describing what properpin assumes (`docs/kscreenlocker-pam-contract.md` is most of it already), gets expert review of those assumptions and a chance of hearing about the next change before it ships. KDE may also have opinions on a PIN feature, or want one of their own; better to know early.
+- **Talk to KDE.** properpin depends on details of kscreenlocker that nobody promised to keep: one prompt per attempt, the PIN and the password in the same field, the new 50 ms check. A post on KDE Discuss, or an issue on kscreenlocker's GitLab, describing what properpin assumes (`docs/chaos/kscreenlocker-pam-contract.md` is most of it already), gets expert review of those assumptions and a chance of hearing about the next change before it ships. KDE may also have opinions on a PIN feature, or want one of their own; better to know early.
 - **Linux-PAM and pam_unix.** The pinchecker copies `unix_chkpwd`'s pattern closely; the Linux-PAM maintainers are the people best placed to say where the copy differs in a way that matters.
 - **Fedora's SELinux policy.** If confined users turn out to need a policy module for the pinchecker or its directories, the selinux-policy maintainers can say whether a module of properpin's own or a change upstream is the right fix.
 
 ## Outside review
 
-Everything so far has been reviewed by its author, with the help of an AI assistant. For a program that runs with more rights than its caller and reads every PIN hash on the machine, that is not enough before others trust it. `docs/concerns.md` itself flags the `--dev` guard as "worth a second reviewer's look", and `docs/pinchecker-review.md` is a ready-made checklist for a reviewer.
+Everything so far has been reviewed by its author, with the help of an AI assistant. For a program that runs with more rights than its caller and reads every PIN hash on the machine, that is not enough before others trust it. `docs/chaos/concerns.md` itself flags the `--dev` guard as "worth a second reviewer's look", and `docs/chaos/pinchecker-review.md` is a ready-made checklist for a reviewer.
 
 - **A professional audit** of the pinchecker and the PAM module is the gold standard. OSTIF organises audits for open-source projects, but mostly for projects judged critical, and its AWS-funded audits averaged about $74,000 each, which gives a sense of the cost. The Linux Foundation's crowdfunding platform has a fund type for paying for an OSTIF audit.
 - **NLnet's NGI Zero grants** are the realistic route for a small European-style FOSS project: besides funding work, NLnet offers its grantees support that has included security audits (by Radically Open Security), accessibility and packaging help. Worth confirming the current terms and applying; properpin's scope, a privilege-separated pinchecker in a few thousand lines of Rust, is well within what such an audit covers.
@@ -126,7 +126,7 @@ Publish whatever reviews happen, with the fixes, in the repository.
 
 ## For users, beyond documentation
 
-- **An honest one-page summary of what properpin protects and what it doesn't,** for people who won't read `docs/security-target.md`: it assumes full-disk encryption and no unencrypted swap or hibernation, someone watching you type can still catch the PIN, four digits are weak and two random words are not, and root wins either way.
+- **An honest one-page summary of what properpin protects and what it doesn't,** for people who won't read `docs/chaos/security-target.md`: it assumes full-disk encryption and no unencrypted swap or hibernation, someone watching you type can still catch the PIN, four digits are weak and two random words are not, and root wins either way.
 - **Issue templates** that ask for the distribution and version, the kscreenlocker version, the output of `sudo install.sh check` and the journal lines from `properpin-pinchecker`, `pam_unix` and `kscreenlocker_greet`, and that send anything security-related to `SECURITY.md` instead.
 - **A clear beta label** in the README and on the release page until outside review and the 6.8 test are done.
 

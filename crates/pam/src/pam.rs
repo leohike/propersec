@@ -110,7 +110,7 @@ unsafe fn arguments(argc: c_int, argv: *const *const c_char) -> Vec<String> {
 /// setting for good (the second saves the first's default, and restores it last), so properpin's
 /// own attempts on different threads take turns here. Another module doing the same on another
 /// thread at the same moment could still race with this, as it could with pam_unix; none in
-/// Fedora's fingerprint or smartcard stacks does (docs/harness-closer-to-kscreenlocker.md).
+/// Fedora's fingerprint or smartcard stacks does (docs/chaos/harness-closer-to-kscreenlocker.md).
 pub(crate) struct DefaultSigchld {
     old: libc::sigaction,
     // Released after `drop` has put the old setting back.

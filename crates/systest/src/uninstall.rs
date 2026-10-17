@@ -14,7 +14,7 @@
 //! - runs uninstall again, which must change nothing, then installs the real properpin and checks
 //!   that the PIN works and that uninstalling it also leaves the record.
 //!
-//! docs/install-uninstall-with-a-broken-properpin.md has the reasoning.
+//! docs/chaos/install-uninstall-with-a-broken-properpin.md has the reasoning.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::os::unix::fs::MetadataExt;

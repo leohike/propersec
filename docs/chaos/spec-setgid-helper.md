@@ -2,18 +2,18 @@
 
 A self-contained spec for one change to properpin, written on 2026-10-03 to be implemented as is. It replaces the `properpin` system account with a `properpin` system group: the helper becomes setgid only and owned by root. Everything an implementer needs is here; the discussion behind it is summarised in Why below.
 
-**Status: implemented on 2026-10-03.** Deviations, each recorded in `docs/concerns.md`: `refuse_old_layout` was removed rather than adapted, since no earlier layout was ever installed; `check` on the real system requires root instead of printing that gshadow wasn't verified; the caller can't change the running helper's resource limits after all (`prlimit` also checks group ids), so that cost in Why doesn't apply; planted lock files are described, with a fix, in `docs/planted-lock-dos.md`.
+**Status: implemented on 2026-10-03.** Deviations, each recorded in `docs/chaos/concerns.md`: `refuse_old_layout` was removed rather than adapted, since no earlier layout was ever installed; `check` on the real system requires root instead of printing that gshadow wasn't verified; the caller can't change the running helper's resource limits after all (`prlimit` also checks group ids), so that cost in Why doesn't apply; planted lock files are described, with a fix, in `docs/chaos/planted-lock-dos.md`.
 
 ## Rules for whoever implements this
 
 - Work in the propersec repo, product `products/pin`. Read `CLAUDE.md` at the repo root first: no numbered headings or lists in markdown, no hard-wrapped prose, commit only when asked and only through the commit skill.
 - Nothing may be installed or changed on the development machine. Building, `cargo test`, and the podman container (`just properpin podman`) are the only places this runs. Pulling images is fine.
 - Match the surrounding code: its comment density, naming and idiom. `unsafe` stays confined to `crates/helper/src/secure.rs`, `crates/pam/src/pam.rs` and the FFI files that already allow it.
-- Whatever turns out to be out of reach, or is a new small worry, goes into `docs/concerns.md` rather than being silently skipped.
+- Whatever turns out to be out of reach, or is a new small worry, goes into `docs/chaos/concerns.md` rather than being silently skipped.
 
 ## Why
 
-Today (commit `d62f825`) the helper is `properpin:properpin 6755`: setuid and setgid to a `properpin` system account. The account owns its own binary, so an attacker who exploits a helper bug once could rewrite the binary and capture every password sent to `arm` from then on. That is the first decision listed in `docs/concerns.md`.
+Today (commit `d62f825`) the helper is `properpin:properpin 6755`: setuid and setgid to a `properpin` system account. The account owns its own binary, so an attacker who exploits a helper bug once could rewrite the binary and capture every password sent to `arm` from then on. That is the first decision listed in `docs/chaos/concerns.md`.
 
 A setuid program always runs as its file's owner, so "owned by root, runs as properpin" is impossible with setuid. A file's group is separate from its owner, though: a root-owned file that is setgid to `properpin` runs with the `properpin` group, while only root can change it. The helper keeps its caller's user id, which it already uses to know who is asking. This is the classic pattern for such helpers: Debian's `unix_chkpwd` is setgid `shadow`, `crontab` setgid `crontab`, `write` setgid `tty`.
 
@@ -73,7 +73,7 @@ No behaviour change. Update wording that says "setuid helper" where it refers to
   - the group exists, has no members (the fourth field of `getent group`), and is nobody's primary group (no line in `getent passwd` with its gid);
   - its gshadow password starts with `!` or `*`; reading gshadow needs root, so when `check` runs unprivileged it prints that this wasn't verified instead of failing.
 - **`uninstall`** removes the helper, the module, the command, both config files and `/run/properpin`, keeps `/etc/properpin` and the group (the kept PIN files belong to it), and prints `rm -r /etc/properpin && groupdel properpin` for removing both.
-- Installs of the account-based layout are not migrated: nothing is deployed. Note that in `docs/concerns.md`.
+- Installs of the account-based layout are not migrated: nothing is deployed. Note that in `docs/chaos/concerns.md`.
 
 ## Tests
 
@@ -106,14 +106,14 @@ Run each once, see the named test fail, restore, and record the result in the RE
 
 - `products/pin/docs/README.md`: the files table, the crate row and The helper section (setgid, root-owned, a group with no members), the container scenarios and the mutations, the install paragraph (the group, `groupadd` fallback, uninstall keeps the group). Keep the lesson about setuid not changing the group; it explains why the group is the identity now.
 - `products/pin/docs/helper-review.md`: the shape paragraph, the "Who is asking" and "Files" rows (sticky directory, ownership checks, the two dev guards), the installed permissions table.
-- `docs/concerns.md`: resolve the first decision (say what was chosen and why, keep it short); drop or adjust entries that assumed the account (the NSS entry still holds; the "SELinux unknown" entry now concerns a setgid helper); add the caller's `prlimit` on the running helper, the counts files owned by their users, `fs.protected_regular`, and the account-based layout not being migrated.
-- `docs/threat-insider-hash-leak.md`: the status line says "dedicated account"; make it "dedicated group".
-- `docs/plan.md`: nothing structural; check no row still mentions the account.
+- `docs/chaos/concerns.md`: resolve the first decision (say what was chosen and why, keep it short); drop or adjust entries that assumed the account (the NSS entry still holds; the "SELinux unknown" entry now concerns a setgid helper); add the caller's `prlimit` on the running helper, the counts files owned by their users, `fs.protected_regular`, and the account-based layout not being migrated.
+- `docs/chaos/threat-insider-hash-leak.md`: the status line says "dedicated account"; make it "dedicated group".
+- `docs/chaos/plan.md`: nothing structural; check no row still mentions the account.
 
 ## Not in this change
 
 - Mixing the password into the PIN hash (the pepper), which is a separate plan row.
-- Checking that `/run/properpin` is a memory filesystem; it is in `docs/concerns.md`.
+- Checking that `/run/properpin` is a memory filesystem; it is in `docs/chaos/concerns.md`.
 - The repeated-access fix and the 100 ms floor.
 
 ## Done when

@@ -28,7 +28,7 @@
 //! of a disabled PIN, keep a PIN that may have been guessed, so they ask first; `--yes` skips the
 //! question.
 
-// Stricter checks for shipped code (docs/plan-tools.md): every unsafe block explains why it is
+// Stricter checks for shipped code (docs/chaos/plan-tools.md): every unsafe block explains why it is
 // sound, nothing indexes or slices without a bounds check, and no cast silently drops bits.
 #![warn(clippy::undocumented_unsafe_blocks, clippy::indexing_slicing, clippy::cast_possible_truncation)]
 #![forbid(unsafe_code)]

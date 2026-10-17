@@ -1,10 +1,10 @@
 # Borrowing KDE's tests
 
-Which of KDE's own automated tests properpin could copy and adapt for end-to-end testing of the PIN, written on 2026-10-15 after reading kscreenlocker master (commit `e77531a`, 2026-10-09) and KWin's integration tests. Nothing here is built yet; it is a note for future action, and the main item should become a row in `docs/plan.md` when it is taken up. It serves the kscreenlocker 6.8 blocker in `docs/before-anybody-uses-this.md` more directly than anything else found so far.
+Which of KDE's own automated tests properpin could copy and adapt for end-to-end testing of the PIN, written on 2026-10-15 after reading kscreenlocker master (commit `e77531a`, 2026-10-09) and KWin's integration tests. Nothing here is built yet; it is a note for future action, and the main item should become a row in `docs/chaos/plan.md` when it is taken up. It serves the kscreenlocker 6.8 blocker in `docs/chaos/before-anybody-uses-this.md` more directly than anything else found so far.
 
 ## Why
 
-properpin's container scenarios imitate kscreenlocker: `pamharness` keeps one PAM session for many attempts, and `crates/systest` plays 6.8's worker process, killing it with SIGKILL, or SIGTERM and SIGKILL 25 ms later, the way the greeter cancels. That imitation was written from reading kscreenlocker's code (`docs/kscreenlocker-pam-contract.md`), and the Aurora VM test (`docs/aurora-vm-test.md`) ran only 6.7.5, where PAM runs on a thread inside the greeter. Nothing has yet run properpin under 6.8's real worker. KDE's own test code can close that gap without a graphical session.
+properpin's container scenarios imitate kscreenlocker: `pamharness` keeps one PAM session for many attempts, and `crates/systest` plays 6.8's worker process, killing it with SIGKILL, or SIGTERM and SIGKILL 25 ms later, the way the greeter cancels. That imitation was written from reading kscreenlocker's code (`docs/chaos/kscreenlocker-pam-contract.md`), and the Aurora VM test (`docs/chaos/aurora-vm-test.md`) ran only 6.7.5, where PAM runs on a thread inside the greeter. Nothing has yet run properpin under 6.8's real worker. KDE's own test code can close that gap without a graphical session.
 
 ## The one to take: kscreenlocker's PAM test
 
@@ -21,7 +21,7 @@ Under `pam_wrapper`: `LD_PRELOAD=libpam_wrapper.so`, a service directory from th
 - **No `pam_wrapper`, no `pam_matrix`.** Use the real `kde` service, after `install.sh install`, in the same Fedora container the system test already builds, running as the test user, so the module starts the real setgid pinchecker and `pam_unix` the real `unix_chkpwd`.
 - **Keep the time check on.** Do not set `KSCREENLOCKER_PAM_TIME_CHECK`. The 50 ms check is what `min_milliseconds_before_pin_unlock` exists for, and this would be the first time the real check meets it. A test with the variable set to `0` should exist only as a deliberate control, to show the difference.
 - **properpin's scenarios instead of upstream's two attempts:** the PIN unlocking, a wrong PIN, three consecutive failures pausing it and a password unlock unpausing it, the budget forgiving a typo, and the PIN refused once the budget disables it.
-- **Cancels, through kscreenlocker's own code:** cancel an attempt at chosen and random moments while it checks a wrong PIN, a correct PIN and the password, then check the same four points as the deferred randomized kill test in `docs/plan.md`: a readable state, the lock released, no effect from a killed attempt, and leftover temporary files counted.
+- **Cancels, through kscreenlocker's own code:** cancel an attempt at chosen and random moments while it checks a wrong PIN, a correct PIN and the password, then check the same four points as the deferred randomized kill test in `docs/chaos/plan.md`: a readable state, the lock released, no effect from a killed attempt, and leftover temporary files counted.
 - **Messages:** spy on `infoMessage` and `errorMessage` to see exactly what reaches the greeter when the module sends PAM conversation messages, if properpin starts sending them (the idea of clear messages at the lock screen; anything shown must not help an attacker at the keyboard, so no counts or remaining tries).
 - **Timing:** record how long each `PamAuthenticator` attempt takes, and look for the "ms elapsed during pam_authenticate" warnings the time check logs.
 
@@ -33,7 +33,7 @@ The test then lives in its own folder, something like `testing/kscreenlocker/`, 
 
 ### Licence
 
-kscreenlocker's code, its tests included, is GPL-2.0-or-later. A test adapted from `pamtest.cpp` and linked against `PamAuthenticator` is GPL too. That is fine for test code that is never shipped, but it should sit in its own folder with its SPDX header kept, and it is one more thing to weigh when properpin chooses its own licence (the licence blocker in `docs/before-anybody-uses-this.md`).
+kscreenlocker's code, its tests included, is GPL-2.0-or-later. A test adapted from `pamtest.cpp` and linked against `PamAuthenticator` is GPL too. That is fine for test code that is never shipped, but it should sit in its own folder with its SPDX header kept, and it is one more thing to weigh when properpin chooses its own licence (the licence blocker in `docs/chaos/before-anybody-uses-this.md`).
 
 ### What it would replace
 
@@ -53,7 +53,7 @@ For release testing rather than CI, Fedora's openQA runs KDE desktop tests in fu
 
 ## Next step
 
-Add a row to `docs/plan.md`: build kscreenlocker 6.7.5 in the podman image and run a `pamtest`-style QtTest against the real `kde` stack, then repeat on 6.8.0 when it is tagged. Small to medium effort; touches nothing outside podman's image storage.
+Add a row to `docs/chaos/plan.md`: build kscreenlocker 6.7.5 in the podman image and run a `pamtest`-style QtTest against the real `kde` stack, then repeat on 6.8.0 when it is tagged. Small to medium effort; touches nothing outside podman's image storage.
 
 ## Sources
 

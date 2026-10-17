@@ -10,7 +10,7 @@
 //! Attempts run the way kscreenlocker runs them: one PAM session kept for many attempts, with
 //! `pam_setcred` after a success. The hosts below then misbehave the ways real PAM hosts do with
 //! SIGCHLD, each in a process of its own, since SIGCHLD is one setting for the whole process
-//! (docs/harness-closer-to-kscreenlocker.md).
+//! (docs/chaos/harness-closer-to-kscreenlocker.md).
 //!
 //! What this can't show: how the real pam_unix, the real setgid pinchecker and the real greeter
 //! behave. The container test covers the first two.

@@ -6,7 +6,7 @@
 //! changed. `PamClient::system` uses plain `pam_start`, as the lock screen does, for tests inside a
 //! container whose `/etc/pam.d` is the one under test.
 //!
-//! Like kscreenlocker (docs/harness-closer-to-kscreenlocker.md), a `PamSession` keeps one PAM handle
+//! Like kscreenlocker (docs/chaos/harness-closer-to-kscreenlocker.md), a `PamSession` keeps one PAM handle
 //! for many attempts, calls `pam_setcred(PAM_REFRESH_CRED)` after each success and ignores what it
 //! returns, and sets a `PAM_FAIL_DELAY` callback. The callback records the delay the stack asked for
 //! instead of sleeping: what protects the PIN is its failure limit, not the delay.

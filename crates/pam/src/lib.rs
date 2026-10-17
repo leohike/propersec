@@ -30,7 +30,7 @@
 //! It runs inside the lock screen, as the locked user, never as root. Refusal is the default:
 //! every error, panic or refusal ends in PAM_IGNORE, and only the pinchecker's yes returns success.
 
-// Stricter checks for shipped code (docs/plan-tools.md): every unsafe block explains why it is
+// Stricter checks for shipped code (docs/chaos/plan-tools.md): every unsafe block explains why it is
 // sound, nothing indexes or slices without a bounds check, and no cast silently drops bits.
 #![warn(clippy::undocumented_unsafe_blocks, clippy::indexing_slicing, clippy::cast_possible_truncation)]
 mod args;

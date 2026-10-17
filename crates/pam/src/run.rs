@@ -23,7 +23,7 @@ pub trait Transaction {
     /// What the user typed, asking for it if no module has yet. Stored by libpam as `PAM_AUTHTOK`,
     /// so pam_unix reuses it with `use_first_pass` instead of asking again. This is a copy of its
     /// own, wiped when dropped; libpam's stays for the rest of the stack and libpam wipes it itself
-    /// (docs/pin-pam-copy.md).
+    /// (docs/chaos/pin-pam-copy.md).
     fn typed(&self) -> Result<Secret, Error>;
 }
 

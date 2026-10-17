@@ -4,7 +4,7 @@ A short assessment of properpin as built, first written on 2026-10-03 and rewrit
 
 ## What properpin is
 
-- **The setgid pinchecker** (`docs/spec-setgid-helper.md`): hashes `root:properpin 0640`, counts in `/var/lib/properpin`, a root-owned pinchecker setgid to a group with no members, in the style of `unix_chkpwd`. Nothing the user runs can read a hash or reset a count.
+- **The setgid pinchecker** (`docs/chaos/spec-setgid-helper.md`): hashes `root:properpin 0640`, counts in `/var/lib/properpin`, a root-owned pinchecker setgid to a group with no members, in the style of `unix_chkpwd`. Nothing the user runs can read a hash or reset a count.
 - **Three consecutive failures pause the PIN** until the next password unlock at the lock screen. The count is on disk, so a reboot doesn't reset it.
 - **The failure budget**: every failure nobody forgave counts across reboots, and 10 a day, 25 a week or 60 per PIN disable it until root turns it back on, after a warning, or sets a new one.
 - **PIN equal to the password refused** at `properpin set`, compared with the hash in `/etc/shadow`.
@@ -45,5 +45,5 @@ What remains is the trade properpin was built to make: someone at the locked key
 ## What would weaken it
 
 - **A weak PIN**: digits fall to a few lucky guesses far sooner than words; the budget bounds it, it doesn't remove it.
-- **A bug in the pinchecker**: it reads every hash while it runs. That is why it is small, runs with a group that owns nothing else, and has its own review checklist (`docs/pinchecker-review.md`).
+- **A bug in the pinchecker**: it reads every hash while it runs. That is why it is small, runs with a group that owns nothing else, and has its own review checklist (`docs/chaos/pinchecker-review.md`).
 - **Reusing the PIN elsewhere**: a PIN watched at the lock screen, or cracked from a copy of the disk, then works on the phone or card that shares it.
