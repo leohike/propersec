@@ -1,6 +1,6 @@
 # Edge case: a PIN that is the password
 
-A note from 2026-10-03 on what goes wrong when a user sets their password as their PIN, and what properpin could do about it. Low priority: it needs a user to make that choice, and the fixes are small whenever they are wanted. The plan row "Refuse a PIN equal to the password" in `docs/plan.md` points here.
+A note from 2026-10-03 on what goes wrong when a user sets their password as their PIN, and what properpin could do about it. Low priority: it needs a user to make that choice, and the fixes are small whenever they are wanted. `set` refuses an exact match, and raising the lowest allowed `hash_cost` was dismissed on 2026-10-17, so `docs/plan.md` no longer has a row for it.
 
 ## What is not the problem
 
@@ -17,7 +17,7 @@ At first this looked like a cracking problem: the PIN file would be "a crackable
 
 **The costs can drift apart.** The PIN file is only as strong as its own `hash_cost`, and `/etc/shadow` follows a different setting:
 
-- `hash_cost` lowered in `/etc/properpin/config`, down to 1 today. Only root can edit that file, so this is a mistake rather than an attack: an attacker who can do it is root already.
+- `hash_cost` lowered in `/etc/properpin/config`, down to 1 today. Only root can edit that file, so this is a mistake rather than an attack: an attacker who can do it is root already. Dismissed on 2026-10-17: root can weaken anything it likes.
 - The password cost raised later by an administrator, while the PIN hash keeps the cost it was made with.
 
 Either way, a PIN equal to the password becomes a cheaper copy of it than `/etc/shadow` holds.
@@ -25,9 +25,9 @@ Either way, a PIN equal to the password becomes a cheaper copy of it than `/etc/
 ## What would fix it
 
 - **Refuse an exact match at `properpin set`.** `set` runs as root, so it can check the new PIN against the user's `/etc/shadow` hash with `crypt` before saving. This closes both problems for the exact case. Whether to refuse or only warn is open; refusing is simpler to reason about.
-- **Raise the lowest allowed `hash_cost` from 1 to 5,** today's default, which the plan raises to 8. This closes the "set to a weak value" half of the drift, and also helps PINs that aren't the password.
+- **Dismissed on 2026-10-17, as a guard against root: raise the lowest allowed `hash_cost` from 1 to 5,** today's default. This would close the "set to a weak value" half of the drift, and would also help PINs that aren't the password.
 - **The pepper, later,** narrows it further: cracking a PIN hash would also need the pepper's own slow derivation from the password, so even a PIN equal to the password would cost at least that.
 
 ## What no fix catches
 
-Only an exact match can be detected. A PIN that is part of the password, an old password, or the password of another account can't be checked against anything. `set` could say once, when it asks for the PIN, not to use a password from anywhere.
+Only an exact match can be detected. A PIN that is part of the password, an old password, or the password of another account can't be checked against anything. `set` says once, when it asks for the PIN, that it should differ from all the user's account passwords.

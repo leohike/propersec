@@ -286,7 +286,7 @@ fn confirm(input: &mut impl BufRead, yes: bool, warning: &str) -> Result<()> {
 
 /// The new PIN, typed twice. Both entries are wiped when dropped.
 fn ask_pin_twice(input: &mut impl BufRead) -> Result<Secret> {
-    let first = ask_secret(input, "Choose a PIN (it should differ from your password): ", MAX_PIN_BYTES)?;
+    let first = ask_secret(input, "The PIN should differ from all your account passwords.\nChoose a PIN: ", MAX_PIN_BYTES)?;
     let second = ask_secret(input, "Same again: ", MAX_PIN_BYTES)?;
     if first.as_bytes() != second.as_bytes() {
         bail!("the two entries differ; nothing was changed");

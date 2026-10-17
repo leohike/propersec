@@ -68,7 +68,7 @@ The root README is still headed "lazypass" with "TBD…", the repository is prop
 
 ### Settings and defaults that are hard to change later
 
-A default users never touch becomes a promise. Before a release, decide the open ones in the plan: the default `hash_cost` (5 today, 8 measured to be fine), the lowest allowed `hash_cost`, the limits of the failure budget, and whether fingerprint and smartcard unlocks unpause the PIN (the plan's row says it should be a stated decision, not an accident).
+A default users never touch becomes a promise. Before a release, decide the open ones in the plan: the default `hash_cost` (5 today, 8 measured to be fine), the limits of the failure budget, and whether fingerprint and smartcard unlocks unpause the PIN (the plan's row says it should be a stated decision, not an accident).
 
 ## Testing still to do
 

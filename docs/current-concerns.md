@@ -13,15 +13,6 @@ The first concern listed that day, state in `/var/lib/properpin` that nothing ev
 
 The fix: drive the prompts through a pseudo-terminal in the CLI tests; a run of `just mutants`, working through what survives.
 
-## The PIN-equals-password check is narrow
-
-- It runs only at `set`, so a later password change to the PIN, or to something close, goes unnoticed.
-- It catches an exact match only.
-- It is skipped, with a warning, for users without an entry in `/etc/shadow` (LDAP, systemd-homed).
-- `set` no longer needs the user's password, only sudo, so an admin can set another user's PIN, and so know it, without that user's password. Root can do anything anyway, but this makes it a habit rather than an attack.
-
-The fix: decide whether `set --user someone-else` must ask for that user's password, or be refused unless the caller is that user; and let the housekeeping log a warning when the password just typed equals the PIN, since it holds both at that moment.
-
 ## install edits any PAM file with the one stock line
 
 `install` refuses only a `/etc/pam.d/kde` without exactly one `auth substack password-auth` line. Anything else around it passes: `pam_fprintd`, `pam_sss`, a `pam_faillock` someone added. properpin's second line assumes the password check is plain `pam_unix`, so on a machine that authenticates through sssd it would refuse the right password and lock the lock screen.
@@ -34,4 +25,6 @@ The fix, deferred: edit the file only when its auth lines are exactly Fedora's s
 
 ## Considered and dismissed
 
+- **Anything an administrator does to a user's PIN.** Since the pepper went, `set` needs only root, so `sudo properpin set --user bob` gives bob a PIN the administrator chose and knows, without bob's password; root can also skip the comparison with `--shadow /dev/null`, lower `hash_cost` to 1, or re-run `enable` until the total limit. None of it is a concern: root can already unlock bob's session outright with `loginctl unlock-session`, change his password, or install a PAM module of its own, and the threat table in `docs/security-target.md` says root wins either way. Dismissed on 2026-10-17, together with the entries in `docs/concerns.md` and `docs/review-of-dropping-the-pepper.md` that only root could cause.
+- **The PIN-equals-password check is narrow.** It runs only at `set`, catches an exact match only, and is skipped for users without an entry in `/etc/shadow` (LDAP, systemd-homed), so a password changed to the PIN later goes unnoticed. That is the user's own choice, and `set` says to keep the PIN different from all account passwords. The housekeeping couldn't warn about it anyway: a password equal to the PIN is taken as the PIN, so the housekeeping never runs. `docs/why-pin-same-as-password-bad.md` has what it costs. Dismissed on 2026-10-17.
 - **Moving the clock to stretch the budget.** Setting the time takes root or admin authentication; a reboot ends at the LUKS passphrase, and even with TPM unlock at the login screen, where the PIN doesn't apply; a forged NTP answer from the network can only step the clock in chrony's first updates after start, that is after a reboot, and otherwise slews it by at most about 0.08 seconds a second. And the limit of 60 per PIN doesn't depend on time at all, so clock games could at best bring those guesses sooner. So `judge` no longer treats a failure stamped in the future as proof that the clock went back (`CLOCK_SLACK`, removed on 2026-10-17 with its test): after an honest jump back, such failures just wait for the clock to catch up, and the next password unlock may forgive them as the user's own. The property test lost its reboot event when the PIN started working from boot on, since nothing in the code knows about boots any more.

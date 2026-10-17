@@ -40,6 +40,8 @@ The fix: a self-check in the system test that the process name it looks for is t
 
 The fix: decide whether `set --user someone-else` must ask for that user's password, or be refused unless the caller is that user; and let the housekeeping log a warning when the password just typed equals the PIN, since it holds both at that moment.
 
+Dismissed on 2026-10-17: the two points about root, `--shadow /dev/null` and setting another user's PIN. Root can already unlock any session with `loginctl unlock-session`, change any password or install a PAM module of its own; `docs/current-concerns.md` lists them under Considered and dismissed. Through sudo, the command line is in the journal anyway, so "unlogged" held only for a root shell.
+
 ## Considered and dismissed: copies of the hash in backups
 
 Without the pepper, a copy of `/etc/properpin` gives up a short PIN in seconds, so backups, snapshots and disks sent for repair looked like a reason to raise `hash_cost` from 5 to 8, warn about backups at install, and purge hashes at uninstall. They are not. Backups are meant to be encrypted; whoever reads an unencrypted one already has every file of the user's, which is worth more than a PIN that only opens the lock screen, and only with the attacker at the keyboard as well. The one harm left is a PIN reused on a phone or a card, which `docs/security-target.md` already names. The same reasoning is why the pepper went.
