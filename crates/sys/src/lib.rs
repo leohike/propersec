@@ -5,12 +5,12 @@
 //! - [`Account`], [`group_by_name`] and [`shadow_hash`]: the passwd, group and shadow databases;
 //! - [`Yescrypt`]: hashing through the system's libxcrypt, the library `/etc/shadow` uses;
 //! - [`UnixChkpwd`]: the account password, checked the way pam_unix checks it;
-//! - [`SystemClock`]: the wall clock;
+//! - [`SystemClock`]: the wall clock, and [`local_time`] to show its times;
 //! - [`FileLog`]: log lines to a file, for tests and the pinchecker's `--dev-log`.
 //!
 //! Nothing here names `/etc` or `/var`: every location comes in through [`UserFiles::new`] and
 //! [`UserFiles::with_budget`].
-//! The only `unsafe` code is the libxcrypt FFI, in `crypt.rs`.
+//! The only `unsafe` code is the libxcrypt FFI, in `crypt.rs`, and glibc's local time, in `clock.rs`.
 
 // Stricter checks for shipped code (docs/chaos/plan-tools.md): every unsafe block explains why it is
 // sound, nothing indexes or slices without a bounds check, and no cast silently drops bits.
@@ -24,7 +24,7 @@ mod log;
 
 pub use accounts::{Account, current_egid, current_euid, current_gid, current_uid, group_by_name, shadow_hash};
 pub use chkpwd::UnixChkpwd;
-pub use clock::SystemClock;
+pub use clock::{SystemClock, local_time};
 pub use crypt::Yescrypt;
 pub use files::{AllUsers, UserFiles, global_settings};
 pub use log::FileLog;

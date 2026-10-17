@@ -150,6 +150,9 @@ pub fn try_unlock_with_pin(
     budget.record_failure(now);
     if pin.is_ok() {
         budget.consecutive = budget.consecutive.saturating_add(1);
+        if budget.paused(&settings) {
+            budget.since = Some(now);
+        }
     }
     store.save_budget(&budget)?;
     let pin = match pin {
@@ -162,7 +165,10 @@ pub fn try_unlock_with_pin(
             judged,
         });
     }
+    // Not paused before this attempt, or it would have been refused, so a pause this attempt
+    // counted is taken back with it.
     budget.consecutive = 0;
+    budget.since = loaded.since;
     budget.forgive(now, settings.forgive_before_correct_pin);
     store.save_budget(&budget)?;
     Ok(UnlockAttemptOutcome { verdict: Verdict::Unlock, judged })
@@ -178,6 +184,9 @@ pub fn housekeeping_after_password_unlock(store: &impl Store, clock: &impl Clock
     let mut budget = store.load_budget()?;
     let judged = budget.judge(now, &settings);
     budget.forgive(now, settings.forgive_before_correct_password);
+    if budget.paused(&settings) {
+        budget.since = Some(now);
+    }
     budget.consecutive = 0;
     store.save_budget(&budget)?;
     Ok(judged)
@@ -358,7 +367,7 @@ mod tests {
         assert_eq!(housekeeping_after_password_unlock(&store, &clock).unwrap().disabled, Some(crate::Limit::Day(10)));
         assert_eq!(try_pin(&store, &clock, PIN), Verdict::Refused(Refusal::Disabled(crate::Limit::Day(10))));
         // Root turning it back on: the same PIN works again at once.
-        let enabled = store.budget.borrow().enabled();
+        let enabled = store.budget.borrow().enabled(clock.now().unwrap());
         *store.budget.borrow_mut() = enabled;
         assert_eq!(try_pin(&store, &clock, PIN), Verdict::Unlock);
     }
@@ -408,6 +417,33 @@ mod tests {
         assert_eq!(try_pin(&store, &clock, PIN), Verdict::Refused(Refusal::Paused { consecutive: 3 }));
         housekeeping_after_password_unlock(&store, &clock).unwrap();
         assert_eq!(try_pin(&store, &clock, PIN), Verdict::Unlock);
+    }
+
+    /// `since` moves when the PIN is paused and when the password resumes it, and nowhere else: not
+    /// for a wrong PIN short of the limit, nor for a third attempt that turns out to be the PIN.
+    #[test]
+    fn since_is_when_the_pin_was_paused_or_resumed() {
+        let (store, clock) = enabled();
+        let since = || store.budget.borrow().since;
+        try_pin(&store, &clock, "1111");
+        try_pin(&store, &clock, "2222");
+        clock.advance(10);
+        try_pin(&store, &clock, PIN);
+        assert_eq!(since(), None);
+        housekeeping_after_password_unlock(&store, &clock).unwrap();
+        assert_eq!(since(), None, "the password only moves it when it resumes a paused PIN");
+        for wrong in ["1111", "2222"] {
+            try_pin(&store, &clock, wrong);
+        }
+        clock.advance(10);
+        let paused_at = clock.now().unwrap();
+        try_pin(&store, &clock, "3333");
+        clock.advance(10);
+        try_pin(&store, &clock, PIN);
+        assert_eq!(since(), Some(paused_at), "a refused attempt changes nothing");
+        clock.advance(10);
+        housekeeping_after_password_unlock(&store, &clock).unwrap();
+        assert_eq!(since(), Some(clock.now().unwrap()));
     }
 
     /// Paused or disabled, input isn't checked, so it isn't a guess: nothing is recorded, and

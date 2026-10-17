@@ -12,7 +12,7 @@ A paused or disabled PIN records nothing: the input isn't checked, so it isn't a
 
 ## The words for each part of speech
 
-- State: **enabled**, **paused**, **disabled**, as in the status line "right now  enabled, 1 of 3 consecutive failures so far".
+- State: **enabled**, **paused**, **disabled**, as in the status line "PIN  enabled since 2026-10-17 22:22:45 IST (+0100)". The budget keeps when the PIN last became enabled or paused, the key `since`, and when it was set, the key `set`; disabled has its own time, in the `disabled` key. A budget written before 2026-10-17 has neither key, and status says "since not recorded" until the next change of state writes them.
 - Verbs: a failure **pauses** the PIN, a password unlock **unpauses** it, the budget **disables** it, `properpin enable` **enables** it again.
 - The count: **consecutive failures**, the field `consecutive` of `Budget` and the key in the budget file. The settings keep their names, so the limit is still `max_failures`.
 - After a password unlock: the **housekeeping**, `housekeeping_after_password_unlock` in `properpin-core`, the pinchecker request and PAM argument `housekeeping`, `Request::Housekeeping` and `Mode::Housekeeping`. It forgives the user's own recent failures and starts the consecutive count over.

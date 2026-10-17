@@ -473,7 +473,10 @@ fn a_missing_pinchecker_fails_closed(world: &World) -> Outcome {
 fn status_shows_your_own_pin(world: &World) -> Outcome {
     let mine = world.as_user(USER, &["/usr/local/bin/properpin", "status"], b"")?;
     let text = String::from_utf8_lossy(&mine.stdout);
-    if !mine.status.success() || !text.contains("PIN        set") || !text.contains("right now  enabled") {
+    if !mine.status.success()
+        || !text.contains("hash                  set since ")
+        || !text.contains("PIN                   enabled since ")
+    {
         return Err(format!("alice's status: {text}{}", String::from_utf8_lossy(&mine.stderr)));
     }
     let bob = world.as_user("bob", &["/usr/local/bin/properpin", "status"], b"")?;
@@ -1037,7 +1040,8 @@ impl World {
         // What properpin set leaves: an empty lock file and a fresh budget, both the user's.
         let lock = PathBuf::from(format!("{BUDGET_DIR}/{}.lock", self.user.uid));
         write_file(&lock, "", self.user.uid, self.pinchecker_gid, 0o600)?;
-        write_file(&self.budget_file(), &Budget::default().format(), self.user.uid, self.pinchecker_gid, 0o600)?;
+        let now = SystemClock.now().map_err(message)?;
+        write_file(&self.budget_file(), &Budget::fresh(now).format(), self.user.uid, self.pinchecker_gid, 0o600)?;
         let _ = fs::remove_dir_all(SCRATCH);
         self.syslog.take();
         Ok(())

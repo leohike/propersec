@@ -140,7 +140,7 @@ fn set_then_status_then_remove() {
 
     // The PIN works at once, with no password unlock first.
     let status = stdout(&sandbox.properpin(&["status"], "").success());
-    assert!(status.contains("PIN        set") && status.contains("right now  enabled"), "{status}");
+    assert!(status.contains("hash                  set since ") && status.contains("PIN                   enabled since "), "{status}");
     assert!(unlocks(&sandbox, "cat4859"));
     assert!(!unlocks(&sandbox, "cat4860"));
 
@@ -196,9 +196,9 @@ fn setting_the_same_pin_again_asks_first() {
     says(&assert, "This is the PIN already set");
     says(&assert, "forgets its 7 concerning failures");
     says(&assert, "--yes skips the question");
-    assert!(stdout(&sandbox.properpin(&["status"], "").success()).contains("7 since the PIN was set"));
+    assert!(stdout(&sandbox.properpin(&["status"], "").success()).contains("7/60   since this PIN was set"));
     sandbox.properpin(&["set", "--yes"], &new_pin("cat4859", "cat4859")).success();
-    assert!(stdout(&sandbox.properpin(&["status"], "").success()).contains("0 since the PIN was set"));
+    assert!(stdout(&sandbox.properpin(&["status"], "").success()).contains("0/60   since this PIN was set"));
     // A different PIN needs no question.
     sandbox.properpin(&["set"], &new_pin("cat4860", "cat4860")).success();
 }
@@ -222,7 +222,7 @@ fn status_shows_what_the_pinchecker_sees() {
     let sandbox = Sandbox::new();
     sandbox.properpin(&["set"], &new_pin("cat4859", "cat4859")).success();
     let status = stdout(&sandbox.properpin(&["status"], "").success());
-    assert!(status.contains("enabled, 0 of 3 consecutive failures so far"), "{status}");
+    assert!(status.contains("consecutive failures  0/3"), "{status}");
     fs::remove_file(sandbox.0.path().join("pinchecker")).unwrap();
     says(&sandbox.properpin(&["status"], "").failure(), "pinchecker");
 }
@@ -253,7 +253,7 @@ fn enable_and_set_bring_a_disabled_pin_back() {
     assert!(!unlocks(&sandbox, "cat4859"), "a disabled PIN never unlocks");
     sandbox.housekeeping();
     assert!(!unlocks(&sandbox, "cat4859"), "the password doesn't bring a disabled PIN back");
-    says(&sandbox.properpin(&["status"], "").success(), "disabled after 10 concerning failures within 24 hours");
+    says(&sandbox.properpin(&["status"], "").success(), ", after 10 concerning failures within 24 hours");
 
     let assert = sandbox.properpin(&["enable"], "").failure();
     says(&assert, "may have been someone guessing it");
@@ -262,7 +262,7 @@ fn enable_and_set_bring_a_disabled_pin_back() {
     says(&sandbox.properpin(&["enable", "--yes"], "").success(), "PIN enabled again");
     assert!(unlocks(&sandbox, "cat4859"), "enable brings the same PIN back at once");
     let status = stdout(&sandbox.properpin(&["status"], "").success());
-    assert!(status.contains("right now  enabled") && status.contains("10 since the PIN was set (of 60)"), "{status}");
+    assert!(status.contains("PIN                   enabled since ") && status.contains("10/60  since this PIN was set"), "{status}");
     says(&sandbox.properpin(&["enable"], "").success(), "wasn't disabled");
 
     sandbox.write_budget(&Budget {
@@ -273,7 +273,7 @@ fn enable_and_set_bring_a_disabled_pin_back() {
     says(&sandbox.properpin(&["enable", "--yes"], "").failure(), "choose a new one with: properpin set");
     sandbox.properpin(&["set"], &new_pin("cat4860", "cat4860")).success();
     let status = stdout(&sandbox.properpin(&["status"], "").success());
-    assert!(status.contains("right now  enabled") && status.contains("0 since the PIN was set"), "{status}");
+    assert!(status.contains("PIN                   enabled since ") && status.contains("0/60   since this PIN was set"), "{status}");
 
     let (budget, lock) =
         (sandbox.0.path().join(format!("var/{}.budget", current_uid())), sandbox.0.path().join(format!("var/{}.lock", current_uid())));
@@ -314,7 +314,7 @@ fn doctor_and_status_say_why_a_pin_is_refused() {
     let doctor = sandbox.properpin(&["doctor"], "").failure();
     says(&doctor, &format!("{}: missing", budget.display()));
     says(&doctor, &format!("fix: sudo properpin set --user {me}, with the same PIN or a new one"));
-    says(&sandbox.properpin(&["status"], "").success(), "right now  refused, whatever is typed:");
+    says(&sandbox.properpin(&["status"], "").success(), "PIN                   refused whatever is typed:");
     sandbox.properpin(&["set", "--yes"], &new_pin("cat4859", "cat4859")).success();
 
     sandbox.write_budget(&Budget { disabled: Some(Disabled { limit: Limit::Day(10), at: 1_800_000_000 }), ..Budget::default() });

@@ -111,7 +111,11 @@ fn the_whole_cycle_through_the_binary() {
     }
     assert_eq!(sandbox.check(PIN), NO);
     assert!(sandbox.log().contains("PIN paused after 3 consecutive failures, password required"), "{}", sandbox.log());
-    assert!(sandbox.status().contains("right now  paused after 3 consecutive failures"), "{}", sandbox.status());
+    assert!(
+        sandbox.status().contains("paused since ") && sandbox.status().contains(", after 3 consecutive failures"),
+        "{}",
+        sandbox.status()
+    );
     sandbox.housekeeping();
     assert_eq!(sandbox.check(PIN), YES);
 }
@@ -134,7 +138,7 @@ fn input_that_cannot_be_a_pin_is_refused_and_not_counted() {
     for typed in [&b""[..], b"48\x0059", b"\xff\xfe", &long] {
         assert_eq!(sandbox.run(&["check"], typed).code, NO);
     }
-    assert!(sandbox.status().contains("enabled, 0 of 3 consecutive failures so far"), "{}", sandbox.status());
+    assert!(sandbox.status().contains("consecutive failures  0/3"), "{}", sandbox.status());
 }
 
 #[test]
@@ -189,7 +193,7 @@ fn a_poisoned_start_changes_nothing() {
     shell.args(["-c", "exec \"$0\" check \"$@\" <&-", PINCHECKER]).args(sandbox.dev_args());
     assert_eq!(run(shell, b"").code, NO);
     // The wrong PIN was counted, the right one reset it, and nothing typed isn't counted.
-    assert!(sandbox.status().contains("enabled, 0 of 3 consecutive failures so far"), "{}", sandbox.status());
+    assert!(sandbox.status().contains("consecutive failures  0/3"), "{}", sandbox.status());
     assert!(sandbox.log().contains("not the PIN, consecutive failure 1 of 3"), "{}", sandbox.log());
 }
 
@@ -229,6 +233,10 @@ fn status_needs_no_input_and_prints_the_rules() {
     };
     let before = files(&sandbox.path("var"));
     let status = sandbox.status();
-    assert!(status.contains("PIN        set") && status.contains("policy     paused after 3 consecutive failures"), "{status}");
+    assert!(
+        status.contains("hash                  set, since not recorded, in ")
+            && status.contains("    3 consecutive failures pause the PIN"),
+        "{status}"
+    );
     assert_eq!(files(&sandbox.path("var")), before, "status wrote nothing");
 }

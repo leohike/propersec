@@ -211,7 +211,7 @@ fn set(cli: &Cli, account: &Account, yes: bool) -> Result<()> {
     let hash = Yescrypt.hash(pin, settings.hash_cost)?;
     files.save_pin(&hash)?;
     // A new PIN, so no failure against the old one counts any more, and nothing stays paused or disabled.
-    files.start_budget(&Budget::default())?;
+    files.start_budget(&Budget::fresh(SystemClock.now()?))?;
     println!("PIN set for {}. The lock screen takes it from now on.", account.name);
     Ok(())
 }
@@ -256,7 +256,7 @@ fn enable(cli: &Cli, account: &Account, yes: bool) -> Result<()> {
     if judged.disabled != asked.disabled {
         bail!("the PIN's budget changed while asking; nothing was changed, so run enable again");
     }
-    files.save_budget(&budget.enabled())?;
+    files.save_budget(&budget.enabled(SystemClock.now()?))?;
     match judged.disabled {
         Some(limit) => println!("PIN enabled again for {}; it was disabled after {limit}.", account.name),
         None => println!("The PIN for {} wasn't disabled; its recent failures are forgotten.", account.name),

@@ -798,7 +798,7 @@ mod tests {
         assert!(files.load_budget().unwrap_err().to_string().ends_with("budget: missing"));
         files.start_budget(&Budget::default()).unwrap();
         assert_eq!(files.load_budget().unwrap(), Budget::default());
-        let budget = Budget { consecutive: 2, pending: vec![1], concerning: vec![2], total: 3, disabled: None };
+        let budget = Budget { consecutive: 2, pending: vec![1], concerning: vec![2], total: 3, disabled: None, set: Some(4), since: None };
         files.save_budget(&budget).unwrap();
         assert_eq!(files.load_budget().unwrap(), budget);
         assert_eq!(fs::metadata(files.budget_file().unwrap()).unwrap().mode() & 0o7777, 0o600);

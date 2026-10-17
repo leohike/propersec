@@ -69,6 +69,11 @@ pub struct Budget {
     /// Concerning failures since the PIN was set. Never goes down; only `set` starts it over.
     pub total: u64,
     pub disabled: Option<Disabled>,
+    /// When the PIN was set; `None` in a budget written before this was recorded.
+    pub set: Option<u64>,
+    /// When the PIN last became enabled or paused, for `properpin status`; `None` in a budget
+    /// written before this was recorded. Disabled has its own time, in [`Disabled::at`].
+    pub since: Option<u64>,
 }
 
 /// How many concerning failures there are, as of one moment.
@@ -167,10 +172,15 @@ impl Budget {
         self.consecutive >= settings.max_failures
     }
 
-    /// What `properpin enable` leaves behind: not disabled or paused, nothing pending or
+    /// The budget of a PIN set at `now`: enabled, with nothing counted.
+    pub fn fresh(now: u64) -> Self {
+        Self { set: Some(now), since: Some(now), ..Self::default() }
+    }
+
+    /// What `properpin enable` leaves behind at `now`: not disabled or paused, nothing pending or
     /// concerning, and the total kept, so the lifetime limit still holds for this PIN.
-    pub fn enabled(&self) -> Self {
-        Self { total: self.total, ..Self::default() }
+    pub fn enabled(&self, now: u64) -> Self {
+        Self { total: self.total, set: self.set, since: Some(now), ..Self::default() }
     }
 
     fn add_concerning(&mut self, failures: &[u64]) {
@@ -182,13 +192,20 @@ impl Budget {
     }
 
     /// The budget in `text`, or `None` unless it parses exactly. A damaged budget is an error for
-    /// the caller: reading it as empty would hand out a fresh one.
+    /// the caller: reading it as empty would hand out a fresh one. A budget written before `set`
+    /// and `since` were recorded has exactly the other five keys, and reads as both unknown.
     pub fn parse(text: &str) -> Option<Self> {
         let pairs = crate::kv::parse(text, "budget").ok()?;
         let get = |key: &str| pairs.iter().find(|(name, _)| name == key).map(|(_, value)| value.as_str());
-        if pairs.len() != 5 {
-            return None;
-        }
+        let time = |key: &str| match get(key)? {
+            "unknown" => Some(None),
+            at => digits(at).map(Some),
+        };
+        let (set, since) = match pairs.len() {
+            5 if get("set").is_none() && get("since").is_none() => (None, None),
+            7 => (time("set")?, time("since")?),
+            _ => return None,
+        };
         let pending = times(get("pending")?, MAX_PENDING)?;
         let concerning = times(get("concerning")?, MAX_CONCERNING)?;
         let disabled = match get("disabled")?.split(' ').collect::<Vec<_>>()[..] {
@@ -204,7 +221,7 @@ impl Budget {
             }
             _ => return None,
         };
-        Some(Self { consecutive: digits(get("consecutive")?)?, pending, concerning, total: digits(get("total")?)?, disabled })
+        Some(Self { consecutive: digits(get("consecutive")?)?, pending, concerning, total: digits(get("total")?)?, disabled, set, since })
     }
 
     pub fn format(&self) -> String {
@@ -218,12 +235,15 @@ impl Budget {
             Some(Disabled { limit: Limit::Week(count), at }) => format!("week {count} {at}"),
             Some(Disabled { limit: Limit::Total(count), at }) => format!("total {count} {at}"),
         };
+        let time = |at: Option<u64>| at.map_or_else(|| "unknown".to_owned(), |at| at.to_string());
         format!(
-            "consecutive = {}\npending = {}\nconcerning = {}\ntotal = {}\ndisabled = {disabled}\n",
+            "consecutive = {}\npending = {}\nconcerning = {}\ntotal = {}\ndisabled = {disabled}\nset = {}\nsince = {}\n",
             self.consecutive,
             list(&self.pending),
             list(&self.concerning),
-            self.total
+            self.total,
+            time(self.set),
+            time(self.since)
         )
     }
 }
@@ -347,8 +367,10 @@ mod tests {
             concerning: vec![T],
             total: 12,
             disabled: Some(Disabled { limit: Limit::Day(10), at: T }),
+            set: Some(T - 100),
+            since: Some(T - 50),
         };
-        assert_eq!(budget.enabled(), Budget { total: 12, ..Budget::default() });
+        assert_eq!(budget.enabled(T + 1), Budget { total: 12, set: Some(T - 100), since: Some(T + 1), ..Budget::default() });
     }
 
     #[test]
@@ -359,15 +381,31 @@ mod tests {
             concerning: vec![T - 5],
             total: 7,
             disabled: Some(Disabled { limit: Limit::Week(25), at: T }),
+            set: Some(T - 9),
+            since: Some(T - 3),
         };
         assert_eq!(Budget::parse(&budget.format()), Some(budget));
         assert_eq!(Budget::parse(&Budget::default().format()), Some(Budget::default()));
+        assert_eq!(Budget::parse(&Budget::fresh(T).format()), Some(Budget::fresh(T)));
         for limit in [Limit::Day(10), Limit::Week(25), Limit::Total(60)] {
             let disabled = Budget { disabled: Some(Disabled { limit, at: T }), ..Budget::default() };
             assert_eq!(Budget::parse(&disabled.format()), Some(disabled));
         }
-        let valid = "consecutive = 0\npending = none\nconcerning = none\ntotal = 0\ndisabled = no\n";
-        assert!(Budget::parse(valid).is_some());
+        // Written before set and since were recorded: both unknown, and written back with them.
+        let older = "consecutive = 0\npending = none\nconcerning = none\ntotal = 0\ndisabled = no\n";
+        assert_eq!(Budget::parse(older), Some(Budget::default()));
+        let valid = format!("{older}set = {T}\nsince = unknown\n");
+        assert_eq!(Budget::parse(&valid), Some(Budget { set: Some(T), ..Budget::default() }));
+        for text in [
+            &format!("{older}set = {T}\n"),
+            &format!("{older}since = {T}\n"),
+            &format!("{older}set = {T}\nsince = -1\n"),
+            &format!("{older}set = never\nsince = {T}\n"),
+            &format!("{older}set = {T}\nextra = {T}\n"),
+            "consecutive = 0\npending = none\nconcerning = none\ntotal = 0\nset = 1\n",
+        ] {
+            assert_eq!(Budget::parse(text), None, "{text:?}");
+        }
         for text in [
             "",
             "pending = none\nconcerning = none\ntotal = 0\ndisabled = no\n",

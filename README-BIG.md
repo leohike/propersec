@@ -56,7 +56,7 @@ A correct PIN never unlocks sooner than 75 ms after the `check` line was called:
 | `/etc/properpin/users/` | One file per user with a PIN | `root:properpin 0750` |
 | `/etc/properpin/users/<user>` | That user's yescrypt hash, and nothing else | `root:properpin 0640`: the pinchecker reads it, nobody else but root |
 | `/var/lib/properpin/` | Every user's failure budget, on disk, so it survives reboots; kept in shape by `/etc/tmpfiles.d/properpin.conf` | `root:properpin 1770`: only the group can enter, and the sticky bit lets each file be replaced or deleted only by its owner |
-| `/var/lib/properpin/<uid>.budget` | The consecutive count, failures waiting to be forgiven, concerning failures of the last 7 days, the total since the PIN was set, and whether it is disabled | `<uid>:properpin 0600`: the user it describes owns it, but can't enter the directory to reach it |
+| `/var/lib/properpin/<uid>.budget` | The consecutive count, failures waiting to be forgiven, concerning failures of the last 7 days, the total since the PIN was set, whether it is disabled, and when the PIN was set and last became enabled or paused | `<uid>:properpin 0600`: the user it describes owns it, but can't enter the directory to reach it |
 | `/var/lib/properpin/<uid>.lock` | Keeps two attempts from interleaving | `<uid>:properpin 0600` |
 | `/usr/local/libexec/properpin/properpin-pinchecker` | The pinchecker | `root:properpin 2755` (setgid only) |
 | `/etc/sysusers.d/properpin.conf` | The `properpin` system group (`g properpin -`): no members, no account | `root:root 0644` |
