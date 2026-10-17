@@ -45,5 +45,5 @@ What remains is the trade properpin was built to make: someone at the locked key
 ## What would weaken it
 
 - **A weak PIN**: digits fall to a few lucky guesses far sooner than words; the budget bounds it, it doesn't remove it.
-- **A bug in the pinchecker**: it reads every hash while it runs. That is why it is small, runs with a group that owns nothing else, and has its own review checklist (`products/pin/docs/pinchecker-review.md`).
+- **A bug in the pinchecker**: it reads every hash while it runs. That is why it is small, runs with a group that owns nothing else, and has its own review checklist (`docs/pinchecker-review.md`).
 - **Reusing the PIN elsewhere**: a PIN watched at the lock screen, or cracked from a copy of the disk, then works on the phone or card that shares it.

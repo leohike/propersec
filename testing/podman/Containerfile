@@ -1,13 +1,15 @@
 # properpin's system test: a stock Fedora 44 with properpin installed by packaging/install.sh and
 # enabled in the real /etc/pam.d/kde, then exercised through the real pam_unix and unix_chkpwd by
-# crates/systest. Run it with `just properpin podman`; the build context is the repo root.
+# crates/systest. Run it with `just podman`; the build context is the repo root.
 
 # Build with Fedora's own toolchain and libraries, never the host's.
 FROM registry.fedoraproject.org/fedora:44 AS build
 RUN dnf -y install --setopt=install_weak_deps=False rust cargo gcc libxcrypt-devel && dnf clean all
 WORKDIR /src
 COPY Cargo.toml Cargo.lock rustfmt.toml ./
-COPY products products
+COPY crates crates
+COPY packaging packaging
+COPY testing testing
 RUN --mount=type=cache,target=/root/.cargo/registry \
     --mount=type=cache,target=/src/target \
     cargo build --release --locked -p pam_properpin -p properpin-pinchecker -p properpin-cli -p properpin-systest \
@@ -20,7 +22,7 @@ RUN echo 'int main(void) { return 0; }' | gcc -x c - -Wl,-rpath,/home/linuxbrew/
 # The deliberately broken variants the uninstall cases install, built after the real ones.
 RUN --mount=type=cache,target=/root/.cargo/registry \
     --mount=type=cache,target=/src/target \
-    products/pin/testing/podman/build-broken.sh
+    testing/podman/build-broken.sh
 
 FROM registry.fedoraproject.org/fedora:44
 # util-linux brings su and login, each with its PAM service; install.sh needs diff and cmp, and
@@ -35,6 +37,5 @@ RUN cd /tmp \
 # alice has a PIN; bob is the other user on the machine. install.sh creates the properpin group.
 RUN useradd -m alice && echo 'alice:correct horse battery staple' | chpasswd && useradd -m bob
 COPY --from=build /out/ /opt/properpin/
-COPY products/pin/packaging /opt/properpin/packaging
-COPY products/pin/pam /opt/properpin/pam
+COPY packaging /opt/properpin/packaging
 CMD ["/opt/properpin/properpin-systest", "run"]

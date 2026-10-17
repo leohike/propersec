@@ -116,7 +116,7 @@ CI already runs the tests on Fedora 44 and on the declared Rust version, clippy 
 
 ## Outside review
 
-Everything so far has been reviewed by its author, with the help of an AI assistant. For a program that runs with more rights than its caller and reads every PIN hash on the machine, that is not enough before others trust it. `docs/concerns.md` itself flags the `--dev` guard as "worth a second reviewer's look", and `products/pin/docs/pinchecker-review.md` is a ready-made checklist for a reviewer.
+Everything so far has been reviewed by its author, with the help of an AI assistant. For a program that runs with more rights than its caller and reads every PIN hash on the machine, that is not enough before others trust it. `docs/concerns.md` itself flags the `--dev` guard as "worth a second reviewer's look", and `docs/pinchecker-review.md` is a ready-made checklist for a reviewer.
 
 - **A professional audit** of the pinchecker and the PAM module is the gold standard. OSTIF organises audits for open-source projects, but mostly for projects judged critical, and its AWS-funded audits averaged about $74,000 each, which gives a sense of the cost. The Linux Foundation's crowdfunding platform has a fund type for paying for an OSTIF audit.
 - **NLnet's NGI Zero grants** are the realistic route for a small European-style FOSS project: besides funding work, NLnet offers its grantees support that has included security audits (by Radically Open Security), accessibility and packaging help. Worth confirming the current terms and applying; properpin's scope, a privilege-separated pinchecker in a few thousand lines of Rust, is well within what such an audit covers.

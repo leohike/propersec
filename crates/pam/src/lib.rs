@@ -1,6 +1,6 @@
 //! `pam_properpin.so`: properpin's PAM module, for the lock screen's `auth` stack only.
 //!
-//! Two lines of `/etc/pam.d/kde` call it, around a direct `pam_unix` line (see `pam/kde-auth.pam`):
+//! Two lines of `/etc/pam.d/kde` call it, around a direct `pam_unix` line (see `packaging/kde-auth.pam`):
 //!
 //! ```text
 //! check         Is the typed input the PIN, and is the PIN enabled? Success unlocks, but never

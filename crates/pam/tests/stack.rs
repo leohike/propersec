@@ -1,7 +1,7 @@
 //! The lock-screen stack, through the real libpam and the real `pam_properpin.so`.
 //!
 //! The PAM files come from a temporary directory (`pam_start_confdir`). The stack is the shipped
-//! `pam/kde-auth.pam` with only three things swapped: the module path points at the freshly built
+//! `packaging/kde-auth.pam` with only three things swapped: the module path points at the freshly built
 //! `.so`, the pinchecker path at a script that runs the freshly built `properpin-pinchecker` against the
 //! sandbox (through its `--dev-*` options, which it accepts here because it isn't setgid), and
 //! `pam_unix` becomes `pam_permit` (the password was right) or `pam_deny` (it was wrong). The
@@ -31,7 +31,7 @@ use properpin_sys::{Account, UserFiles, Yescrypt, current_egid, current_uid};
 
 const PIN: &str = "4859";
 const PASSWORD: &str = "correct horse battery staple";
-const SHIPPED: &str = include_str!("../../../pam/kde-auth.pam");
+const SHIPPED: &str = include_str!("../../../packaging/kde-auth.pam");
 /// Set in the environment of a test binary started again for one test alone; names that test.
 const ALONE: &str = "PROPERPIN_STACK_TEST_ALONE";
 
@@ -124,7 +124,7 @@ impl Sandbox {
             ("pam_unix.so use_first_pass", unix),
         ] {
             // Fail loudly if the shipped file changes shape, rather than test something else.
-            assert!(text.contains(old), "{old:?} is no longer in pam/kde-auth.pam");
+            assert!(text.contains(old), "{old:?} is no longer in packaging/kde-auth.pam");
             text = text.replace(old, new);
         }
         fs::write(self.path("pam.d").join(service), text).unwrap();

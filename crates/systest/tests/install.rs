@@ -1,7 +1,7 @@
 //! `packaging/install.sh` against a fake root (`--root`), owned by whoever runs the tests.
 //!
 //! What this can't show: root ownership and SELinux labels, which need the real thing. The
-//! container test (`just properpin podman`) runs the same script as root into a real `/`.
+//! container test (`just podman`) runs the same script as root into a real `/`.
 
 use std::fs::{self, Permissions};
 use std::os::unix::fs::PermissionsExt;

@@ -13,14 +13,14 @@
 #                          password; and that /etc/pam.d/kde has exactly the lines this version ships.
 #                          The PINs, budgets and config are properpin doctor's
 #   install.sh check-build what the three built files load, as install checks it before it changes
-#                          anything; needs no root, and is what `just properpin release` runs
+#                          anything; needs no root, and is what `just release` runs
 #   install.sh uninstall   take properpin out of /etc/pam.d/kde (its lines, or, if they are damaged,
 #                          the copy saved at install, after a diff and a yes), then remove what install
 #                          put in place; keeps /etc/properpin, /var/lib/properpin and the properpin group
 #
 # Options:
 #   --from DIR       where the built libpam_properpin.so, properpin-pinchecker and properpin are
-#                    (default: target/properpin, where `just properpin release` puts them)
+#                    (default: target/properpin, where `just release` puts them)
 #   --yes            install, uninstall: don't ask (for scripted tests in a container)
 #   --root DIR       tests only: install under DIR instead of /
 #   --owner USER     tests only: who owns the installed files (default: root)
@@ -43,8 +43,7 @@ set -euo pipefail
 umask 022
 
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-product=$(dirname "$here")
-repo=$(dirname "$(dirname "$product")")
+repo=$(dirname "$here")
 
 usage() {
     sed -n '2,/^$/s/^# \{0,1\}//p' "${BASH_SOURCE[0]}" >&2
@@ -98,7 +97,7 @@ old_pam_backup=$etc/kde.pam.before-enable
 pam_damaged=$etc/kde.pam.damaged
 # The directories install had to create, which uninstall removes again once they are empty.
 created=$etc/install.created-dirs
-pam_lines=$product/pam/kde-auth.pam
+pam_lines=$here/kde-auth.pam
 
 # Older versions wrote another text after the same beginning, so the begin marker is found by it.
 begin_prefix="# properpin begin"
@@ -214,7 +213,7 @@ mentions_properpin() {
     grep -qE '^# properpin|pam_properpin'
 }
 
-# The three auth lines from pam/kde-auth.pam, without its comments, between the markers.
+# The three auth lines from packaging/kde-auth.pam, without its comments, between the markers.
 properpin_block() {
     echo "$begin_marker"
     grep -v -e '^#' -e '^[[:space:]]*$' "$pam_lines"
@@ -357,13 +356,13 @@ check_linkage() {
 # What the three built files load, failing with every problem found.
 check_build() {
     [[ -f $built_module && -f $built_binary && -f $built_pinchecker ]] ||
-        fail "no build in $from; run: just properpin release (it builds in a Fedora container), or pass --from with your own build"
+        fail "no build in $from; run: just release (it builds in a Fedora container), or pass --from with your own build"
     check_linkage "$built_module" "$built_module"
     check_linkage "$built_binary" "$built_binary"
     check_linkage "$built_pinchecker" "$built_pinchecker"
     if ((${#problems[@]})); then
         printf '%s\n' "${problems[@]}" >&2
-        fail "the build in $from doesn't load only the system's libraries; nothing was changed. just properpin release builds it with Fedora's toolchain, in a container"
+        fail "the build in $from doesn't load only the system's libraries; nothing was changed. just release builds it with Fedora's toolchain, in a container"
     fi
 }
 

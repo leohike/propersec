@@ -2,7 +2,7 @@
 # The uninstall cases, each in a fresh container from the properpin-systest image, so no case
 # inherits another's damage: install a deliberately broken properpin, uninstall it, and check
 # that the system is as it was (crates/systest/src/uninstall.rs). Exit 1 if any case fails.
-# Run after building the image, as `just properpin podman` does; CI runs it as root.
+# Run after building the image, as `just podman` does; CI runs it as root.
 
 set -uo pipefail
 image=properpin-systest

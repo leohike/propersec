@@ -29,7 +29,7 @@ Under `pam_wrapper`: `LD_PRELOAD=libpam_wrapper.so`, a service directory from th
 
 Build kscreenlocker from source inside the container, from the tag under test: 6.7.5 now (where `PamAuthenticator` still runs PAM on a thread, which makes it a test of the 6.7 path too) and 6.8.0 once tagged, as the plan's row on rechecking kscreenlocker asks. It needs Qt 6, KDE Frameworks and extra-cmake-modules; Fedora packages them, and `dnf builddep kscreenlocker` should bring most of what is needed. Only the authenticator library, the worker and the test have to be built, not the greeter UI. Everything runs without a display, so it fits in CI next to the existing podman job, at the cost of a longer image build that the cache should mostly absorb.
 
-The test then lives in its own folder, something like `products/pin/testing/kscreenlocker/`, with a small CMake project that builds against kscreenlocker's source tree, and a `just properpin kscreenlocker` recipe that runs it in podman like the other system tests.
+The test then lives in its own folder, something like `testing/kscreenlocker/`, with a small CMake project that builds against kscreenlocker's source tree, and a `just kscreenlocker` recipe that runs it in podman like the other system tests.
 
 ### Licence
 

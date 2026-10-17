@@ -1,6 +1,6 @@
 # Testing the uninstaller with a broken properpin
 
-Written as an idea on 2026-10-03 and built the same day. The cases are in `crates/systest/src/uninstall.rs`, the broken builds in `crates/brokenpin`, and `just properpin podman-uninstall` and CI run them. What was left for later is in `docs/uninstall-test-remaining-ideas.md`.
+Written as an idea on 2026-10-03 and built the same day. The cases are in `crates/systest/src/uninstall.rs`, the broken builds in `crates/brokenpin`, and `just podman-uninstall` and CI run them. What was left for later is in `docs/uninstall-test-remaining-ideas.md`.
 
 ## The idea
 

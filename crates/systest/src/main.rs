@@ -2,7 +2,7 @@
 //! the real `/etc/pam.d`, the real `pam_unix` and its own setuid helper `unix_chkpwd`.
 //!
 //! It runs as root inside the container built from `testing/podman/Containerfile` (run it with
-//! `just properpin podman`), never on a real machine: it installs properpin, which adds its lines
+//! `just podman`), never on a real machine: it installs properpin, which adds its lines
 //! to `/etc/pam.d/kde`, sets a PIN, and tampers with files as root.
 //!
 //! ```text

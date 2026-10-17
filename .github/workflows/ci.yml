@@ -48,7 +48,7 @@ jobs:
 
   lint:
     name: Lint (clippy, rustfmt; Fedora 44)
-    # The same two commands as `just properpin lint`. clippy's findings change between versions, so
+    # The same two commands as `just lint`. clippy's findings change between versions, so
     # this uses the toolchain Fedora ships, like the test job, not the newest one.
     runs-on: ubuntu-24.04
     container: registry.fedoraproject.org/fedora:44
@@ -83,23 +83,23 @@ jobs:
         run: |
           podman version
           sysctl fs.protected_regular fs.protected_symlinks
-      # The two commands behind `just properpin podman`, but with rootful podman. Rootless podman
+      # The two commands behind `just podman`, but with rootful podman. Rootless podman
       # on this runner builds the image fine, but setuid unix_chkpwd can't read /etc/shadow inside
       # it ("check pass; user unknown"), so the real password never unlocks. Storage is kernel
       # overlay without nosuid there, so the cause is something else; not yet pinned down.
       - name: Build the test image
-        run: sudo podman build --quiet --ignorefile products/pin/testing/podman/Containerfile.containerignore -f products/pin/testing/podman/Containerfile -t properpin-systest .
+        run: sudo podman build --quiet --ignorefile testing/podman/Containerfile.containerignore -f testing/podman/Containerfile -t properpin-systest .
       - name: Run the scenarios
         run: sudo podman run --rm --init --network=none properpin-systest
-      # The same as `just properpin release`: the build install.sh installs by default, checked to
+      # The same as `just release`: the build install.sh installs by default, checked to
       # load only the system's libraries.
       - name: Release build
         run: |
-          sudo podman build --quiet --ignorefile products/pin/testing/podman/Containerfile.containerignore -f products/pin/packaging/Containerfile -o target/properpin .
-          products/pin/packaging/install.sh check-build --from target/properpin
+          sudo podman build --quiet --ignorefile testing/podman/Containerfile.containerignore -f packaging/Containerfile -o target/properpin .
+          packaging/install.sh check-build --from target/properpin
       # install.sh uninstall against deliberately broken installs, a fresh container per case.
       - name: Run the uninstall cases
-        run: sudo products/pin/testing/podman/uninstall-cases.sh
+        run: sudo testing/podman/uninstall-cases.sh
 
   audit:
     name: Dependency audit

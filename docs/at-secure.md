@@ -1,6 +1,6 @@
 # The --dev options and AT_SECURE
 
-A short explainer, written on 2026-10-03, of what guards properpin-helper's `--dev-*` options and why that guard matters. The code is in `products/pin/crates/helper`: `main.rs` (`Options`, `run`) and `secure.rs` (`elevated`).
+A short explainer, written on 2026-10-03, of what guards properpin-helper's `--dev-*` options and why that guard matters. The code is in `crates/helper`: `main.rs` (`Options`, `run`) and `secure.rs` (`elevated`).
 
 ## The --dev options
 
@@ -14,7 +14,7 @@ The helper normally uses fixed places: hashes in `/etc/properpin`, counts in `/r
 | `--dev-chkpwd PATH` | which password checker is run |
 | `--dev-log FILE` | where log lines go |
 
-They exist so `cargo test` and `just properpin demo` can run the real helper binary against a temporary sandbox, without root and without installing anything.
+They exist so `cargo test` and `just demo` can run the real helper binary against a temporary sandbox, without root and without installing anything.
 
 **They are also the most dangerous thing in the helper.** If the installed helper accepted them, any user could run `properpin-helper arm --dev-chkpwd ~/fake-says-yes --dev-run ~/myrun`: a fake checker that always says yes arms the PIN without the password, and counts in a directory the user controls can be reset at will. So they must be refused whenever the helper runs with properpin's rights.
 
