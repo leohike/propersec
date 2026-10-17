@@ -1,6 +1,6 @@
 # Competition
 
-What else gives a Linux desktop a PIN, and how properpin compares, written on 2026-10-15. It brings together a web search made that day and the wider sweep of 2026-10-01 in `docs/chaos/chaotic/lockscreen-pin-existing-implementations.md`, which has more detail, the duress tools and the full source list. The point is positioning: anyone advanced enough to try properpin will ask "why not pinpam?" or "why not two lines of `pam_pwdfile`?", and the README should answer before they ask. Behaviour of other projects is taken from their READMEs and posts, not their source code, unless said otherwise.
+What else gives a Linux desktop a PIN, and how properpin compares, written on 2026-10-15. It brings together a web search made that day and the wider sweep of 2026-10-01 in `docs/chaos/lockscreen-pin-existing-implementations.md`, which has more detail, the duress tools and the full source list. The point is positioning: anyone advanced enough to try properpin will ask "why not pinpam?" or "why not two lines of `pam_pwdfile`?", and the README should answer before they ask. Behaviour of other projects is taken from their READMEs and posts, not their source code, unless said otherwise.
 
 ## The short answer
 
@@ -95,4 +95,4 @@ github.com/saltnpepper97/pam_pinlock. C, MIT, release 1.2.1 in June 2026, with a
 - libpamtpmpin: https://github.com/0xr0bert/libpamtpmpin
 - pam_pinlock: https://github.com/saltnpepper97/pam_pinlock
 - GNOME PIN design page: https://wiki.gnome.org/Design/OS/ScreenLock/PinAuthentication
-- The 2026-10-01 sweep, with the KDE, COSMIC and ChromeOS sources: `docs/chaos/chaotic/lockscreen-pin-existing-implementations.md`
+- The 2026-10-01 sweep, with the KDE, COSMIC and ChromeOS sources: `docs/chaos/lockscreen-pin-existing-implementations.md`

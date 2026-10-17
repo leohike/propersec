@@ -166,4 +166,4 @@ clippy and fmt are not in CI: run `just lint` before pushing. Results are in the
 
 ## Not done yet
 
-SELinux labels verified on a real system (install.sh sets and checks them, but only a real machine or a VM enforces them, and the pinchecker and `/var/lib/properpin` may need a policy of their own), the real greeter, alerts for concerning failures, duress and a TPM-backed counter. `docs/chaos/plan.md` at the repo root lists what is next, `docs/chaos/concerns.md` every smaller open point, and `docs/chaos/chaotic/` the research behind the bigger ones.
+SELinux labels verified on a real system (install.sh sets and checks them, but only a real machine or a VM enforces them, and the pinchecker and `/var/lib/properpin` may need a policy of their own), the real greeter, alerts for concerning failures, duress and a TPM-backed counter. `docs/chaos/plan.md` at the repo root lists what is next, `docs/chaos/concerns.md` every smaller open point, and the rest of `docs/chaos/` the research behind the bigger ones.
