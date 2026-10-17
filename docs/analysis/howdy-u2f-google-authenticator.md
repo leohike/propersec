@@ -1,0 +1,262 @@
+# Howdy, pam-u2f and google-authenticator-libpam
+
+How the three popular third-party "add an unlock factor" PAM modules get into PAM stacks, how they get out again, what they say and do about lock screens, and whether any of them protects a short secret as well as properpin does. Written on 2026-10-17 for properpin, whose `packaging/install.sh` today inserts three marked lines into `/etc/pam.d/kde` after a diff and a yes. It adds to `docs/chaos/competition.md` and `docs/chaos/lockscreen-pin-existing-implementations.md`, which cover PIN-specific projects (pinpam, libpamtpmpin, pam_pinlock, pam_pwdfile) and upstream desktops; none of the three modules here is discussed there.
+
+## Method and evidence
+
+Everything marked as verified was read in the read-only reference clones under `/var/home/shared/projects/pam-related/`, at these commits:
+
+| Clone | Commit | Date | Notes |
+|---|---|---|---|
+| howdy | `d3ab993` on master (also `origin/dev` at `3306db3`) | 2025-06-22 | master is the "beta" line, C++ PAM module plus Python, built with meson |
+| pam-u2f | `b5846bb` | 2025-03-27 | release 1.4.0 |
+| google-authenticator-libpam | `288db94` | 2026-02-27 | release 1.11 plus later commits |
+| authselect | `3084703` | 2026-08-25 | |
+| kscreenlocker | `e77531ae` (`v6.7.90-35`) | 2026-10-09 | the 6.8 line with switchable authenticators |
+| debian-pam | `853485cd` | 2026-07-08 | for `pam-auth-update` |
+
+Citations are `path:line` in that clone, or `commit:path:line` for older versions. Web pages were read on 2026-10-17 through a fetch agent: howdy issue #107 and the howdy wiki page "Common issues", Yubico's advisory YSA-2025-01, Yubico's pam-u2f page, and google-authenticator-libpam issue #55. The Arch wiki pages for Howdy, Universal 2nd Factor and Google Authenticator could not be read (an Anubis bot wall), so nothing here comes from them. FIDO2 PIN retry numbers come from the CTAP 2 specification as I know it, not from any page or code read for this report, and are marked as such. "Inferred" means a conclusion drawn from code or docs that I did not test.
+
+## The short answer
+
+None of the three edits another package's PAM file today, and none of them ships anything that confines it to the lock screen. pam-u2f and google-authenticator-libpam are purely manual: the README shows a line and says "add it to the service you want". Howdy is the interesting one, because its history is properpin's present: from February to December 2018 its installer, and then its Debian postinst, inserted a line into `/etc/pam.d/common-auth` after showing the result and asking `[y/N]`, which is what `install.sh install` does to `/etc/pam.d/kde` now. It could not take the line out again, and the maintainer replaced it with a `pam-auth-update` profile in issue #107, calling `common-auth` "a dangerous file to edit" and the confirmation step "rather hostile to users not familiar with PAM modules". Since then howdy enables itself, by default and with no question asked, in `common-auth`, which means every service on Debian and Ubuntu, sudo included. pam-u2f is the only one of the three a distribution mechanism knows by name: Fedora's authselect has `with-pam-u2f` and `with-pam-u2f-2fa` features, but they put it in `system-auth` and `password-auth`, so again everywhere, not just the lock screen.
+
+On the secret itself, pam-u2f with `pinverification=1` and a FIDO2 key is the one design here that beats properpin on what it protects: the PIN never leaves the authenticator, the retry counter lives in tamper-resistant hardware, and there is nothing on the computer to steal. It pays for that with a hard lockout that destroys the key's credentials, needs a key, and gives the user no retry feedback. google-authenticator-libpam has the only software rate limit of the three, `RATE_LIMIT n m` (3 logins per 30 seconds by default), but it lives in the user's own writable file, so anything running as the user can delete it, and the TOTP seed in that file is readable by the user's processes; this is exactly the "user-writable secret file" problem that properpin's setgid pinchecker and member-less group exist to avoid. Howdy has no attempt counting at all, only a 4-second timeout per attempt and optional "rubberstamps" (nod, hotkey) that are confirmations, not limits.
+
+The most useful lessons for properpin are in the bugs. Of the four high-impact defects found in these projects, two were about what a factor module returns when the user has no credentials or an internal error happens (pam-u2f returned `PAM_SUCCESS` with `nouserok`, then `PAM_IGNORE` on internal errors; google-authenticator returned `PAM_SUCCESS` with `nullok`). One was pam-u2f accepting an assertion without checking that the PIN had been verified, and one was a lock-screen-only unlock in howdy caused by reaping the locker's other children. properpin's stack and module should be tested against each of those classes, as the section on bug classes below explains.
+
+## How each gets into PAM stacks
+
+### Howdy
+
+Howdy's README says what it is for: "Using the central authentication system (PAM), this works everywhere you would otherwise need your password: Login, lock screen, sudo, su, etc." (`README.md:23`). Its whole design assumes it goes into the common stack.
+
+**Today, Debian and Ubuntu (distro mechanism, enabled by default).** The package ships a `pam-auth-update` profile, `howdy/src/pam-config/howdy.in:1-6`:
+
+```
+Name: Howdy
+Default: yes
+Priority: 512
+Auth-Type: Primary
+Auth:
+    [success=end default=ignore]        @pamdir@/pam_howdy.so
+```
+
+`Default: yes` means `pam-auth-update --package` turns it on without a question; `Priority: 512` puts it above `pam_unix` (256 in Debian's own profile, inferred from the Debian convention, not checked in this clone); `Auth-Type: Primary` puts it in the block of alternatives, and `pam-auth-update` rewrites `end` into the jump count to the end of the primary block (`debian/local/pam-auth-update:297` in debian-pam). The postinst activates it with `pam-auth-update --package` (`howdy/debian/postinst:203-206`). The profile is installed by `howdy/debian/install:17` and, for meson builds, only when `-Dinstall_pam_config=true` (`meson.options:9`, default false; `howdy/src/meson.build:57-71`). So on Debian and Ubuntu the face check runs in front of the password for login, sudo, su, polkit, every lock screen that includes `common-auth`, and ssh (where the module steps aside, see below).
+
+Inferred, minor: `howdy/debian/install` was last changed in `1dc56b1` (2023-02-18), before the profile was turned into a meson template in `29f218d` (2023-09-12), so a package built from master's `debian/` directory would install the file as `howdy.in` with a literal `@pamdir@`. I did not build it, and the PPA may be built differently.
+
+**Debian postinst, other side effects worth knowing.** It downloads and compiles dlib from GitHub at install time (`howdy/debian/postinst:109-177`), and writes a symlink into `/usr/local/bin` (`howdy/debian/postinst:199`), which Debian policy reserves for the administrator. It is not a model of packaging; the PAM part is the clean bit.
+
+**Meson install (manual).** `meson install` installs the module and nothing in `/etc/pam.d`; `howdy/src/pam/README.md:31-35` says "Add the following line to your PAM configuration (/etc/pam.d/your-service): `auth sufficient pam_howdy.so`". No service is recommended and there is no lockout warning. The top-level README's setup section only says to try `sudo -i` (`README.md:116-120`).
+
+**Arch (manual).** The PKGBUILD in the repo is the old 2.6.1 pam-python one and touches no PAM file (`howdy/archlinux/howdy/PKGBUILD:38-55`); the README sends Arch users to the Arch wiki for "additional configuration steps" (`README.md:47-53`), which I could not read.
+
+**Fedora and openSUSE (manual, by the README).** The README points to a COPR and an openSUSE wiki page for "detailed configuration steps" (`README.md:55-80`). Neither is in the clone, and I did not read them. Howdy has no authselect feature: `grep -i howdy` over the authselect clone finds nothing.
+
+### pam-u2f
+
+**Upstream: manual only.** The repository has no packaging, no `pam-configs` profile, no authselect hook and no installer; `git grep` for `pam.d`, `pam-auth-update`, `common-auth`, `authselect`, `gdm`, `sddm` or `kde` finds only test scripts. The README's "Service Configuration" says "Create a file for a new service in `/etc/pam.d/` or edit an already existing one by adding a line similar to this: `auth sufficient pam_u2f.so debug`" (`README.adoc:176-183`), followed by the strongest lockout warning of the three projects:
+
+> IMPORTANT: An erroneous PAM configuration may lock some or all users out of the system or prevent you from gaining root privileges. It is recommended that you start a separate shell with root privileges while configuring PAM to be able to revert changes if something goes wrong. Test your configuration thoroughly before closing the root shell. (`README.adoc:189-193`)
+
+properpin's confirmation prompt already says the same thing ("Keep a root shell open until you have tested the lock screen", `packaging/install.sh:308`). The README's example configurations are a second factor (`auth required` after the primary method, `README.adoc:345-355`), passwordless with the FIDO2 PIN (`auth sufficient ... pinverification=1`, `README.adoc:357-367`), and biometric with a PIN fallback (`README.adoc:369-380`). No service is named.
+
+**Fedora: authselect features (distro mechanism, opt-in).** authselect has had pam_u2f since `b6e227b` (2018-10-11). In the `local` profile, `profiles/local/password-auth:4-5` and `profiles/local/system-auth:5-6`:
+
+```
+auth  sufficient  pam_u2f.so cue                                         {include if "with-pam-u2f"}
+auth  required    pam_u2f.so cue {if not "without-pam-u2f-nouserok":nouserok} {include if "with-pam-u2f-2fa"}
+```
+
+The same lines are in the `sssd` and `winbind` profiles. `without-pam-u2f-nouserok` (added in `db94f7c`, 2020-11-18) comes with a lockout warning: "Omitting nouserok argument means that users without pam-u2f authentication configured will not be able to log in *INCLUDING* root. Make sure you are able to log in before losing root privileges." (`profiles/local/README:39-43`). On Fedora, `/etc/pam.d/kde` reaches pam_u2f through `auth substack password-auth`, so `with-pam-u2f` gives the lock screen a key unlock, along with every other service that includes `password-auth` or `system-auth`. There is no authselect switch for "lock screen only".
+
+**Debian and Ubuntu packages.** The README lists `apt install libpam-u2f pamu2fcfg` (`README.adoc:21-34`). Whether Debian's `libpam-u2f` ships a `pam-configs` profile is not in any clone here; I believe it does not, but that is unverified.
+
+**KDE 6.8 (distro mechanism, per-authenticator service).** kscreenlocker 6.8 looks for a separate PAM service per authenticator type: `kde` for the password, which "CANNOT be disabled!", and `kde-fingerprint`, `kde-smartcard`, `kde-face` and `kde-u2f` (`greeter/worker/CMakeLists.txt:28-32` in the kscreenlocker clone). Each is offered only when built in and switched on in `kscreenlockerrc` under `[Authenticators]` (`Smartcard`, `Fingerprint`, `Face`, `Universal2Factor`, `greeter/pamauthenticatormodel.cpp:55-77`). The descriptor's comment names pam-u2f directly: its `cue` option "may not be set, which means there will be no prompt but the authenticator will still be working" (`greeter/pamauthenticatordescriptor.h:24-32`). kscreenlocker installs none of these PAM files, and the Fedora kscreenlocker spec (`fedora-rpm-kscreenlocker`, 6.8.0) doesn't either, so they must come from elsewhere (on Fedora probably kde-settings; not checked). This is the first mechanism in which pam-u2f, or howdy as `kde-face`, can be confined to the lock screen, by putting it in its own file instead of in `kde`. There is no PIN type in the enum (`greeter/pamauthenticators.h:50-55`).
+
+### google-authenticator-libpam
+
+**Manual only.** `make install` installs the module and the `google-authenticator` command; nothing touches `/etc/pam.d`. The README says "Add this line to your PAM configuration file: `auth required pam_google_authenticator.so no_increment_hotp`" (`README.md:41-43`), with the advice to make both `pam_unix` and the OTP module `required`, not `requisite`, so a wrong password and a wrong code look the same (`README.md:30-35`). The project frames itself as "two-factor authentication for logging into servers via SSH, OpenVPN, etc…" (`README.md:3-4`); the issue templates ask for `/etc/pam.d/ssh` and `sshd_config` (`.github/ISSUE_TEMPLATE/totp-codes-are-not-accepted.md:19-23`). The RPM spec in `contrib/rpm.spec.in:38-44` has no scriptlet. There is no authselect feature for it (`grep -i google` over authselect finds nothing). The README doesn't mention lock screens at all; an issue search for "lock screen", "lightdm" and "gnome-screensaver" finds nothing, and "screensaver" finds only #206, about macOS.
+
+### Classification
+
+| | How it enters PAM | Which services | Classification |
+|---|---|---|---|
+| Howdy, 2018-02 to 2018-12 | Its installer, then its Debian postinst, rewrote `/etc/pam.d/common-auth` after showing it and asking `[y/N]` | All of them | Installer edits other packages' files |
+| Howdy, Debian and Ubuntu since 2.5.0 | `pam-auth-update` profile, `Default: yes`, `Auth-Type: Primary` | All services that include `common-auth` | Distro mechanism, on by default |
+| Howdy, meson, Arch, Fedora, openSUSE | README line, wiki pages | Whatever the user picks | Manual |
+| pam-u2f upstream | README line | Whatever the user picks | Manual |
+| pam-u2f on Fedora | authselect `with-pam-u2f` or `with-pam-u2f-2fa` | All services that include `system-auth` or `password-auth` | Distro mechanism, opt-in |
+| pam-u2f and howdy on Plasma 6.8 | A `kde-u2f` or `kde-face` service file kscreenlocker reads | The lock screen only | Distro mechanism (the file must come from the distro or the admin) |
+| google-authenticator-libpam | README line | Whatever the user picks, usually sshd | Manual |
+| properpin today | `install.sh` inserts a marked block into `/etc/pam.d/kde` after a diff and a yes | The KDE lock screen only | Installer edits other packages' files |
+
+## Howdy's 2018 installer: properpin's closest precedent
+
+This is the one piece of history that maps directly onto properpin's installer, so it gets its own section.
+
+**What it did.** `installer.py`, added in `1056358` (2018-02-05), and then `debian/postinst` from `5bd312a` (2018-04-05) until `359720e` (2018-12-05), opened `/etc/pam.d/common-auth`, inserted two lines after the first line not starting with `#`, printed the whole file with the comments grey and the new lines orange between `>>> START OF /etc/pam.d/common-auth` and `>>> END OF ...`, and asked "Lines will be insterted in /etc/pam.d/common-auth as shown above / Apply this change? [y/N]" (`f084411:installer.py:136-202`; `359720e^:debian/postinst:151-209`). The lines were:
+
+```
+# Howdy IR face recognition
+auth	sufficient			pam_python.so /lib/security/howdy/pam.py
+```
+
+In the Debian postinst the question could be skipped with the environment variable `HOWDY_NO_PROMPT` (`359720e^:debian/postinst:196-199`), the equivalent of properpin's `--yes`.
+
+**What it lacked, compared with properpin's `install.sh`.**
+
+- **No way back out.** `uninstall.py` ended with "There are still lines in /etc/pam.d/common-auth that can't be removed automatically / Run "nano /etc/pam.d/common-auth" to remove them by hand" (`f084411:uninstall.py:30-36`), and the Debian prerm printed the same (`359720e^:debian/prerm:45-46`). The uninstaller removed `/lib/security/howdy` first, so the line was left naming a module that no longer existed; with `sufficient`, PAM treats an unloadable module as a failure that is not fatal, so authentication fell through to `pam_unix` (inferred from Linux-PAM's handling of `sufficient`; I did not test the 2018 package).
+- **No markers.** The comment line was free text, not a begin/end pair, so nothing could find the block reliably; properpin's begin and end markers and its "exactly one of each, nothing of properpin's outside them" check (`packaging/install.sh:238-246`) are what make removal mechanical.
+- **No anchor check.** It inserted after the first line not starting with `#`. On stock Ubuntu that line is the blank line above the "Primary" block, so the new line landed above `pam_unix`. A blank line is not a comment there only by accident: `line[:1] == "#"` is false for `"\n"`. In a file without that blank line, the howdy line would have landed directly below `auth [success=1 default=ignore] pam_unix.so`, whose jump would then skip the howdy line instead of `pam_deny`, and a correct password would have hit `pam_deny` (inferred from the code; no report of this seen). properpin anchors on exactly one stock `auth substack password-auth` line and refuses otherwise (`packaging/install.sh:383-384`), and checks before writing that removal gives back the original byte for byte (`packaging/install.sh:386-388`).
+- **Not atomic.** It wrote with `open("/etc/pam.d/common-auth", "w")` and one `write` (`359720e^:debian/postinst:209`): a crash or a full disk in between leaves `common-auth` truncated, which locks out every service. properpin writes beside the file and renames over it (`packaging/install.sh:149-161`).
+- **No backup.** properpin keeps the file without its lines as `/etc/properpin/kde.pam.without-properpin` and falls back to it when the file is damaged (`packaging/install.sh:248-296`).
+- **A confused answer check.** `if ans.lower().strip() != "y" or ans.lower().strip() == "yes"` (`359720e^:debian/postinst` around line 202) treats "yes" as no. Harmless, but it shows how little the prompt was tested.
+
+**Why it changed, in the maintainer's words (issue #107, opened by boltgolt on 2018-12-05, milestone 2.5.0).** "Right now, Howdy is inserting a line in `/etc/pam.d/common-auth` in de debian installer. This is a dangerous file to edit and that's why there is a confirmation step. This step is rather hostile to users not familiar with PAM modules though." And: "By making use of the `pam-auth-update` command Howdy could be included into PAM at no risk, and be easily removed when the package is uninstalled." The fix landed the same day as `359720e` "Switched to pam-auth-update for debian installs as per #107"; the changelog for 2.5.0 calls it "Added automatic PAM inclusion on installation" (`howdy/debian/changelog:62`). In the same thread a user pointed out that Fedora and CentOS have no `pam-auth-update`, and the maintainer answered: "I can't imagine there isn't a save and automatic way to be included in PAM on those distros, that's key for so many uses. However, even the Yubikey setup requires the user to manually add a line to `/etc/pam.d/login` so maybe not." (2018-12-17). No lockout incident is cited in #107; the motive was danger and user-hostility, not a reported breakage. I found no later attempt to edit PAM files from an installer in howdy's history: `git log -S common-auth --all` ends at `359720e`.
+
+**What it means for properpin.** The thing howdy abandoned was not "show a diff and ask", which properpin does much more carefully, but "edit a file another package owns, from a script, with no mechanism to undo". properpin has the undo (markers, reversibility check, saved copy, atomic writes, a `check` command), which howdy never had. The remaining objection from #107 is the one that still applies: the user is asked to approve a PAM diff they may not be able to judge. Unlike howdy, properpin can't move to `pam-auth-update` or authselect without leaving its scope, as the section on what properpin could borrow below explains.
+
+## Uninstall and removal safety
+
+| | Uninstall path | Safety measures |
+|---|---|---|
+| Howdy 2018 installer | `uninstall.py`: asks "Do you want to continue? [y/N]", deletes files, leaves the PAM line and tells the user to `nano` it out (`f084411:uninstall.py:14-36`) | A confirmation; nothing for PAM |
+| Howdy Debian today | prerm runs `pam-auth-update --package`, deletes `/usr/share/pam-configs/howdy`, runs `pam-auth-update --package` again, then deletes `/lib/security/howdy` and `pip3 uninstall dlib` (`howdy/debian/prerm:29-45`) | Relies on `pam-auth-update`, which keeps the stack consistent and refuses to rewrite locally modified `common-*` files unless `--force` (`debian/local/pam-auth-update.8` in debian-pam, the paragraphs on local modifications and `--force`). It does not use the documented `pam-auth-update --package --remove howdy`, which "should be used to remove profiles from the configuration before the modules they reference are removed from disk"; deleting the profile and re-running gets the same result, in a roundabout way |
+| Howdy meson | Nothing; the user removes the line they added | None |
+| pam-u2f | Nothing upstream; the user removes the line, or `authselect disable-feature with-pam-u2f` on Fedora | authselect's own: it owns the files it writes and `authselect check` reports manual changes |
+| google-authenticator-libpam | Nothing; the user removes the line | None |
+| properpin | `install.sh uninstall`: removes its block between markers, or restores the saved copy after a diff and a yes if the block is damaged, keeps the damaged file as `kde.pam.damaged`, then removes its files and the directories it created if empty; keeps PINs, budgets and the group (`packaging/install.sh:557-582`) | Markers, reversibility proven before install, saved copy, atomic writes, never deletes `/etc/pam.d/kde` (whose absence would hand the lock screen to `other`) |
+
+Verified conclusion: properpin's removal story is more careful than any of the three. The only one with comparable safety is howdy on Debian, and only because `pam-auth-update` does the work.
+
+A related lesson from pam-u2f about making checks stricter after release: 1.3.1 made a group- or world-writable authfile a hard error (`51cea61`, 2025-01-13), and 1.3.2 turned it back into a syslog warning two days later because it "has proven to break existing installations" (`f573707`; `NEWS:11-13`, "Relax authfile permission check to a warning instead of an error to prevent a breaking change locking existing users out of their systems"). The check survives as a warning that "may become an error in the future" (`util.c:715-732`). properpin's `doctor` refusing a PIN whose files are wrong "for its user alone, never for anyone else" (`packaging/install.sh:431`) is the safer shape: a strict check that can only take away the PIN, never the password.
+
+## Lock screens
+
+### Howdy
+
+Howdy has the richest lock-screen history of the three, almost all of it trouble.
+
+- **`dismiss_lockscreen`, added and removed.** Added in `df14128` (2018-03-13) as "Auto dismiss lock screen on confirmation / Will run loginctl unlock-sessions after every auth", it ran `sudo timeout 1 loginctl unlock-sessions --no-ask-password` after a face match. It was removed in `8537366` (2019-03-29); the changelog says it was "Removed ... as it could lock users out of their system (thanks @ujjwalbe, @ju916 and many others!)" (`howdy/debian/changelog:50`), and the upgrade migration drops the key with "no longer supported because of login loop issues" (`howdy/debian/postinst:71-76`). Lesson: unlocking the session from a side channel, rather than answering PAM, was unsafe and unreliable.
+- **Unlocks from unrelated child processes.** Until `aef35b5` (2024-11-19, by Maximilian Seidler, a hyprlock developer, merged through PR #973 on 2025-02-01), the module waited for its Python comparison with `wait(&status)`, which reaps any child of the calling process. In a lock screen that runs other subprocesses, any child exiting with 0 counted as a recognised face: the commit is titled "Fix unwanted unlocks when auth client subprocesses exit with 0", and changes it to `waitpid(child_pid, &status, 0)` (`howdy/src/pam/main.cc:287`). This is a lock-screen-specific authentication bypass caused by the module assuming it owns its host process.
+- **Lock screens run as the user.** The howdy wiki's "Common issues" page (last edited 2026-02-07) has a "Lockscreen not unlocking" section: "Your lockscreen might not be running Howdy as root, which prevents Howdy from running", with the fix `sudo chmod -R 755 /lib/security/howdy/`, and "For some lockscreens, the "Identified face" message can stop a successful unlock", fixed with `no_confirmation = true`. The permission side shows in the history: `aaa4a8a` (2018-11-09, "Lowered file permissions to more reasonable levels, as per #83") changed `chmod 600 -R /lib/security/howdy/` to `chmod 744`, and the postinst now does `chmod 755 -R` on both `/lib/security/howdy/` and `/etc/howdy/` (`howdy/debian/postinst:188-196`). Face models (`/etc/howdy/models/<user>.dat`, `howdy/src/paths_factory.py:28`) are therefore readable by every user, so the lock screen, running as the user, can read them. They are biometric templates, not secrets that unlock anything by themselves, but that is still a privacy leak properpin's design would not accept for its hashes.
+- **The password-and-face race.** The module runs face recognition and the password prompt in parallel, and the `workaround` option decides how the prompt is ended after a match: `off`, `input` (send an Enter through `/dev/uinput`) or `native` (cancel the thread, "can lead to instability!") (`howdy/src/config.ini:33-37`; `howdy/src/pam/main.cc:376-424`). The `input` workaround checks `euidaccess("/dev/uinput", W_OK | R_OK)` (`howdy/src/pam/main.cc:386`), which a lock screen running as the user generally fails. Note that the module's built-in default when the key is missing is `input` (`howdy/src/pam/main.cc:227-228`), while the shipped config says `off`.
+- **Guards.** It steps aside, returning `PAM_AUTHINFO_UNAVAIL`, when disabled in the config, in an ssh session (by environment variables, `abort_if_ssh`), with the lid closed (`abort_if_lid_closed`), or when the user has no model (`howdy/src/pam/main.cc:134-186`). The ssh check reads `SSH_CONNECTION` and friends from the environment, which is a heuristic, not a property of the PAM service.
+- **Plasma 6.8.** kscreenlocker can now run howdy under its own `kde-face` service, switched on by the user, beside the password (`greeter/worker/CMakeLists.txt:31`). That is the clean lock-screen-only placement, but nothing in howdy's repository knows about it.
+
+### pam-u2f
+
+There is nothing about lock screens in the repository; the only "screen" in the README is the `manual` option printing challenges "on screen" (`README.adoc:280-284`). The relevant lock-screen facts are on kscreenlocker's side (the `kde-u2f` service, and the remark about `cue` in `greeter/pamauthenticatordescriptor.h:29-31`). Two README caveats matter for lock screens: an authfile in an encrypted home directory makes login impossible (`README.adoc:401-404`; at the lock screen the home is open, so that case is login-only), and on SELinux systems a denied read of the authfile with `nouserok` used to mean "a successful authentication within the module, without using the FIDO authenticator" (`README.adoc:522-544`, CVE-2020-24612). By default a per-user authfile is opened after dropping to the user (`README.adoc:396-399`; `pam-u2f.c:210-231`), which is also what a lock screen running as the user does anyway.
+
+### google-authenticator-libpam
+
+Nothing about lock screens, and the design fits them poorly. The module drops privileges to the target user with `setfsuid` before touching the secret file (`src/pam_google_authenticator.c:332-351`, `373-433`, `1934-1951`), and refuses to continue if that fails. At a lock screen, which runs as the user, the drop is a no-op and a `~/.google_authenticator` file works. But the documented way to keep the secret out of the user's reach, `secret=/some/root/path` plus `user=some-user` (`README.md:72-94`), cannot work from a lock screen: an unprivileged process can't `setfsuid` to another user, so the module fails closed with `PAM_AUTH_ERR` (inferred from `setuser` at `src/pam_google_authenticator.c:336-339` and the `goto out` at `1947-1950`; not tested). That is the same wall properpin met, which it gets past with a setgid pinchecker instead of root. The `grace_period` option (skip the code for N seconds after a success from the same host) needs `PAM_RHOST` and returns "not within the grace period" when it is unset (`src/pam_google_authenticator.c:1713-1722`), so it never applies locally; issue #161 ("make grace_period usable for local authentications", 2020) asks for exactly that.
+
+## Secrets, PINs, rate limits and lockouts
+
+### pam-u2f: a hardware-held PIN
+
+**What it does (verified in code).** With `pinverification=1`, or a credential registered with `+pin`, the module asks "Please enter the PIN: " through the PAM conversation (`util.c:1250-1257`), hands it to libfido2 for the assertion (`util.c:1264`), wipes it with `explicit_bzero` (`util.c:1265-1269`), and requires the user-verified bit in the signed assertion before checking the signature against the public key from the authfile (`util.c:1271-1282`). That last check is the fix for CVE-2021-31924, "an issue where PIN authentication could be bypassed" (`NEWS:46-47`, commit `1ffd435` "Verify that the UV bit is set", 2021-05-19): before it, an authenticator could answer without verifying the PIN and pam-u2f would accept it. `userverification=1` asks for on-device verification, such as a fingerprint on a YubiKey Bio, instead (`README.adoc:311-315`), and the README shows a fingerprint-then-PIN fallback (`README.adoc:369-380`).
+
+**What it doesn't do (verified).** The module keeps no counter, no rate limit, no lockout and no state of its own; `grep` for `retry_count` finds nothing. A wrong PIN just makes `fido_dev_get_assert` fail, the loop moves to the next authenticator, and the result is `PAM_AUTH_ERR` with no message saying how many tries remain or that the PIN is now blocked. Only `pamu2fcfg`, at registration, recognises `FIDO_ERR_PIN_BLOCKED` (`pamu2fcfg/pamu2fcfg.c:202-203`, commit `c42580b`).
+
+**What the authenticator does (from the CTAP 2 specification, not verified here).** The authenticator keeps its own PIN retry counter, at most 8, decremented on every wrong PIN and reset to the maximum by a correct one. After 3 wrong PINs in a row within one power cycle it refuses further PIN attempts until it is unplugged and plugged back in. At 0 the PIN is blocked for good, and the only way back is an authenticator reset, which deletes every FIDO2 credential on the key, for this computer and every website. The PIN must be at least 4 Unicode code points (Yubico's SDK documentation says "at least four code points" and "no more than 63 bytes"; the retry numbers were not on the pages fetched).
+
+**What is on the computer.** The authfile holds key handles and public keys (`README.adoc:406-447`): nothing secret, nothing to crack. Its integrity matters, since whoever can write it can enroll their own key, so the module requires a regular file owned by the user or root (`util.c:710-713`, `748-757`) and warns, but no longer refuses, when it is group- or world-writable (`util.c:715-732`). In per-user mode the user owns it, so anything running as the user can add a key for that user.
+
+**Return codes, after two rounds of fixes.** With `nouserok`, a user with no authfile or no credentials used to get `PAM_SUCCESS`; since 1.3.1 it is `PAM_IGNORE`, and internal errors that used to give `PAM_IGNORE` now give `PAM_SYSTEM_ERR`, `PAM_BUF_ERR` or `PAM_ABORT` (`util.c:780-788`; commits `a96ef17` and `0819914`, part of YSA-2025-01 / CVE-2025-23013). Yubico's advisory describes the impact: in a single-factor setup with a user-managed authfile and `nouserok`, "an attacker who removes or corrupts the authfile" gets `PAM_SUCCESS`, which "would lead to local privilege escalation if the user is authorized to sudo" (CVSS 7.3); as a second factor, memory starvation could make the second factor "no longer verified" (7.1). The advisory recommends `[success=ok default=bad]` control values. There is also `alwaysok`, "presentation mode", which turns every failure into success (`pam-u2f.c:315-318`; `README.adoc:261-263`).
+
+### google-authenticator-libpam: a software rate limit in the user's own file
+
+**The secret file.** `~/.google_authenticator` holds the base32 TOTP or HOTP seed on its first line, optional settings, and up to ten eight-digit scratch codes (`FILEFORMAT:1-68`). The module refuses a file that isn't regular, is more permissive than `allowed_perm` (default `0600`), or isn't owned by the user (`src/pam_google_authenticator.c:467-490`, `1917`); both checks can be loosened with options the README marks "DANGEROUS OPTION!" (`no_strict_owner`, `allowed_perm=0nnn`, `README.md:114-133`). The command writes it `0400` with `O_EXCL|O_NOFOLLOW` and renames it into place (`src/google-authenticator.c:945-956`). Note the error path there: if the write or the rename fails it runs `unlink(secret_fn)`, the real file, not the temporary one (`src/google-authenticator.c:951-955`), so a failed re-enrolment can delete a working secret (inferred from the code; with `nullok` that silently turns the second factor off).
+
+**The rate limit.** `RATE_LIMIT n m` allows at most n logins per m seconds, with n at most 100 and m at most 3600 (`FILEFORMAT:34-37`; `src/pam_google_authenticator.c:1018-1031`). The module records the time of every attempt, successful or not, in the same line of the user's file, and refuses without asking for a code when there are more than n within the window (`src/pam_google_authenticator.c:1002-1125`, called at `1960-1964`). The command offers it with "By default, this limits attackers to no more than 3 login attempts every 30s. Do you want to enable rate-limiting?" (`src/google-authenticator.c:932-938`; `"\" RATE_LIMIT 3 30\n"` at `src/google-authenticator.c:446`), and accepts `-r 1..10` and `-R 15..600` (`src/google-authenticator.c:615-650`). It is a sliding window, not a lockout: it never escalates, never needs a password to clear, and resets by itself after m seconds. At 3 per 30 seconds a guesser still gets 8,640 tries a day, enough against a 6-digit code over days given a window of 3 valid codes, but much less than without it.
+
+**Reuse and windows.** `DISALLOW_REUSE` remembers used time steps so a code works once (`FILEFORMAT:23-32`; `src/pam_google_authenticator.c:1278-1380`); `WINDOW_SIZE` sets how many codes are valid at once, 3 by default and 17 if the user accepts the command's offer to widen it (`FILEFORMAT:53-62`; `src/google-authenticator.c:445`); `no_increment_hotp` keeps failed attempts from advancing an HOTP counter, so "failed password attempts by an attacker without a token don't lock out the authorized user" (`README.md:167-171`).
+
+**State writes.** Every update is written to a `mkstemp` file beside the secret, `fchmod 0400`, compared with the original's inode, size and mtime to catch a concurrent login ("This prevents attackers from opening a lot of pending sessions and then reusing the same scratch code multiple times", with the race between check and rename admitted in the comment), `fsync`ed, size-checked and renamed over it (`src/pam_google_authenticator.c:639-760`). If the new state can't be written the login is refused, unless `allow_readonly` is set, which the README calls dangerous because a full disk then lets one-time codes be reused (`src/pam_google_authenticator.c:2189-2212`; `README.md:206-219`).
+
+**The user-writable file problem.** Every bit of that policy lives in a file the user owns and can rewrite: the rate limit, the reuse list, the window size, the scratch codes, and the seed itself. Anything running as the user can delete the `RATE_LIMIT` line, widen the window, or read the seed and compute codes forever. For the project's own scenario, a remote attacker who has the password but not the phone, that is fine: the attacker isn't running as the user. For a lock screen it is not: the attacker at the keyboard is not running as the user either, but malware or a curious program in the session is, and the seed is a permanent unlock factor that does not change when the password does. properpin's whole storage design, a hash readable only by a member-less group and a budget only the setgid pinchecker can change (`packaging/install.sh:132-145`, `460-473`), exists to close exactly this gap; `docs/chaos/lockscreen-pin-existing-implementations.md` flags the same risk in its Caveats section for user-writable PIN state.
+
+**Return codes.** With `nullok` and no secret file, the module used to return `PAM_SUCCESS`, so `[success=done ...]` configurations skipped the password altogether (issue #55, "Security issue using nullok", 2017-01-28); since `4f7d3b1` (2017-02-15) it returns `PAM_IGNORE`, "because it must be distinguishable from "good credentials given" in case the PAM config considers this module "sufficient"" (`src/pam_google_authenticator.c:2178-2187`). The README now warns that with `nullok` "at least one other module must have said `SUCCESS`" (`README.md:173-181`, from `5e804ec`).
+
+### Howdy: a timeout, not a limit
+
+There is no attempt counter, no rate limit and no lockout. Each attempt searches for a matching face for `timeout` seconds, 4 by default (`howdy/src/config.ini:45-46`; `howdy/src/compare.py:143`, `231`), at a certainty threshold the user can loosen (`howdy/src/config.ini:39-43`, "values above 5 are not recommended"). An attacker gets as many 4-second tries as the lock screen allows, each one returning `PAM_AUTH_ERR` and falling through to the password. Rubberstamps run after a match: `nod` wants a head nod, `hotkey` a key press to confirm or abort, each with its own timeout and a "failsafe" or "faildeadly" mode (`howdy/src/config.ini:109-117`; `howdy/src/rubberstamps/nod.py`, `hotkey.py`); they are off by default and are about liveness and consent, not about guessing. Snapshots of failed attempts can be saved but are off by default since 3.0.0 (`howdy/src/config.ini:101-107`; `howdy/debian/postinst:78-83`). The README is frank about the rest: "This package is in no way as secure as a password and will never be. ... a person who looks similar to you, or a well-printed photo of you could be enough to do it." and "DO NOT USE HOWDY AS THE SOLE AUTHENTICATION METHOD FOR YOUR SYSTEM." (`README.md:158-164`). Its Debian default nonetheless puts it in front of sudo.
+
+## Who does what better
+
+Honest side by side, for the lock-screen use case properpin targets. "Better" is judged against properpin's threat model in its README: someone at the keyboard, a thief with the running laptop, someone who copies the files.
+
+| | properpin | pam-u2f with a FIDO2 PIN | google-authenticator-libpam | Howdy |
+|---|---|---|---|---|
+| What the user types or shows | A PIN of 4 or more characters, 3 of them non-digits by default (`crates/core/src/settings.rs:50-59`) | A key, its touch, and a 4+ character PIN | A 6-digit code from a phone, or an 8-digit scratch code | A face |
+| Where the check happens | Setgid pinchecker, yescrypt via libxcrypt | Inside the authenticator | In the PAM module, as the user | Python script spawned by the module, as the caller |
+| What a copy of the files gives | A yescrypt hash: a short PIN falls offline | Public keys only: nothing | The TOTP seed: permanent codes | Face encodings: a privacy leak, not a key |
+| Who can read the secret on a running system | Root and the pinchecker's group, which has no members | Nobody; the private key never leaves the key | The user and everything the user runs | Every user (`chmod 755 -R`) |
+| Attempt limit | 3 consecutive, then the password; typos forgiven within 45 or 90 seconds; 10 concerning a day, 25 a week, 60 per PIN disable it (`crates/core/src/settings.rs:50-59`, `crates/core/src/budget.rs:1-20`) | Hardware: 3 per power cycle, 8 in all, then blocked (CTAP 2, not verified here) | Optional sliding window, 3 per 30 s by default, at most 100 per hour configurable | None; 4 s per attempt |
+| Who can reset or bypass the limit | Root (`properpin enable`, `set`); not the user's processes | Nobody, short of resetting the key, which destroys its credentials | The user, by editing their own file | Nothing to bypass |
+| What a lockout costs the owner | Typing the password once; after a budget limit, root re-enables | Resetting the key and re-enrolling it everywhere | Waiting out the window | Nothing |
+| Survives reboot | Yes, on disk | Yes, in the key | Yes, in the file | Not applicable |
+| Password brings the factor back | Yes, the consecutive count, never the budget | No (a correct PIN resets the key's counter) | Not applicable | Not applicable |
+| Scope | The lock screen only, by construction | Wherever the admin puts it | Wherever the admin puts it | Everywhere on Debian by default |
+| Feedback on a blocked state | Not covered in this report | None from pam-u2f | A log line, "Too many concurrent login attempts" | Not applicable |
+| Install and removal | Marked, reversible, verified edit of one file | Manual, or authselect | Manual | `pam-auth-update`, on by default |
+| Concurrent attempts | Per-user `flock` on a lock file (`crates/sys/src/files.rs:8`, `158-181`) | Not applicable | Inode, size and mtime compared before rename; a race admitted in the code | Not applicable |
+| State writes | Temporary file, `sync_all`, rename, directory `sync_all` (`crates/sys/src/files.rs:338-344`) | Not applicable | `mkstemp`, `fsync`, rename; no directory sync | Not applicable |
+
+Where the others are better, plainly:
+
+- **pam-u2f with a FIDO2 PIN beats properpin on secret storage and on counter integrity.** No hash exists to steal, and no root process can reset the counter. properpin's yescrypt hash at cost 5 (about 20 ms, `crates/core/src/settings.rs:26`) protects a short PIN only for as long as the hash stays out of reach; the README states that assumption honestly. If the user has a FIDO2 key and is willing to plug it in, it is the stronger factor. Its weaknesses are usability (a key, a touch, and a PIN), a punishing lockout, no feedback, and no scoping of its own; and if the key stays in the laptop, as nano-style keys do, the thief gets the key with the laptop and 8 PIN guesses before it bricks itself, which for a 4-digit PIN is a 0.08% chance, versus properpin's 3 guesses and then the password.
+- **google-authenticator-libpam has a mature, simple, well-tested state file update** (`mkstemp`, compare, `fsync`, rename, fail closed on write errors), and a time-window rate limit that bounds burst guessing in a way properpin's consecutive count does not try to (properpin bounds it by pausing after 3 instead, which is stricter).
+- **Howdy, nothing,** for security; it is better only at convenience.
+
+Where properpin is better: scope (the only one that cannot leak into sudo or ssh by accident), keeping the secret out of the user's own processes without hardware, a limit that escalates to the password instead of a timer or a bricked key, an installer that can undo itself, and a budget across days that none of the three has.
+
+## Bug classes properpin should test against
+
+Each of these happened in one of the three modules, and each maps to a test or a review question for properpin. The answers below were not checked against properpin's code for this report, except where a file is cited.
+
+- **"No credential" must never be success.** google-authenticator (`nullok`, fixed 2017) and pam-u2f (`nouserok`, fixed 2025) both returned `PAM_SUCCESS` for a user with no secret. properpin says that with its lines in, "a user without a PIN sees no difference: the module steps aside" (`packaging/install.sh:31-32`); a stack test should assert that a user without a PIN, a user whose PIN files are missing, unreadable or malformed, and a paused or disabled PIN all reach `pam_unix` and that only a matching PIN ends the stack with success.
+- **Internal errors must not turn into success either.** pam-u2f's CVE-2025-23013 was `PAM_IGNORE` on allocation and privilege-drop failures, which became success in stacks where only one other module answered. properpin's first line, `[success=done default=ignore]`, ignores everything but success, and its second line, `pam_unix` with `[success=ok default=die]` (`packaging/kde-auth.pam:20-21`), makes the password decisive, so an `IGNORE` can't skip it. The test to have is a fault-injected pinchecker (crashing, hanging, returning garbage, missing) at the KDE lock screen, ending in a password prompt and never in an unlock. `crates/pam/tests/stack.rs` building the stack from the shipped file (`packaging/kde-auth.pam:4-6`) is the right place.
+- **Never reap children you didn't spawn.** howdy's `wait()` bug unlocked lock screens when an unrelated child exited 0. If properpin's module spawns the pinchecker, it should wait for that PID only, and should not install a `SIGCHLD` handler or change its disposition in the host process; worth a review and a test that runs the module in a host which has other children exiting with 0.
+- **Don't unlock by side channel.** howdy's `dismiss_lockscreen` called `loginctl unlock-sessions` and caused login loops and lockouts. properpin answers PAM only; keep it that way, including in any future "unlock after N seconds" or KWallet ideas.
+- **Don't harden in a way that locks people out after release.** pam-u2f had to turn its authfile permission error back into a warning within two days. properpin's `doctor` refusing the PIN for one user only is the safe pattern; keep every new strictness on the PIN side, never on the password side.
+- **Don't delete the good file on a failed write.** google-authenticator's command unlinks the real secret when writing the new one fails. Worth a glance at `properpin set`'s error paths.
+
+## What properpin could borrow
+
+- **Lock-screen-only placement through Plasma 6.8's service files, as a direction, not a drop-in.** kscreenlocker 6.8 runs fingerprint, smartcard, face and U2F under `kde-fingerprint`, `kde-smartcard`, `kde-face` and `kde-u2f`, files properpin could own without touching anyone else's. There is no PIN type in `PamAuthenticators::Authenticator`, and the password service `kde` "CANNOT be disabled", so properpin can't use this today without either an upstream PIN type or abusing another type's service name, which it should not do. It strengthens the case in `docs/chaos/competition.md` for proposing a PIN authenticator upstream; a PIN type with its own `kde-pin` file would let properpin ship a file it owns instead of editing `kde`, which is the exact concern of howdy #107.
+- **Not `pam-auth-update` or authselect.** Both manage the common stacks (`common-*`, `system-auth`, `password-auth`), which every service includes; a profile there would make the PIN work for sudo and ssh, the opposite of properpin's scope. Howdy shows what happens with `Default: yes`. If properpin is packaged for Debian or Fedora, the package should still edit only `kde` (or, later, own `kde-pin`), and the packaging docs should say why it isn't a `pam-configs` profile or an authselect feature.
+- **Mirror `pam-auth-update`'s rule about local modifications.** It stops managing `common-*` once it sees local changes and only overrides them with `--force`, keeping the old file as `.pam-old`. properpin already refuses when its block is damaged and keeps `kde.pam.damaged`; one gap worth checking is what install does when the stock part of `/etc/pam.d/kde` was changed by the distribution after properpin saved its copy (a `kde-settings` update): the saved copy then describes an older file, and restoring it on uninstall would silently revert the distribution's change. Comparing the saved copy with the current file minus properpin's block, and refusing to restore an outdated copy without a question, would close it. Inferred from reading `packaging/install.sh:253-275`; not tested.
+- **Feedback on a paused or disabled PIN.** google-authenticator logs "Too many concurrent login attempts"; pam-u2f says nothing, and its users find out when the key is bricked. Telling the user at the lock screen that the PIN is paused and the password is needed (if properpin doesn't already; not checked here) is the cheapest usability win, and doesn't help an attacker who would learn the same from the next refusal.
+- **A FIDO2 or TPM-backed counter, later.** pam-u2f's model (secret and counter in hardware, nothing on disk worth stealing) is the honest answer to the README's admission that a copied hash falls fast for a short PIN. It complements the TPM row already planned. The difference worth keeping: properpin brings the PIN back after a password unlock, where FIDO2 and pinpam destroy or lock it for good.
+- **A time-window limit is not needed.** google-authenticator's `RATE_LIMIT` bounds bursts, which properpin's pause after 3 consecutive failures already does more strictly; nothing to borrow there.
+- **Documentation habits.** pam-u2f's README states the lockout risk and the root-shell advice up front, and authselect's README spells out exactly who gets locked out "*INCLUDING* root" by a stricter option. properpin's prompt already says to keep a root shell open; the README and any packaging notes should say it too, together with the one recovery command (`install.sh uninstall`, or restoring `kde.pam.without-properpin`) and what the lock screen does if `/etc/pam.d/kde` disappears.
+
+## Open questions
+
+- What the Arch wiki pages for Howdy, Universal 2nd Factor and Google Authenticator tell users to edit, and whether they mention `/etc/pam.d/kde` or kscreenlocker; unread because of the bot wall.
+- Whether Debian's `libpam-u2f` and `libpam-google-authenticator` ship `pam-configs` profiles; not in any clone here.
+- Which package ships `kde-u2f` and `kde-face` on Fedora, if any, and what is in them.
+- The exact FIDO2 retry numbers as YubiKeys implement them, which should be confirmed from Yubico or the CTAP 2.1 text before they are quoted publicly.
+- howdy issue #83, behind the 2018 permission loosening, and the reports behind the `dismiss_lockscreen` removal, which I did not read.
+
+## Sources
+
+- Howdy clone: `README.md`, `meson.options`, `howdy/src/meson.build`, `howdy/src/pam-config/howdy.in`, `howdy/src/pam/main.cc`, `howdy/src/pam/README.md`, `howdy/src/config.ini`, `howdy/src/compare.py`, `howdy/debian/{postinst,prerm,preinst,install,changelog}`, `howdy/archlinux/howdy/PKGBUILD`; commits `1056358`, `f084411`, `5bd312a`, `aaa4a8a`, `359720e`, `df14128`, `8537366`, `658de16`, `29f218d`, `aef35b5`.
+- pam-u2f clone: `README.adoc`, `NEWS`, `pam-u2f.c`, `util.c`, `pamu2fcfg/pamu2fcfg.c`, `tests/bionic/run.sh`; commits `1ffd435`, `a96ef17`, `0819914`, `51cea61`, `f573707`, `c42580b`.
+- google-authenticator-libpam clone: `README.md`, `FILEFORMAT`, `src/pam_google_authenticator.c`, `src/google-authenticator.c`, `contrib/rpm.spec.in`; commits `4f7d3b1`, `5e804ec`, `a75dac2`.
+- authselect clone: `profiles/local/{system-auth,password-auth,README}` and the `sssd` and `winbind` equivalents; commits `b6e227b`, `db94f7c`.
+- kscreenlocker clone: `greeter/worker/CMakeLists.txt`, `greeter/pamauthenticatormodel.cpp`, `greeter/pamauthenticatordescriptor.h`, `greeter/pamauthenticators.h`; fedora-rpm-kscreenlocker at 6.8.0.
+- debian-pam clone: `debian/local/pam-auth-update`, `debian/local/pam-auth-update.8`.
+- properpin: `packaging/install.sh`, `packaging/kde-auth.pam`, `crates/core/src/settings.rs`, `crates/core/src/budget.rs`, `crates/sys/src/files.rs`.
+- howdy issue #107, "Use pam-auth-update for pam inclusion": https://github.com/boltgolt/howdy/issues/107
+- howdy wiki, Common issues: https://github.com/boltgolt/howdy/wiki/Common-issues
+- Yubico YSA-2025-01: https://www.yubico.com/support/security-advisories/ysa-2025-01/
+- Yubico pam-u2f page: https://developers.yubico.com/pam-u2f/
+- Yubico SDK, FIDO2 PIN: https://docs.yubico.com/yesdk/users-manual/application-fido2/fido2-pin.html
+- google-authenticator-libpam issue #55, "Security issue using nullok": https://github.com/google/google-authenticator-libpam/issues/55
+- google-authenticator-libpam issue #161, "make grace_period usable for local authentications" (title only): https://github.com/google/google-authenticator-libpam/issues/161

@@ -1,0 +1,1 @@
+Framing: treat install.sh as an assisted hand edit, not a package install. It's what pam-u2f, google-authenticator and fprintd upstream all ask of the admin, done with markers, a diff, undo and check. Say so in the README.
