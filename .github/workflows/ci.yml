@@ -91,6 +91,12 @@ jobs:
         run: sudo podman build --quiet --ignorefile products/pin/testing/podman/Containerfile.containerignore -f products/pin/testing/podman/Containerfile -t properpin-systest .
       - name: Run the scenarios
         run: sudo podman run --rm --init --network=none properpin-systest
+      # The same as `just properpin release`: the build install.sh installs by default, checked to
+      # load only the system's libraries.
+      - name: Release build
+        run: |
+          sudo podman build --quiet --ignorefile products/pin/testing/podman/Containerfile.containerignore -f products/pin/packaging/Containerfile -o target/properpin .
+          products/pin/packaging/install.sh check-build --from target/properpin
       # install.sh uninstall against deliberately broken installs, a fresh container per case.
       - name: Run the uninstall cases
         run: sudo products/pin/testing/podman/uninstall-cases.sh

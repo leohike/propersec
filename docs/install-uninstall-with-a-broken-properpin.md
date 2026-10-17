@@ -25,7 +25,7 @@ The broken builds come from `crates/brokenpin`, a test-only crate. `testing/podm
 | `module-sleeps` | The module sleeps for ten hours | Hangs |
 | `module-says-yes` | The module returns success for everything | A wrong password unlocks |
 | `module-missing-symbol` | A module without `pam_sm_authenticate` | The right password is refused |
-| `module-garbage` | Text where the module should be | The right password is refused |
+| `module-garbage` | Text written over the real module after install, since install refuses such a build | The right password is refused |
 | `module-deleted` | The real module, deleted after install | The right password is refused |
 | `helper-says-yes` | The helper exits 0, yes, whatever it is asked | A wrong password unlocks |
 | `helper-sleeps` | The helper sleeps for ten hours | The right password unlocks only after 20 seconds, the module's 10-second helper timeout twice |

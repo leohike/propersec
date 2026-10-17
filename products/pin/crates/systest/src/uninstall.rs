@@ -68,7 +68,7 @@ const CASES: &[Case] = &[
     Case { name: "module-sleeps", variant: Some("module-sleeps"), damage: no_damage, breaks: &[Breaks::Hangs] },
     Case { name: "module-says-yes", variant: Some("module-says-yes"), damage: no_damage, breaks: &[Breaks::LetsAnyoneIn] },
     Case { name: "module-missing-symbol", variant: Some("module-missing-symbol"), damage: no_damage, breaks: &[Breaks::LocksOut] },
-    Case { name: "module-garbage", variant: Some("module-garbage"), damage: no_damage, breaks: &[Breaks::LocksOut] },
+    Case { name: "module-garbage", variant: None, damage: garbage_the_module, breaks: &[Breaks::LocksOut] },
     Case { name: "module-deleted", variant: None, damage: delete_the_module, breaks: &[Breaks::LocksOut] },
     Case { name: "pinchecker-says-yes", variant: Some("pinchecker-says-yes"), damage: no_damage, breaks: &[Breaks::LetsAnyoneIn] },
     Case { name: "pinchecker-sleeps", variant: Some("pinchecker-sleeps"), damage: no_damage, breaks: &[Breaks::Slows] },
@@ -80,6 +80,11 @@ const CASES: &[Case] = &[
 
 fn delete_the_module() -> Outcome {
     fs::remove_file(MODULE).map_err(message)
+}
+
+/// Text where the module should be. install refuses such a build, so it comes after install.
+fn garbage_the_module() -> Outcome {
+    fs::write(MODULE, "this is not a shared library\n").map_err(message)
 }
 
 fn edit_kde(change: impl FnOnce(&str) -> String) -> Outcome {

@@ -8,17 +8,19 @@
 #                          is the same command. Also removes /run/properpin, which older versions
 #                          used. Then prints what properpin doctor finds in the PINs, budgets and
 #                          config, which install never judges or changes
-#   install.sh check       every installed path: kind, mode, owner, same bytes as the build, SELinux label;
-#                          that the group has no members and a locked password; and that
-#                          /etc/pam.d/kde has exactly the lines this version ships. The PINs, budgets
-#                          and config are properpin doctor's
+#   install.sh check       every installed path: kind, mode, owner, same bytes as the build, SELinux label,
+#                          and what the binaries load; that the group has no members and a locked
+#                          password; and that /etc/pam.d/kde has exactly the lines this version ships.
+#                          The PINs, budgets and config are properpin doctor's
+#   install.sh check-build what the three built files load, as install checks it before it changes
+#                          anything; needs no root, and is what `just properpin release` runs
 #   install.sh uninstall   take properpin out of /etc/pam.d/kde (its lines, or, if they are damaged,
 #                          the copy saved at install, after a diff and a yes), then remove what install
 #                          put in place; keeps /etc/properpin, /var/lib/properpin and the properpin group
 #
 # Options:
 #   --from DIR       where the built libpam_properpin.so, properpin-pinchecker and properpin are
-#                    (default: target/release)
+#                    (default: target/properpin, where `just properpin release` puts them)
 #   --yes            install, uninstall: don't ask (for scripted tests in a container)
 #   --root DIR       tests only: install under DIR instead of /
 #   --owner USER     tests only: who owns the installed files (default: root)
@@ -30,6 +32,12 @@
 # without a PIN sees no difference: the module steps aside. Nothing ever deletes /etc/pam.d/kde:
 # properpin's lines come out between their two marker lines, and nothing else changes. (Deleting
 # /etc/pam.d/kde would hand the lock screen to the "other" service, which denies everyone.)
+#
+# Each binary must load its libraries from the system's directories alone, which only root can
+# change: no search path of its own (RPATH, RUNPATH), the system's loader, and every library found
+# under /lib, /lib64, /usr/lib or /usr/lib64. Otherwise whoever can write where it looks, such as
+# the owner of /home/linuxbrew when Homebrew's toolchain built it, could put code into the setgid
+# pinchecker or into the lock screen. install refuses such a build before it changes anything.
 
 set -euo pipefail
 umask 022
@@ -50,7 +58,7 @@ fail() {
 
 # --- arguments
 
-command="" root=/ owner=root pinchecker_group=properpin from=$repo/target/release yes=0
+command="" root=/ owner=root pinchecker_group=properpin from=$repo/target/properpin yes=0
 while [[ $# -gt 0 ]]; do
     case $1 in
         --root) root=${2:?--root needs a directory}; shift 2 ;;
@@ -58,7 +66,7 @@ while [[ $# -gt 0 ]]; do
         --pinchecker-group) pinchecker_group=${2:?--pinchecker-group needs a group}; shift 2 ;;
         --from) from=${2:?--from needs a directory}; shift 2 ;;
         --yes) yes=1; shift ;;
-        install | check | uninstall) [[ -z $command ]] || usage; command=$1; shift ;;
+        install | check | check-build | uninstall) [[ -z $command ]] || usage; command=$1; shift ;;
         *) usage ;;
     esac
 done
@@ -308,12 +316,67 @@ require_root() {
     fi
 }
 
+# --- what the binaries load
+
+# Whether $1 is in the system's own library directories, which only root can change.
+in_system_libraries() {
+    [[ $1 =~ ^(/usr)?/lib(64)?/ && $1 != */../* && $1 != */./* ]]
+}
+
+# Adding to $problems what is wrong with what $1, called $2 in what is said, loads when it starts.
+check_linkage() {
+    local file=$1 name=$2 dynamic interpreter line library path
+    command -v readelf >/dev/null || fail "readelf, from binutils, is needed to check what $name loads; nothing was changed"
+    if ! dynamic=$(readelf -d "$file" 2>/dev/null) || ! grep -q '(NEEDED)' <<<"$dynamic"; then
+        problems+=("$name: not a binary that loads the system's libraries")
+        return
+    fi
+    while IFS= read -r line; do
+        problems+=("$name: has a library search path of its own, $line, so whoever can write there can put code into it")
+    done < <(sed -nE 's/.*\((RPATH|RUNPATH)\).*\[(.*)\]$/\1 \2/p' <<<"$dynamic")
+    interpreter=$(readelf -l "$file" 2>/dev/null | sed -nE 's/.*Requesting program interpreter: (.*)\]$/\1/p')
+    if [[ -n $interpreter ]] && ! in_system_libraries "$interpreter"; then
+        problems+=("$name: started by the loader $interpreter, not the system's")
+    fi
+    # Without the variables that would make the loader look elsewhere for this run only.
+    while IFS= read -r line; do
+        if [[ $line =~ ^[[:space:]]*([^[:space:]]+)[[:space:]]+=\>[[:space:]]+(.*)[[:space:]]\(0x ]]; then
+            library=${BASH_REMATCH[1]} path=${BASH_REMATCH[2]}
+        elif [[ $line =~ ^[[:space:]]*([^[:space:]]+)[[:space:]]+=\>[[:space:]]+not\ found ]]; then
+            problems+=("$name: needs ${BASH_REMATCH[1]}, which isn't on this system")
+            continue
+        elif [[ $line =~ ^[[:space:]]*(/[^[:space:]]+)[[:space:]]\(0x ]]; then
+            library=${BASH_REMATCH[1]} path=${BASH_REMATCH[1]}
+        else
+            continue
+        fi
+        in_system_libraries "$path" || problems+=("$name: loads $library from $path, outside the system's library directories")
+    done < <(env -u LD_LIBRARY_PATH -u LD_PRELOAD -u LD_AUDIT ldd "$file" 2>/dev/null || true)
+}
+
+# What the three built files load, failing with every problem found.
+check_build() {
+    [[ -f $built_module && -f $built_binary && -f $built_pinchecker ]] ||
+        fail "no build in $from; run: just properpin release (it builds in a Fedora container), or pass --from with your own build"
+    check_linkage "$built_module" "$built_module"
+    check_linkage "$built_binary" "$built_binary"
+    check_linkage "$built_pinchecker" "$built_pinchecker"
+    if ((${#problems[@]})); then
+        printf '%s\n' "${problems[@]}" >&2
+        fail "the build in $from doesn't load only the system's libraries; nothing was changed. just properpin release builds it with Fedora's toolchain, in a container"
+    fi
+}
+
 # --- commands
+
+do_check-build() {
+    check_build
+    echo "the build in $from loads only the system's libraries"
+}
 
 do_install() {
     require_root
-    [[ -f $built_module && -f $built_binary && -f $built_pinchecker ]] ||
-        fail "no build in $from; run: cargo build --release -p pam_properpin -p properpin-pinchecker -p properpin-cli"
+    check_build
     [[ ! -L $root$pam_file ]] || fail "$pam_file is a symbolic link; nothing was changed"
     without_properpin
     [[ $pam_state != absent ]] || fail "$pam_file is missing; nothing was changed"
@@ -436,6 +499,12 @@ check_files() {
     expect "$etc" dir 755 "$owner" "$group"
     expect "$users" dir 750 "$owner" "$pinchecker_group"
     expect "$budget_dir" dir 1770 "$owner" "$pinchecker_group"
+    local installed
+    for installed in "$module_path" "$binary" "$pinchecker"; do
+        if [[ -f $root$installed && ! -L $root$installed ]]; then
+            check_linkage "$root$installed" "$installed"
+        fi
+    done
     if [[ -f $built_module ]]; then
         expect_bytes "$module_path" "$built_module"
         expect_bytes "$binary" "$built_binary"

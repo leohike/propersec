@@ -193,6 +193,7 @@ fn run() -> ExitCode {
         ("a killed worker never unlocks and loses no count", a_killed_worker_loses_no_count),
         ("a correct PIN waits out the minimum, and a kill meanwhile unlocks nothing", a_correct_pin_waits_out_the_minimum),
         ("installing again keeps the PIN and the lines", installing_again_keeps_the_pin),
+        ("install refuses a build that loads code from elsewhere", install_refuses_a_build_that_loads_code_from_elsewhere),
         ("uninstall leaves PAM as it was", uninstall_leaves_pam_as_it_was),
     ];
     let mut failed = 0;
@@ -841,6 +842,42 @@ fn installing_again_keeps_the_pin(world: &World) -> Outcome {
     }
     world.pin_refused("2222", "not the PIN, consecutive failure 2 of 3")?;
     world.pin_unlocks()?;
+    install_sh(&["check"]).map(drop)
+}
+
+/// A build whose binaries would load libraries from outside the system's directories, such as from
+/// a Homebrew toolchain's, is refused before install changes anything.
+fn install_refuses_a_build_that_loads_code_from_elsewhere(world: &World) -> Outcome {
+    let kde = fs::read(KDE).map_err(message)?;
+    let pinchecker = fs::read(PINCHECKER).map_err(message)?;
+    let from = Path::new(SCRATCH).join("bad-build");
+    let _ = fs::remove_dir_all(&from);
+    fs::create_dir_all(&from).map_err(message)?;
+    for file in ["libpam_properpin.so", "properpin", "properpin-pinchecker"] {
+        fs::copy(format!("{PRODUCT}/build/{file}"), from.join(file)).map_err(message)?;
+    }
+    fs::copy(format!("{PRODUCT}/pinchecker-with-runpath"), from.join("properpin-pinchecker")).map_err(message)?;
+    fs::write(from.join("libpam_properpin.so"), "this is not a shared library\n").map_err(message)?;
+    let from = from.to_str().ok_or("a scratch path that isn't UTF-8")?;
+    let said = match install_sh_from(from, &["install", "--yes"]) {
+        Err(said) => said,
+        Ok(said) => return Err(format!("install accepted the build:\n{said}")),
+    };
+    for expected in [
+        "properpin-pinchecker: has a library search path of its own, RUNPATH /home/linuxbrew/.linuxbrew/lib",
+        "libpam_properpin.so: not a binary that loads the system's libraries",
+        "nothing was changed",
+    ] {
+        if !said.contains(expected) {
+            return Err(format!("install didn't say {expected:?}:\n{said}"));
+        }
+    }
+    if fs::read(KDE).map_err(message)? != kde || fs::read(PINCHECKER).map_err(message)? != pinchecker {
+        return Err(format!("install refused the build, but changed something:\n{said}"));
+    }
+    install_sh_from(from, &["check-build"]).map_or(Ok(()), |said| Err(format!("check-build accepted the build:\n{said}")))?;
+    world.pin_unlocks()?;
+    install_sh(&["check-build"])?;
     install_sh(&["check"]).map(drop)
 }
 

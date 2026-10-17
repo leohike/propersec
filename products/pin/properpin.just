@@ -5,9 +5,14 @@
 
 # Imported by the root justfile, so recipes run at the workspace root, where Cargo.toml and target/ are.
 
-# Build the properpin command, the setgid pinchecker and pam_properpin.so
+# Build the properpin command, the setgid pinchecker and pam_properpin.so, for development: with this machine's toolchain, into target/debug. What gets installed comes from release
 build:
     cargo build -p properpin-cli -p properpin-pinchecker -p pam_properpin
+
+# The release build of the module, the setgid pinchecker and the command, made with Fedora 44's own toolchain in a podman container whatever this machine has (Homebrew's included), into target/properpin, where install.sh looks by default; then checked to load only the system's libraries, as install checks it again
+release:
+    podman build --ignorefile products/pin/testing/podman/Containerfile.containerignore -f products/pin/packaging/Containerfile -o target/properpin .
+    products/pin/packaging/install.sh check-build --from target/properpin
 
 # Every test: the rules, files and hashing, the CLI, and the PAM stack through the system's libpam
 test *args:

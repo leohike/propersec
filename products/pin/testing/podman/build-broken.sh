@@ -26,9 +26,6 @@ cargo build --release --locked -p brokenpin
 variant module-missing-symbol
 cp "$release/libbrokenpin.so" /out/broken/module-missing-symbol/libpam_properpin.so
 
-variant module-garbage
-echo "this is not a shared library" >/out/broken/module-garbage/libpam_properpin.so
-
 for pinchecker in pinchecker-says-yes pinchecker-sleeps; do
     variant "$pinchecker"
     cp "$release/$pinchecker" "/out/broken/$pinchecker/properpin-pinchecker"
