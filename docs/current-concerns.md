@@ -6,12 +6,11 @@ The first concern listed that day, state in `/var/lib/properpin` that nothing ev
 
 ## The tests can be trusted a little less
 
-- The system test's "no pinchecker left running" looked for the old process name after the rename and checked nothing until it was noticed. Nothing guards against an assertion going silently empty like that again.
-- The property test's model lost its reboot event, and no unit test simulates one.
+- **Checks for absence can pass while checking nothing.** The system test's "no pinchecker left running" scans `/proc/*/stat` for a hardcoded process name, `PINCHECKER_COMM`. After the rename to `properpin-pinchecker` it still said `properpin-helpe`, which matches no process ever, so the check passed vacuously until it was noticed by hand. Any "X must not appear" check has that weakness: when the matcher is wrong it finds nothing, and finding nothing is a pass. The container test has more of them, each relying on a log string being spelled the way the code spells it now: a wrong password logs no "password correct", `sudo`, `su` and `login` log no `pam_properpin` or `properpin-pinchecker`, and after uninstall the PIN attempt logs no `pam_properpin`. The fix: derive the process name from the installed binary's file name, cut to the kernel's 15 bytes, instead of hardcoding it; and give every absence check a positive control, the same matcher shown to find its target once in the same run (start the pinchecker and see it listed; make the lock screen log `pam_properpin` and see it matched), so a matcher gone stale fails instead of passing.
 - The confirmation prompt on a real terminal, `y` and `N`, is untested, in `properpin` and in `install.sh` alike.
 - Mutation testing hasn't been run on the new code.
 
-The fix: a self-check that the process name the system test looks for is the installed binary's, cut to 15 bytes; a run of `just mutants`, working through what survives.
+The fix for the last two: drive the prompts through a pseudo-terminal in the CLI tests; a run of `just mutants`, working through what survives.
 
 ## The PIN-equals-password check is narrow
 
@@ -31,3 +30,7 @@ The fix, deferred: edit the file only when its auth lines are exactly Fedora's s
 ## One badly moded user file turns the PIN off for everyone
 
 `install` now runs the full check before putting properpin's lines back, so a single user file with the wrong mode, say 0644, leaves the lines out for the whole machine until it is fixed. Before, only `check` complained. Refusing is right, since such a file has its hash readable by everyone, but the cost falls on every user, and the message should name the file and the one command that fixes it.
+
+## Considered and dismissed
+
+- **Moving the clock to stretch the budget.** Setting the time takes root or admin authentication; a reboot ends at the LUKS passphrase, and even with TPM unlock at the login screen, where the PIN doesn't apply; a forged NTP answer from the network can only step the clock in chrony's first updates after start, that is after a reboot, and otherwise slews it by at most about 0.08 seconds a second. And the limit of 60 per PIN doesn't depend on time at all, so clock games could at best bring those guesses sooner. So `judge` no longer treats a failure stamped in the future as proof that the clock went back (`CLOCK_SLACK`, removed on 2026-10-17 with its test): after an honest jump back, such failures just wait for the clock to catch up, and the next password unlock may forgive them as the user's own. The property test lost its reboot event when the PIN started working from boot on, since nothing in the code knows about boots any more.

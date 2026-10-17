@@ -25,9 +25,6 @@ use crate::kv::digits;
 
 pub const DAY: u64 = 24 * 3600;
 pub const WEEK: u64 = 7 * DAY;
-/// A failure stamped further than this in the future means the clock went back. It is judged
-/// concerning at once, instead of waiting for the clock to catch up.
-const CLOCK_SLACK: u64 = 60;
 /// The most failures kept waiting for judgement; beyond that, the oldest is judged concerning.
 pub const MAX_PENDING: usize = 50;
 /// The most concerning failures kept, more than any limit may ask for. The total keeps counting.
@@ -120,13 +117,10 @@ impl Budget {
     /// than 7 days, and disable the PIN if a limit is reached. Call it first, every time.
     pub fn judge(&mut self, now: u64, settings: &Settings) -> Judged {
         let wait = settings.forgive_before_correct_pin.max(settings.forgive_before_correct_password);
-        let (due, waiting): (Vec<u64>, Vec<u64>) =
-            self.pending.iter().partition(|&&at| now > at.saturating_add(wait) || at > now.saturating_add(CLOCK_SLACK));
+        let (due, waiting): (Vec<u64>, Vec<u64>) = self.pending.iter().partition(|&&at| now > at.saturating_add(wait));
         self.pending = waiting;
         let newly_concerning = due.len();
         self.add_concerning(&due);
-        // Stamped in the future, they stay until the clock passes them: setting the clock back
-        // doesn't make them go away sooner.
         self.concerning.retain(|&at| at.saturating_add(WEEK) > now);
         let counts = self.counts(now);
         let reached = if counts.day >= settings.max_concerning_24h as usize {
@@ -328,20 +322,6 @@ mod tests {
         assert_eq!(budget.concerning, [T]);
         budget.judge(T + 7 * 24 * 3600, &settings());
         assert_eq!((budget.concerning.len(), budget.total), (0, 1));
-    }
-
-    #[test]
-    fn a_clock_set_back_neither_hides_nor_delays_failures() {
-        let mut budget = Budget::default();
-        budget.record_failure(T);
-        budget.concerning.push(T);
-        // The clock goes back an hour: the pending failure is judged at once, the concerning one stays.
-        let judged = budget.judge(T - 3600, &settings());
-        assert_eq!((judged.newly_concerning, judged.counts.day, judged.counts.week), (1, 2, 2));
-        // A small step back, as NTP may make, just waits.
-        let mut budget = Budget::default();
-        budget.record_failure(T);
-        assert_eq!(budget.judge(T - 30, &settings()).newly_concerning, 0);
     }
 
     #[test]
