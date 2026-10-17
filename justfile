@@ -1,7 +1,6 @@
-# properpin -- a PIN for the KDE lock screen, within limits. Nothing here installs anything on this
-# machine or touches its /etc or /run: every recipe works in target/, a temporary directory, or a
-# podman container. packaging/install.sh is the installer, and no recipe runs it outside a fake root
-# or a container.
+# properpin -- a PIN for the KDE lock screen, within limits. Every recipe works in target/, a
+# temporary directory, or a podman container, and never touches this machine's /etc or /run, except
+# install, check and uninstall: they run packaging/install.sh on this machine, through sudo.
 
 # List the recipes
 [private]
@@ -16,6 +15,24 @@ build:
 release:
     podman build --ignorefile testing/podman/Containerfile.containerignore -f packaging/Containerfile -o target/properpin .
     packaging/install.sh check-build --from target/properpin
+
+# Build the release and install it on this machine, or update an earlier install: install.sh shows the change to /etc/pam.d/kde and asks first, then everything is checked. Installs whatever is checked out, uncommitted edits included. Run as yourself, not with sudo, so podman builds in your own image store
+install: _not-root release
+    @echo "installing properpin $(git describe --always --dirty)"
+    sudo packaging/install.sh install
+    sudo packaging/install.sh check
+
+# Check what is installed on this machine: every file, the group, and properpin's lines in /etc/pam.d/kde
+check: _not-root
+    sudo packaging/install.sh check
+
+# Take properpin out of /etc/pam.d/kde on this machine, then remove its files; keeps /etc/properpin, /var/lib/properpin and the properpin group
+uninstall: _not-root
+    sudo packaging/install.sh uninstall
+
+[private]
+_not-root:
+    @[ "$(id -u)" -ne 0 ] || { echo "run just as yourself, not as root: the recipe uses sudo itself, and podman under sudo would build in root's image store and leave target/ owned by root" >&2; exit 1; }
 
 # Every test: the rules, files and hashing, the CLI, and the PAM stack through the system's libpam
 test *args:

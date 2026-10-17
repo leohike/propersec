@@ -65,7 +65,15 @@ The format is poc-py's `key = value` lines, and the hash is the same `$y$` yescr
 
 ## Installing
 
-`packaging/install.sh` has four commands:
+From a clone, as yourself (not with sudo; the recipes ask for sudo themselves):
+
+```
+just install      # build in podman, then install.sh install and check; run it again to update to what is checked out
+just check        # install.sh check
+just uninstall    # install.sh uninstall
+```
+
+Underneath, `packaging/install.sh` has four commands:
 
 ```
 just release                             # the build, with Fedora 44's toolchain in a podman container, into target/properpin
