@@ -143,24 +143,28 @@ fn install_and_uninstall_leave_pam_as_it_was() {
     assert!(root.ok("check").contains("has the lines this version ships"));
     assert_eq!(fs::read_to_string(root.path("etc/properpin/kde.pam.without-properpin")).unwrap(), STOCK_KDE);
 
-    assert!(root.ok("uninstall").contains("took properpin's lines out"));
-    assert_eq!(fs::read_to_string(root.kde()).unwrap(), STOCK_KDE);
-    for gone in [
+    // The fake root had only etc/pam.d: every directory install had to create goes again, except
+    // those holding what is kept. Each is there now, or its absence afterwards would prove nothing.
+    let installed = [
         "usr/local/lib64/security/pam_properpin.so",
         "usr/local/libexec/properpin",
         "usr/local/bin/properpin",
         "etc/sysusers.d/properpin.conf",
         "etc/tmpfiles.d/properpin.conf",
-    ] {
+        "usr",
+        "etc/sysusers.d",
+        "etc/tmpfiles.d",
+    ];
+    for path in installed {
+        assert!(root.path(path).exists(), "{path} isn't there after install");
+    }
+    assert!(root.ok("uninstall").contains("took properpin's lines out"));
+    assert_eq!(fs::read_to_string(root.kde()).unwrap(), STOCK_KDE);
+    for gone in installed {
         assert!(!root.path(gone).exists(), "{gone} is still there");
     }
     assert!(root.path("etc/properpin/users").is_dir(), "PINs are kept");
     assert!(root.path("var/lib/properpin").is_dir(), "budgets are kept");
-    // The fake root had only etc/pam.d: every directory install had to create goes again, except
-    // those holding what is kept.
-    for gone in ["usr", "run", "etc/sysusers.d", "etc/tmpfiles.d"] {
-        assert!(!root.path(gone).exists(), "{gone} is still there");
-    }
 }
 
 #[test]
@@ -367,6 +371,7 @@ fn uninstall_takes_the_lines_out_first() {
     root.ok("install");
     let edited = format!("{}# added by an admin\n", fs::read_to_string(root.kde()).unwrap());
     fs::write(root.kde(), &edited).unwrap();
+    assert!(root.path("usr/local/lib64/security/pam_properpin.so").exists());
     assert!(root.ok("uninstall").contains("took properpin's lines out"));
     assert_eq!(fs::read_to_string(root.kde()).unwrap(), format!("{STOCK_KDE}# added by an admin\n"), "edits outside the block stay");
     assert!(!root.path("usr/local/lib64/security/pam_properpin.so").exists());

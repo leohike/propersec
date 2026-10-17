@@ -2,15 +2,16 @@
 
 What was still open on 2026-10-17, after the pepper was dropped and `install` became the one command that edits PAM. Most come from `docs/review-of-dropping-the-pepper.md`, which has the details; the last two came out of the install change. Listed most serious first, each with the fix that seems right. The older, longer list is `docs/concerns.md`.
 
-The first concern listed that day, state in `/var/lib/properpin` that nothing ever cleared, was fixed the same day: `set` creates the lock file and the budget and the pinchecker never creates either, so neither can be planted; a write clears the temporary files that killed writes left; a refused attempt writes only what judging changed; and `enable` and `remove` take the lock.
+Fixed the same day: checks for absence that could pass while checking nothing. The container test's "no pinchecker left running" looked for a hardcoded process name that went stale at the rename to `properpin-pinchecker`, so it found nothing, and passed, whatever was running. Its matchers, and those of the checks that another service or an uninstalled system logs nothing of properpin's, are now derived from the installed file names, and each check for absence has a positive control that finds its target in the same run; the PAM stack test's "no housekeeping after a wrong password", which only matched the module's error, now matches the housekeeping's own answers. Breaking each matcher on purpose failed the scenario it guards.
+
+The first concern listed that day, state in `/var/lib/properpin` that nothing ever cleared, was fixed the same day too: `set` creates the lock file and the budget and the pinchecker never creates either, so neither can be planted; a write clears the temporary files that killed writes left; a refused attempt writes only what judging changed; and `enable` and `remove` take the lock.
 
 ## The tests can be trusted a little less
 
-- **Checks for absence can pass while checking nothing.** The system test's "no pinchecker left running" scans `/proc/*/stat` for a hardcoded process name, `PINCHECKER_COMM`. After the rename to `properpin-pinchecker` it still said `properpin-helpe`, which matches no process ever, so the check passed vacuously until it was noticed by hand. Any "X must not appear" check has that weakness: when the matcher is wrong it finds nothing, and finding nothing is a pass. The container test has more of them, each relying on a log string being spelled the way the code spells it now: a wrong password logs no "password correct", `sudo`, `su` and `login` log no `pam_properpin` or `properpin-pinchecker`, and after uninstall the PIN attempt logs no `pam_properpin`. The fix: derive the process name from the installed binary's file name, cut to the kernel's 15 bytes, instead of hardcoding it; and give every absence check a positive control, the same matcher shown to find its target once in the same run (start the pinchecker and see it listed; make the lock screen log `pam_properpin` and see it matched), so a matcher gone stale fails instead of passing.
 - The confirmation prompt on a real terminal, `y` and `N`, is untested, in `properpin` and in `install.sh` alike.
 - Mutation testing hasn't been run on the new code.
 
-The fix for the last two: drive the prompts through a pseudo-terminal in the CLI tests; a run of `just mutants`, working through what survives.
+The fix: drive the prompts through a pseudo-terminal in the CLI tests; a run of `just mutants`, working through what survives.
 
 ## The PIN-equals-password check is narrow
 

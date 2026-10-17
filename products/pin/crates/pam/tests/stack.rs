@@ -208,8 +208,20 @@ fn a_wrong_password_never_unpauses_the_pin() {
         assert!(!sandbox.attempt(Password::Wrong, wrong).unlocked());
     }
     assert!(!sandbox.attempt(Password::Wrong, "a wrong password, long enough").unlocked());
-    assert!(!sandbox.log().contains("housekeeping"), "{}", sandbox.log());
+    // The stack stops at the password line, so the housekeeping never even hears of it: neither
+    // of its answers is logged, nor its failure.
+    let housekeeping = ["password correct", "wrong password, nothing changed", "housekeeping failed"];
+    for line in housekeeping {
+        assert!(!sandbox.log().contains(line), "{line:?}: {}", sandbox.log());
+    }
     assert!(!sandbox.attempt(Password::Wrong, PIN).unlocked());
+    // The positive controls: with a stack whose password line lets anything through, the
+    // housekeeping does hear a wrong password and a right one, and the same matchers find both.
+    sandbox.attempt(Password::Right, "a wrong password, long enough");
+    sandbox.unlock_with_password();
+    for line in &housekeeping[..2] {
+        assert!(sandbox.log().contains(line), "{line:?}: {}", sandbox.log());
+    }
 }
 
 #[test]

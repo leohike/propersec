@@ -79,7 +79,7 @@ const CASES: &[Case] = &[
 ];
 
 fn delete_the_module() -> Outcome {
-    fs::remove_file("/usr/local/lib64/security/pam_properpin.so").map_err(message)
+    fs::remove_file(MODULE).map_err(message)
 }
 
 fn edit_kde(change: impl FnOnce(&str) -> String) -> Outcome {

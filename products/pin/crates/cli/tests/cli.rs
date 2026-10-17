@@ -267,8 +267,11 @@ fn enable_and_set_bring_a_disabled_pin_back() {
     let status = stdout(&sandbox.properpin(&["status"], "").success());
     assert!(status.contains("right now  enabled") && status.contains("0 since the PIN was set"), "{status}");
 
+    let (budget, lock) =
+        (sandbox.0.path().join(format!("var/{}.budget", current_uid())), sandbox.0.path().join(format!("var/{}.lock", current_uid())));
+    assert!(budget.exists() && lock.exists(), "set leaves a budget and a lock file, or their absence below would prove nothing");
     sandbox.properpin(&["remove"], "").success();
-    assert!(!sandbox.0.path().join(format!("var/{}.budget", current_uid())).exists(), "remove leaves no budget behind");
+    assert!(!budget.exists() && !lock.exists(), "remove leaves no budget or lock file behind");
 }
 
 #[test]

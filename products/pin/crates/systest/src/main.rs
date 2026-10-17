@@ -49,6 +49,7 @@ const PASSWORD: &str = "correct horse battery staple";
 const PIN: &str = "4859";
 const KDE: &str = "/etc/pam.d/kde";
 const PINCHECKER: &str = "/usr/local/libexec/properpin/properpin-pinchecker";
+const MODULE: &str = "/usr/local/lib64/security/pam_properpin.so";
 /// The group the pinchecker runs with, created by install.sh.
 const PINCHECKER_GROUP: &str = "properpin";
 /// Where versions with a pepper kept their per-boot state; nothing may be there any more.
@@ -62,11 +63,37 @@ const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(60);
 /// A pinchecker whose attempt was killed finishes on its own: at most a second waiting for the lock,
 /// then a hash or `unix_chkpwd`. Still running after this, it is a bug.
 const PINCHECKER_LINGER: Duration = Duration::from_secs(5);
-/// What the kernel calls the pinchecker: its name cut to 15 bytes.
-const PINCHECKER_COMM: &str = "properpin-pinch";
+/// What the housekeeping logs after a correct password, and never after a wrong one.
+const PASSWORD_CORRECT: &str = "password correct";
 
 type Outcome<T = ()> = Result<T, String>;
 type Scenario = fn(&World) -> Outcome;
+
+// --- what the checks for absence look for. Each is derived from the installed paths, so a rename
+// can't leave one stale, and each is shown to find its target in the same run (see the positive
+// controls below), so a matcher that has gone wrong anyway fails instead of finding nothing and
+// passing.
+
+fn file_name(path: &str) -> &str {
+    path.rsplit('/').next().expect("a path")
+}
+
+/// What the kernel calls the pinchecker: its file name cut to 15 bytes (TASK_COMM_LEN, less the NUL).
+fn pinchecker_comm() -> &'static str {
+    let name = file_name(PINCHECKER);
+    &name[..name.len().min(15)]
+}
+
+/// How every line the pinchecker logs begins: openlog's identity, its file name, and the pid.
+fn pinchecker_log() -> String {
+    format!("{}[", file_name(PINCHECKER))
+}
+
+/// How every line the module logs begins: pam_syslog puts the module's name, its file name without
+/// `.so`, before the service and the call.
+fn module_log() -> String {
+    format!("{}(", file_name(MODULE).trim_end_matches(".so"))
+}
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -128,6 +155,7 @@ fn run() -> ExitCode {
         }
     };
     let scenarios: &[(&str, Scenario)] = &[
+        ("the check for leftover pincheckers sees one running", the_leftover_check_sees_a_running_pinchecker),
         ("the PIN unlocks from the start, with no password first", the_pin_unlocks_from_the_start),
         ("the password unlocks and does the housekeeping", the_password_does_the_housekeeping),
         ("three wrong PINs pause the PIN until the password, on disk", three_wrong_pins_pause_the_pin),
@@ -210,8 +238,10 @@ fn a_wrong_password_never_unpauses_the_pin(world: &World) -> Outcome {
         world.pin_refused(wrong, "not the PIN")?;
     }
     let wrong = world.kde("a wrong password, long enough")?;
-    expect(!wrong.unlocked && !wrong.log.contains("password correct"), "a wrong password unlocked or unpaused the PIN", &wrong)?;
-    world.pin_refused(PIN, "PIN paused after 3 consecutive failures")
+    expect(!wrong.unlocked && !wrong.log.contains(PASSWORD_CORRECT), "a wrong password unlocked or unpaused the PIN", &wrong)?;
+    world.pin_refused(PIN, "PIN paused after 3 consecutive failures")?;
+    // The positive control: the right password does log what the wrong one mustn't.
+    world.unlock_with_password()
 }
 
 /// `set` compares the PIN with alice's hash in the real /etc/shadow, as root, so it never asks for
@@ -253,11 +283,12 @@ fn a_password_change_leaves_the_pin_working(world: &World) -> Outcome {
 
 /// Every other service on the system checks only the password, and never even loads the module.
 fn the_pin_works_at_the_lock_screen_only(world: &World) -> Outcome {
+    world.module_and_pinchecker_log()?;
     for service in ["sudo", "su", "login", "system-auth", "password-auth", "passwd", "other"] {
         let pin = world.attempt(service, PIN)?;
         expect(!pin.unlocked, &format!("the PIN unlocked {service}"), &pin)?;
-        expect(!pin.log.contains("pam_properpin"), &format!("{service} loaded pam_properpin"), &pin)?;
-        expect(!pin.log.contains("properpin-pinchecker"), &format!("{service} ran the pinchecker"), &pin)?;
+        expect(!pin.log.contains(&module_log()), &format!("{service} loaded the module"), &pin)?;
+        expect(!pin.log.contains(&pinchecker_log()), &format!("{service} ran the pinchecker"), &pin)?;
     }
     for service in ["sudo", "su", "login"] {
         let password = world.attempt(service, PASSWORD)?;
@@ -786,22 +817,28 @@ fn installing_again_keeps_the_pin(world: &World) -> Outcome {
 
 fn uninstall_leaves_pam_as_it_was(world: &World) -> Outcome {
     world.pin_unlocks()?;
+    let installed = [
+        MODULE,
+        "/usr/local/libexec/properpin",
+        "/usr/local/bin/properpin",
+        "/etc/sysusers.d/properpin.conf",
+        "/etc/tmpfiles.d/properpin.conf",
+    ];
+    // The positive controls: what must be gone afterwards is there now, and logs as it should.
+    if let Some(missing) = installed.iter().find(|path| !Path::new(path).exists()) {
+        return Err(format!("{missing} isn't there before uninstall, so its absence afterwards would prove nothing"));
+    }
+    world.module_and_pinchecker_log()?;
     install_sh(&["uninstall", "--yes"])?;
     let kde = fs::read_to_string(KDE).map_err(message)?;
     if kde != world.stock_kde {
         return Err(format!("{KDE} after uninstall differs from before install:\n{kde}"));
     }
     let pin = world.kde(PIN)?;
-    expect(!pin.unlocked && !pin.log.contains("pam_properpin"), "the PIN still works after uninstall", &pin)?;
+    let properpin_ran = pin.log.contains(&module_log()) || pin.log.contains(&pinchecker_log());
+    expect(!pin.unlocked && !properpin_ran, "the PIN still works after uninstall", &pin)?;
     world.password_unlocks()?;
-    for gone in [
-        "/usr/local/lib64/security/pam_properpin.so",
-        "/usr/local/libexec/properpin",
-        "/usr/local/bin/properpin",
-        "/etc/sysusers.d/properpin.conf",
-        "/etc/tmpfiles.d/properpin.conf",
-        OLD_RUN_DIR,
-    ] {
+    for gone in installed.iter().chain(&[OLD_RUN_DIR]) {
         if Path::new(gone).exists() {
             return Err(format!("{gone} is still there after uninstall"));
         }
@@ -1074,7 +1111,7 @@ impl World {
     fn unlock_with_password(&self) -> Outcome {
         let attempt = self.kde(PASSWORD)?;
         expect(
-            attempt.unlocked && attempt.log.contains("password correct, PIN enabled"),
+            attempt.unlocked && attempt.log.contains(&format!("{PASSWORD_CORRECT}, PIN enabled")),
             "the password didn't do the housekeeping",
             &attempt,
         )
@@ -1093,6 +1130,20 @@ impl World {
     fn pin_refused(&self, typed: &str, why: &str) -> Outcome {
         let attempt = self.kde(typed)?;
         expect(!attempt.unlocked && attempt.log.contains(why), &format!("{typed} wasn't refused with {why:?}"), &attempt)
+    }
+
+    /// The positive control for the checks that something logs nothing of properpin's: an attempt
+    /// at the lock screen that both the module and the pinchecker log, found with the same
+    /// matchers. A setting the pinchecker doesn't know makes it log why it can't answer, and the
+    /// module then logs that the PIN was refused.
+    fn module_and_pinchecker_log(&self) -> Outcome {
+        write_file(&self.config(), "no_such_setting = 1\n", 0, 0, 0o644)?;
+        let attempt = self.kde(PIN);
+        fs::remove_file(self.config()).map_err(message)?;
+        let attempt = attempt?;
+        let (module, pinchecker) = (module_log(), pinchecker_log());
+        let found = attempt.log.contains(&module) && attempt.log.contains(&pinchecker);
+        expect(!attempt.unlocked && found, &format!("{module:?} and {pinchecker:?} didn't both find a line"), &attempt)
     }
 
     /// Something is wrong with the files: the PIN is refused for `why`, the password still works.
@@ -1187,6 +1238,39 @@ fn expect_code(output: &std::process::Output, code: u8, what: &str) -> Outcome {
 
 /// No pinchecker is still running, within the time one whose attempt was killed takes to finish.
 /// Exited pincheckers nobody has reaped yet don't count.
+/// The positive control for [`no_pinchecker_left`], which runs after every scenario: it does find
+/// a pinchecker that is still running, here one waiting for its input. When the name it looks for
+/// went stale after a rename, it found nothing, and so passed, whatever was running.
+fn the_leftover_check_sees_a_running_pinchecker(world: &World) -> Outcome {
+    let mut waiting = Command::new(PINCHECKER)
+        .arg("check")
+        .uid(world.user.uid)
+        .gid(world.user.gid)
+        .env_clear()
+        .current_dir("/")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(message)?;
+    let deadline = Instant::now() + PINCHECKER_LINGER;
+    let seen = loop {
+        match running_pincheckers() {
+            Ok(running) if running.contains(&waiting.id()) => break Ok(true),
+            Ok(_) if Instant::now() > deadline => break Ok(false),
+            Ok(_) => thread::sleep(Duration::from_millis(10)),
+            Err(error) => break Err(error),
+        }
+    };
+    // End of input: an empty one, which it refuses at once.
+    drop(waiting.stdin.take());
+    waiting.wait().map_err(message)?;
+    match seen? {
+        true => Ok(()),
+        false => Err(format!("no process named {:?} found while a pinchecker was running", pinchecker_comm())),
+    }
+}
+
 fn no_pinchecker_left() -> Outcome {
     let deadline = Instant::now() + PINCHECKER_LINGER;
     loop {
@@ -1209,7 +1293,7 @@ fn running_pincheckers() -> Outcome<Vec<u32>> {
         let Ok(stat) = fs::read_to_string(format!("/proc/{pid}/stat")) else { continue };
         let (Some(open), Some(close)) = (stat.find('('), stat.rfind(") ")) else { continue };
         let state = stat[close + 2..].chars().next();
-        if &stat[open + 1..close] == PINCHECKER_COMM && state != Some('Z') {
+        if &stat[open + 1..close] == pinchecker_comm() && state != Some('Z') {
             running.push(pid);
         }
     }
