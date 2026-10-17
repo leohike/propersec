@@ -822,7 +822,17 @@ fn a_killed_worker_loses_no_count(world: &World) -> Outcome {
 fn installing_again_keeps_the_pin(world: &World) -> Outcome {
     let kde = fs::read_to_string(KDE).map_err(message)?;
     world.pin_refused("1111", "not the PIN, consecutive failure 1 of 3")?;
+    // What a version before the pinchecker's rename left: a setgid helper nothing uses any more.
+    let stale = "/usr/local/libexec/properpin/properpin-helper";
+    fs::copy(PINCHECKER, stale).map_err(message)?;
+    match install_sh(&["check"]) {
+        Err(said) if said.contains(&format!("{stale}: not installed by this version")) => {}
+        other => return Err(format!("check accepted {stale}: {other:?}")),
+    }
     let said = install_sh(&["install", "--yes"])?;
+    if Path::new(stale).exists() {
+        return Err(format!("install again left {stale}"));
+    }
     if !said.contains("already has the lines this version ships") || fs::read_to_string(KDE).map_err(message)? != kde {
         return Err(format!("install again changed {KDE}:\n{said}"));
     }

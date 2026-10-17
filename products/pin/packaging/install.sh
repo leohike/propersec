@@ -338,6 +338,9 @@ do_install() {
     tmpfiles_conf | put "$tmpfiles" 0644
     ensure_group
     own_dir "$libexec"
+    # properpin's alone, so emptied: whatever an older version left there goes, such as the setgid
+    # properpin-helper of versions before the pinchecker's rename.
+    find "$root$libexec" -mindepth 1 -delete
     own_dir "$etc"
     # Added to what an earlier install noted, never replacing it.
     if ((${#created_now[@]})); then
@@ -419,6 +422,12 @@ check_files() {
     fi
     expect "$module_path" file 755 "$owner" "$group"
     expect "$libexec" dir 755 "$owner" "$group"
+    if [[ -d $root$libexec && ! -L $root$libexec ]]; then
+        local extra
+        while IFS= read -r -d '' extra; do
+            problems+=("$libexec/$extra: not installed by this version; install again, which removes it")
+        done < <(find "$root$libexec" -mindepth 1 -maxdepth 1 ! -name "$(basename "$binary")" ! -name "$(basename "$pinchecker")" -printf '%f\0')
+    fi
     expect "$binary" file 755 "$owner" "$group"
     expect "$pinchecker" file 2755 "$owner" "$pinchecker_group"
     expect "$command_path" file 755 "$owner" "$group"
