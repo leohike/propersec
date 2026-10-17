@@ -140,6 +140,16 @@ impl Settings {
         }
         problems
     }
+
+    /// The rules [`pin_problems`](Self::pin_problems) holds a PIN to, said before it is typed.
+    pub fn pin_rules(&self) -> String {
+        let length = format!("{} to {MAX_PIN_CHARS} characters", self.min_pin_length);
+        match self.required_non_digits_count {
+            0 => length,
+            1 => format!("{length}, at least one of them not a digit"),
+            count => format!("{length}, at least {count} of them not digits"),
+        }
+    }
 }
 
 /// `raw` as a `T` within `min..=max`.
@@ -256,6 +266,15 @@ mod tests {
         assert_eq!(Settings::default().pin_problems("12ab"), ["at least 3 characters that aren't digits"]);
         let numeric = Settings { required_non_digits_count: 0, ..Settings::default() };
         assert!(numeric.pin_problems("4859").is_empty());
+    }
+
+    #[test]
+    fn the_rules_name_what_pin_problems_checks() {
+        assert_eq!(Settings::default().pin_rules(), "4 to 64 characters, at least 3 of them not digits");
+        let one = Settings { required_non_digits_count: 1, ..Settings::default() };
+        assert_eq!(one.pin_rules(), "4 to 64 characters, at least one of them not a digit");
+        let numeric = Settings { min_pin_length: 6, required_non_digits_count: 0, ..Settings::default() };
+        assert_eq!(numeric.pin_rules(), "6 to 64 characters");
     }
 
     #[test]

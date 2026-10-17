@@ -370,7 +370,7 @@ check_build() {
 
 do_check-build() {
     check_build
-    echo "the build in $from loads only the system's libraries"
+    echo "build OK, as expected: everything in $from loads only system libraries, from directories only root can change, so no one else can slip code into the pinchecker or the lock screen"
 }
 
 do_install() {

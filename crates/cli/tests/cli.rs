@@ -158,6 +158,17 @@ fn set_refuses_mismatches_and_weak_pins() {
     assert!(sandbox.user_files().is_empty());
 }
 
+/// The rules are said before the PIN is typed, and a PIN that breaks them is refused at once,
+/// without asking for it a second time.
+#[test]
+fn set_says_the_rules_first_and_refuses_a_weak_pin_at_once() {
+    let sandbox = Sandbox::new();
+    let asked = sandbox.properpin(&["set"], "4859\n").failure();
+    says(&asked, "4 to 64 characters, at least 3 of them not digits");
+    says(&asked, "the PIN needs at least 3 characters that aren't digits; nothing was changed");
+    assert!(sandbox.user_files().is_empty());
+}
+
 #[test]
 fn the_pin_may_not_be_the_password() {
     let sandbox = Sandbox::new();

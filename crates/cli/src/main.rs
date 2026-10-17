@@ -40,7 +40,7 @@ use std::process::{Command, ExitCode, Stdio};
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Parser, Subcommand};
-use properpin_core::{Budget, Clock, Hasher, MAX_PIN_BYTES, MAX_PIN_CHARS, Secret, Store, exit};
+use properpin_core::{Budget, Clock, Hasher, MAX_PIN_BYTES, Secret, Settings, Store, exit};
 use properpin_sys::{Account, AllUsers, SystemClock, UserFiles, Yescrypt, current_euid, current_uid, group_by_name, shadow_hash};
 
 mod doctor;
@@ -181,12 +181,8 @@ fn set(cli: &Cli, account: &Account, yes: bool) -> Result<()> {
     let files = files(cli, account)?;
     let settings = files.settings().map_err(see_doctor)?;
     let mut input = stdin().lock();
-    let pin = ask_pin_twice(&mut input)?;
+    let pin = ask_pin_twice(&mut input, &settings)?;
     let pin = std::str::from_utf8(pin.as_bytes()).context("the PIN is not valid UTF-8")?;
-    let problems = settings.pin_problems(pin);
-    if !problems.is_empty() {
-        bail!("the PIN needs {}", problems.join(", "));
-    }
     match shadow_hash(&cli.shadow, &account.name)? {
         None => {
             eprintln!("Warning: {} has no entry in {}, so the PIN wasn't compared with the password.", account.name, cli.shadow.display())
@@ -400,10 +396,16 @@ fn confirm(input: &mut impl BufRead, yes: bool, warning: &str) -> Result<()> {
     Ok(())
 }
 
-/// The new PIN, typed twice. Both entries are wiped when dropped.
-fn ask_pin_twice(input: &mut impl BufRead) -> Result<Secret> {
-    let prompt = format!("Up to {MAX_PIN_CHARS} characters; it should differ from all your account passwords.\nChoose a PIN: ");
-    let first = ask_secret(input, &prompt, MAX_PIN_BYTES)?;
+/// The new PIN, typed twice, after saying the rules it must meet, and refused at the first entry
+/// when it doesn't meet them. Both entries are wiped when dropped.
+fn ask_pin_twice(input: &mut impl BufRead, settings: &Settings) -> Result<Secret> {
+    eprintln!("The PIN: {}, and different from all your account passwords.", settings.pin_rules());
+    let first = ask_secret(input, "Choose a PIN: ", MAX_PIN_BYTES)?;
+    let text = std::str::from_utf8(first.as_bytes()).context("the PIN is not valid UTF-8; nothing was changed")?;
+    let problems = settings.pin_problems(text);
+    if !problems.is_empty() {
+        bail!("the PIN needs {}; nothing was changed", problems.join(", "));
+    }
     let second = ask_secret(input, "Same again: ", MAX_PIN_BYTES)?;
     if first.as_bytes() != second.as_bytes() {
         bail!("the two entries differ; nothing was changed");
