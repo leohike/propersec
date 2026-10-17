@@ -6,7 +6,7 @@
 //! checked, so nothing is recorded. A failure is forgiven when the correct PIN follows within
 //! `forgive_before_correct_pin` seconds, or the correct password within
 //! `forgive_before_correct_password`: that was the user, mistyping. A failure nothing forgave in
-//! time is *concerning*. Too many concerning failures within 24 hours, within 7 days, or since the
+//! time is *suspicious*. Too many suspicious failures within 24 hours, within 7 days, or since the
 //! PIN was set, and the PIN is disabled until root turns it back on (`properpin enable`) or sets a
 //! new one.
 //!
@@ -15,7 +15,7 @@
 //! forgive the guesses, so each one counts.
 //!
 //! Times are wall-clock seconds, the only clock that survives a reboot. Whoever can set it (root,
-//! or the firmware) could age concerning failures out of the 24-hour and 7-day windows, but never
+//! or the firmware) could age suspicious failures out of the 24-hour and 7-day windows, but never
 //! out of the total.
 
 use std::fmt;
@@ -25,10 +25,10 @@ use crate::kv::digits;
 
 pub const DAY: u64 = 24 * 3600;
 pub const WEEK: u64 = 7 * DAY;
-/// The most failures kept waiting for judgement; beyond that, the oldest is judged concerning.
+/// The most failures kept waiting for judgement; beyond that, the oldest is judged suspicious.
 pub const MAX_PENDING: usize = 50;
-/// The most concerning failures kept, more than any limit may ask for. The total keeps counting.
-pub const MAX_CONCERNING: usize = 200;
+/// The most suspicious failures kept, more than any limit may ask for. The total keeps counting.
+pub const MAX_SUSPICIOUS: usize = 200;
 
 /// Which limit disabled the PIN, with the number it was set to at the time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,9 +41,9 @@ pub enum Limit {
 impl fmt::Display for Limit {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Day(count) => write!(f, "{count} concerning failures within 24 hours"),
-            Self::Week(count) => write!(f, "{count} concerning failures within 7 days"),
-            Self::Total(count) => write!(f, "{count} concerning failures since the PIN was set"),
+            Self::Day(count) => write!(f, "{count} suspicious failures within 24 hours"),
+            Self::Week(count) => write!(f, "{count} suspicious failures within 7 days"),
+            Self::Total(count) => write!(f, "{count} suspicious failures since the PIN was set"),
         }
     }
 }
@@ -64,19 +64,19 @@ pub struct Budget {
     pub consecutive: u32,
     /// Failures not yet forgiven or judged, oldest first.
     pub pending: Vec<u64>,
-    /// Concerning failures of the last 7 days, oldest first.
-    pub concerning: Vec<u64>,
-    /// Concerning failures since the PIN was set. Never goes down; only `set` starts it over.
+    /// Suspicious failures of the last 7 days, oldest first.
+    pub suspicious: Vec<u64>,
+    /// Suspicious failures since the PIN was set. Never goes down; only `set` starts it over.
     pub total: u64,
     pub disabled: Option<Disabled>,
-    /// When the PIN was set; `None` in a budget written before this was recorded.
-    pub set: Option<u64>,
-    /// When the PIN last became enabled or paused, for `properpin status`; `None` in a budget
-    /// written before this was recorded. Disabled has its own time, in [`Disabled::at`].
-    pub since: Option<u64>,
+    /// When the PIN was set.
+    pub set: u64,
+    /// When the PIN last became enabled or paused, for `properpin status`. Disabled has its own
+    /// time, in [`Disabled::at`].
+    pub since: u64,
 }
 
-/// How many concerning failures there are, as of one moment.
+/// How many suspicious failures there are, as of one moment.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Counts {
     pub day: usize,
@@ -89,8 +89,8 @@ pub struct Counts {
 /// What [`Budget::judge`] found.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Judged {
-    /// Failures that became concerning just now.
-    pub newly_concerning: usize,
+    /// Failures that became suspicious just now.
+    pub newly_suspicious: usize,
     pub counts: Counts,
     /// Whether the PIN is disabled, now or from before.
     pub disabled: Option<Limit>,
@@ -102,12 +102,12 @@ impl Judged {
     /// Lines for the log, if anything changed.
     pub fn notes(&self) -> Vec<String> {
         let mut notes = Vec::new();
-        if self.newly_concerning > 0 {
+        if self.newly_suspicious > 0 {
             let Counts { day, week, total, .. } = self.counts;
             notes.push(format!(
-                "{} failure(s) not followed by an unlock in time, now concerning: {day} within 24 hours, {week} within 7 days, \
+                "{} failure(s) not followed by an unlock in time, now suspicious: {day} within 24 hours, {week} within 7 days, \
                  {total} since the PIN was set",
-                self.newly_concerning
+                self.newly_suspicious
             ));
         }
         if let (true, Some(limit)) = (self.disabled_now, self.disabled) {
@@ -118,22 +118,22 @@ impl Judged {
 }
 
 impl Budget {
-    /// Judge the failures waiting longer than either window allows, drop concerning failures older
+    /// Judge the failures waiting longer than either window allows, drop suspicious failures older
     /// than 7 days, and disable the PIN if a limit is reached. Call it first, every time.
     pub fn judge(&mut self, now: u64, settings: &Settings) -> Judged {
         let wait = settings.forgive_before_correct_pin.max(settings.forgive_before_correct_password);
         let (due, waiting): (Vec<u64>, Vec<u64>) = self.pending.iter().partition(|&&at| now > at.saturating_add(wait));
         self.pending = waiting;
-        let newly_concerning = due.len();
-        self.add_concerning(&due);
-        self.concerning.retain(|&at| at.saturating_add(WEEK) > now);
+        let newly_suspicious = due.len();
+        self.add_suspicious(&due);
+        self.suspicious.retain(|&at| at.saturating_add(WEEK) > now);
         let counts = self.counts(now);
-        let reached = if counts.day >= settings.max_concerning_24h as usize {
-            Some(Limit::Day(settings.max_concerning_24h))
-        } else if counts.week >= settings.max_concerning_7d as usize {
-            Some(Limit::Week(settings.max_concerning_7d))
-        } else if counts.total >= settings.max_concerning_total {
-            Some(Limit::Total(settings.max_concerning_total))
+        let reached = if counts.day >= settings.max_suspicious_24h as usize {
+            Some(Limit::Day(settings.max_suspicious_24h))
+        } else if counts.week >= settings.max_suspicious_7d as usize {
+            Some(Limit::Week(settings.max_suspicious_7d))
+        } else if counts.total >= settings.max_suspicious_total {
+            Some(Limit::Total(settings.max_suspicious_total))
         } else {
             None
         };
@@ -141,11 +141,11 @@ impl Budget {
         if let (true, Some(limit)) = (disabled_now, reached) {
             self.disabled = Some(Disabled { limit, at: now });
         }
-        Judged { newly_concerning, counts, disabled: self.disabled.map(|disabled| disabled.limit), disabled_now }
+        Judged { newly_suspicious, counts, disabled: self.disabled.map(|disabled| disabled.limit), disabled_now }
     }
 
     pub fn counts(&self, now: u64) -> Counts {
-        let within = |span: u64| self.concerning.iter().filter(|&&at| at.saturating_add(span) > now).count();
+        let within = |span: u64| self.suspicious.iter().filter(|&&at| at.saturating_add(span) > now).count();
         Counts { day: within(DAY), week: within(WEEK), total: self.total, pending: self.pending.len() }
     }
 
@@ -155,7 +155,7 @@ impl Budget {
         self.pending.sort_unstable();
         if self.pending.len() > MAX_PENDING {
             let oldest = self.pending.remove(0);
-            self.add_concerning(&[oldest]);
+            self.add_suspicious(&[oldest]);
         }
     }
 
@@ -174,40 +174,34 @@ impl Budget {
 
     /// The budget of a PIN set at `now`: enabled, with nothing counted.
     pub fn fresh(now: u64) -> Self {
-        Self { set: Some(now), since: Some(now), ..Self::default() }
+        Self { set: now, since: now, ..Self::default() }
     }
 
     /// What `properpin enable` leaves behind at `now`: not disabled or paused, nothing pending or
-    /// concerning, and the total kept, so the lifetime limit still holds for this PIN.
+    /// suspicious, and the total kept, so the lifetime limit still holds for this PIN.
     pub fn enabled(&self, now: u64) -> Self {
-        Self { total: self.total, set: self.set, since: Some(now), ..Self::default() }
+        Self { total: self.total, set: self.set, since: now, ..Self::default() }
     }
 
-    fn add_concerning(&mut self, failures: &[u64]) {
-        self.concerning.extend_from_slice(failures);
-        self.concerning.sort_unstable();
-        let excess = self.concerning.len().saturating_sub(MAX_CONCERNING);
-        self.concerning.drain(..excess);
+    fn add_suspicious(&mut self, failures: &[u64]) {
+        self.suspicious.extend_from_slice(failures);
+        self.suspicious.sort_unstable();
+        let excess = self.suspicious.len().saturating_sub(MAX_SUSPICIOUS);
+        self.suspicious.drain(..excess);
         self.total = self.total.saturating_add(failures.len() as u64);
     }
 
     /// The budget in `text`, or `None` unless it parses exactly. A damaged budget is an error for
-    /// the caller: reading it as empty would hand out a fresh one. A budget written before `set`
-    /// and `since` were recorded has exactly the other five keys, and reads as both unknown.
+    /// the caller: reading it as empty would hand out a fresh one.
     pub fn parse(text: &str) -> Option<Self> {
         let pairs = crate::kv::parse(text, "budget").ok()?;
         let get = |key: &str| pairs.iter().find(|(name, _)| name == key).map(|(_, value)| value.as_str());
-        let time = |key: &str| match get(key)? {
-            "unknown" => Some(None),
-            at => digits(at).map(Some),
-        };
-        let (set, since) = match pairs.len() {
-            5 if get("set").is_none() && get("since").is_none() => (None, None),
-            7 => (time("set")?, time("since")?),
-            _ => return None,
-        };
+        if pairs.len() != 7 {
+            return None;
+        }
+        let (set, since) = (digits(get("set")?)?, digits(get("since")?)?);
         let pending = times(get("pending")?, MAX_PENDING)?;
-        let concerning = times(get("concerning")?, MAX_CONCERNING)?;
+        let suspicious = times(get("suspicious")?, MAX_SUSPICIOUS)?;
         let disabled = match get("disabled")?.split(' ').collect::<Vec<_>>()[..] {
             ["no"] => None,
             [kind, count, at] => {
@@ -221,7 +215,7 @@ impl Budget {
             }
             _ => return None,
         };
-        Some(Self { consecutive: digits(get("consecutive")?)?, pending, concerning, total: digits(get("total")?)?, disabled, set, since })
+        Some(Self { consecutive: digits(get("consecutive")?)?, pending, suspicious, total: digits(get("total")?)?, disabled, set, since })
     }
 
     pub fn format(&self) -> String {
@@ -235,15 +229,14 @@ impl Budget {
             Some(Disabled { limit: Limit::Week(count), at }) => format!("week {count} {at}"),
             Some(Disabled { limit: Limit::Total(count), at }) => format!("total {count} {at}"),
         };
-        let time = |at: Option<u64>| at.map_or_else(|| "unknown".to_owned(), |at| at.to_string());
         format!(
-            "consecutive = {}\npending = {}\nconcerning = {}\ntotal = {}\ndisabled = {disabled}\nset = {}\nsince = {}\n",
+            "consecutive = {}\npending = {}\nsuspicious = {}\ntotal = {}\ndisabled = {disabled}\nset = {}\nsince = {}\n",
             self.consecutive,
             list(&self.pending),
-            list(&self.concerning),
+            list(&self.suspicious),
             self.total,
-            time(self.set),
-            time(self.since)
+            self.set,
+            self.since
         )
     }
 }
@@ -285,25 +278,25 @@ mod tests {
         let mut budget = Budget::default();
         budget.record_failure(T);
         // At 90 seconds the failure still waits: the password could still forgive it.
-        assert_eq!(budget.judge(T + 90, &settings()).newly_concerning, 0);
+        assert_eq!(budget.judge(T + 90, &settings()).newly_suspicious, 0);
         assert_eq!(budget.forgive(T + 90, 90), 1);
         budget.record_failure(T);
-        assert_eq!(budget.judge(T + 91, &settings()).newly_concerning, 1);
-        assert_eq!((budget.total, budget.concerning.as_slice()), (1, &[T][..]));
+        assert_eq!(budget.judge(T + 91, &settings()).newly_suspicious, 1);
+        assert_eq!((budget.total, budget.suspicious.as_slice()), (1, &[T][..]));
     }
 
     #[test]
-    fn a_correct_pin_too_late_leaves_the_failure_to_become_concerning() {
+    fn a_correct_pin_too_late_leaves_the_failure_to_become_suspicious() {
         let mut budget = Budget::default();
         budget.record_failure(T);
         budget.judge(T + 60, &settings());
         assert_eq!(budget.forgive(T + 60, 45), 0);
-        assert_eq!(budget.judge(T + 120, &settings()).newly_concerning, 1);
+        assert_eq!(budget.judge(T + 120, &settings()).newly_suspicious, 1);
     }
 
     #[test]
     fn each_limit_disables_and_stays_disabled() {
-        let day = Settings::default().max_concerning_24h as u64;
+        let day = Settings::default().max_suspicious_24h as u64;
         let mut budget = Budget::default();
         for i in 0..day {
             budget.record_failure(T + i * 100);
@@ -334,14 +327,14 @@ mod tests {
     }
 
     #[test]
-    fn a_concerning_failure_counts_for_24_hours_and_is_kept_for_7_days() {
-        let mut budget = Budget { concerning: vec![T], total: 1, ..Budget::default() };
+    fn a_suspicious_failure_counts_for_24_hours_and_is_kept_for_7_days() {
+        let mut budget = Budget { suspicious: vec![T], total: 1, ..Budget::default() };
         assert_eq!(budget.counts(T + 23 * 3600).day, 1);
         assert_eq!(budget.counts(T + 24 * 3600).day, 0);
         budget.judge(T + 7 * 24 * 3600 - 1, &settings());
-        assert_eq!(budget.concerning, [T]);
+        assert_eq!(budget.suspicious, [T]);
         budget.judge(T + 7 * 24 * 3600, &settings());
-        assert_eq!((budget.concerning.len(), budget.total), (0, 1));
+        assert_eq!((budget.suspicious.len(), budget.total), (0, 1));
     }
 
     #[test]
@@ -354,9 +347,9 @@ mod tests {
         assert!(budget.format().len() < crate::MAX_FILE_BYTES);
         let mut budget = Budget::default();
         for i in 0..1000 {
-            budget.add_concerning(&[T + i]);
+            budget.add_suspicious(&[T + i]);
         }
-        assert_eq!((budget.concerning.len(), budget.total), (MAX_CONCERNING, 1000));
+        assert_eq!((budget.suspicious.len(), budget.total), (MAX_SUSPICIOUS, 1000));
     }
 
     #[test]
@@ -364,13 +357,13 @@ mod tests {
         let budget = Budget {
             consecutive: 3,
             pending: vec![T],
-            concerning: vec![T],
+            suspicious: vec![T],
             total: 12,
             disabled: Some(Disabled { limit: Limit::Day(10), at: T }),
-            set: Some(T - 100),
-            since: Some(T - 50),
+            set: T - 100,
+            since: T - 50,
         };
-        assert_eq!(budget.enabled(T + 1), Budget { total: 12, set: Some(T - 100), since: Some(T + 1), ..Budget::default() });
+        assert_eq!(budget.enabled(T + 1), Budget { total: 12, set: T - 100, since: T + 1, ..Budget::default() });
     }
 
     #[test]
@@ -378,11 +371,11 @@ mod tests {
         let budget = Budget {
             consecutive: 2,
             pending: vec![T, T + 1],
-            concerning: vec![T - 5],
+            suspicious: vec![T - 5],
             total: 7,
             disabled: Some(Disabled { limit: Limit::Week(25), at: T }),
-            set: Some(T - 9),
-            since: Some(T - 3),
+            set: T - 9,
+            since: T - 3,
         };
         assert_eq!(Budget::parse(&budget.format()), Some(budget));
         assert_eq!(Budget::parse(&Budget::default().format()), Some(Budget::default()));
@@ -391,33 +384,25 @@ mod tests {
             let disabled = Budget { disabled: Some(Disabled { limit, at: T }), ..Budget::default() };
             assert_eq!(Budget::parse(&disabled.format()), Some(disabled));
         }
-        // Written before set and since were recorded: both unknown, and written back with them.
-        let older = "consecutive = 0\npending = none\nconcerning = none\ntotal = 0\ndisabled = no\n";
-        assert_eq!(Budget::parse(older), Some(Budget::default()));
-        let valid = format!("{older}set = {T}\nsince = unknown\n");
-        assert_eq!(Budget::parse(&valid), Some(Budget { set: Some(T), ..Budget::default() }));
-        for text in [
-            &format!("{older}set = {T}\n"),
-            &format!("{older}since = {T}\n"),
-            &format!("{older}set = {T}\nsince = -1\n"),
-            &format!("{older}set = never\nsince = {T}\n"),
-            &format!("{older}set = {T}\nextra = {T}\n"),
-            "consecutive = 0\npending = none\nconcerning = none\ntotal = 0\nset = 1\n",
-        ] {
-            assert_eq!(Budget::parse(text), None, "{text:?}");
-        }
+        let valid = "consecutive = 0\npending = none\nsuspicious = none\ntotal = 0\ndisabled = no\nset = 1\nsince = 2\n";
+        assert_eq!(Budget::parse(valid), Some(Budget { set: 1, since: 2, ..Budget::default() }));
         for text in [
             "",
-            "pending = none\nconcerning = none\ntotal = 0\ndisabled = no\n",
-            "consecutive = -1\npending = none\nconcerning = none\ntotal = 0\ndisabled = no\n",
-            "consecutive = 0\npending = none\nconcerning = none\ntotal = 0\n",
-            "consecutive = 0\npending = none\nconcerning = none\ntotal = 0\ndisabled = no\nextra = 1\n",
-            "consecutive = 0\npending = 2 1\nconcerning = none\ntotal = 0\ndisabled = no\n",
-            "consecutive = 0\npending = 1  2\nconcerning = none\ntotal = 0\ndisabled = no\n",
-            "consecutive = 0\npending = none\nconcerning = -1\ntotal = 0\ndisabled = no\n",
-            "consecutive = 0\npending = none\nconcerning = none\ntotal = x\ndisabled = no\n",
-            "consecutive = 0\npending = none\nconcerning = none\ntotal = 0\ndisabled = yes\n",
-            "consecutive = 0\npending = none\nconcerning = none\ntotal = 0\ndisabled = month 1 2\n",
+            // Older budgets, without set and since.
+            "consecutive = 0\npending = none\nsuspicious = none\ntotal = 0\ndisabled = no\n",
+            "consecutive = 0\npending = none\nsuspicious = none\ntotal = 0\ndisabled = no\nset = unknown\nsince = 2\n",
+            "consecutive = 0\npending = none\nsuspicious = none\ntotal = 0\ndisabled = no\nset = 1\nsince = -1\n",
+            "consecutive = 0\npending = none\nsuspicious = none\ntotal = 0\ndisabled = no\nset = 1\n",
+            "pending = none\nsuspicious = none\ntotal = 0\ndisabled = no\nset = 1\nsince = 2\n",
+            "consecutive = -1\npending = none\nsuspicious = none\ntotal = 0\ndisabled = no\nset = 1\nsince = 2\n",
+            "consecutive = 0\npending = none\nsuspicious = none\ntotal = 0\nset = 1\nsince = 2\n",
+            "consecutive = 0\npending = none\nsuspicious = none\ntotal = 0\ndisabled = no\nextra = 1\nset = 1\nsince = 2\n",
+            "consecutive = 0\npending = 2 1\nsuspicious = none\ntotal = 0\ndisabled = no\nset = 1\nsince = 2\n",
+            "consecutive = 0\npending = 1  2\nsuspicious = none\ntotal = 0\ndisabled = no\nset = 1\nsince = 2\n",
+            "consecutive = 0\npending = none\nsuspicious = -1\ntotal = 0\ndisabled = no\nset = 1\nsince = 2\n",
+            "consecutive = 0\npending = none\nsuspicious = none\ntotal = x\ndisabled = no\nset = 1\nsince = 2\n",
+            "consecutive = 0\npending = none\nsuspicious = none\ntotal = 0\ndisabled = yes\nset = 1\nsince = 2\n",
+            "consecutive = 0\npending = none\nsuspicious = none\ntotal = 0\ndisabled = month 1 2\nset = 1\nsince = 2\n",
         ] {
             assert_eq!(Budget::parse(text), None, "{text:?}");
         }
@@ -482,7 +467,7 @@ mod tests {
                 budget.judge(now, &settings);
                 budget.forgive(now, settings.forgive_before_correct_pin);
             }
-            prop_assert!(guesses <= settings.max_concerning_total + 3);
+            prop_assert!(guesses <= settings.max_suspicious_total + 3);
         }
     }
 }

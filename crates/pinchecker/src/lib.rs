@@ -208,7 +208,7 @@ fn housekeeping<H, C: Clock, P: PasswordCheck, L: Log + ?Sized>(
 fn status(files: &UserFiles, hasher: &impl Hasher, clock: &impl Clock) -> Result<String, Error> {
     const FIX: &str = "sudo properpin doctor says how to fix it";
     let line = |label: &str, value: &str| format!("{label:<22}{value}\n");
-    let since = |at: Option<u64>| at.map_or_else(|| ", since not recorded".to_owned(), |at| format!(" since {}", local_time(at)));
+    let since = |at: u64| format!("since {}", local_time(at));
     let mut out = line("user", files.user());
     let settings = match files.settings() {
         Ok(settings) if settings.pin_hash.is_empty() => return Ok(out + &line("PIN", "none set") + &line("hash", "unset")),
@@ -226,29 +226,29 @@ fn status(files: &UserFiles, hasher: &impl Hasher, clock: &impl Clock) -> Result
     let judged = budget.judge(clock.now()?, &settings);
     let state = match (judged.disabled, budget.disabled) {
         (Some(limit), Some(disabled)) => {
-            format!("disabled{}, after {limit}; sudo properpin enable or set turns it back on", since(Some(disabled.at)))
+            format!("disabled {}, after {limit}; sudo properpin enable or set turns it back on", since(disabled.at))
         }
         _ if budget.paused(&settings) => format!(
-            "paused{}, after {} consecutive failures; unlocking with the password resumes it",
+            "paused {}, after {} consecutive failures; unlocking with the password resumes it",
             since(budget.since),
             budget.consecutive
         ),
-        _ => format!("enabled{}", since(budget.since)),
+        _ => format!("enabled {}", since(budget.since)),
     };
     out += &line("PIN", &state);
-    out += &line("hash", &format!("set{}, in {path}", since(budget.set)));
+    out += &line("hash", &format!("set {}, in {path}", since(budget.set)));
     out += &line("rules for a new PIN", &rules);
     out += &line("consecutive failures", &format!("{}/{}", budget.consecutive, settings.max_failures));
     let counts = judged.counts;
     let of = |count: String, what: &str| format!("    {count:<7}{what}\n");
-    out += "concerning failures\n";
-    out += &of(format!("{}/{}", counts.day, settings.max_concerning_24h), "within 24 hours");
-    out += &of(format!("{}/{}", counts.week, settings.max_concerning_7d), "within 7 days");
-    out += &of(format!("{}/{}", counts.total, settings.max_concerning_total), "since this PIN was set");
+    out += "suspicious failures\n";
+    out += &of(format!("{}/{}", counts.day, settings.max_suspicious_24h), "within 24 hours");
+    out += &of(format!("{}/{}", counts.week, settings.max_suspicious_7d), "within 7 days");
+    out += &of(format!("{}/{}", counts.total, settings.max_suspicious_total), "since this PIN was set");
     out += &of(counts.pending.to_string(), "waiting to be forgiven");
     out += "policy\n";
     out += &format!("    {} consecutive failures pause the PIN, until a password unlock\n", settings.max_failures);
-    out += "    too many concerning failures, as above, disable it, until sudo properpin enable or set\n";
+    out += "    too many suspicious failures, as above, disable it, until sudo properpin enable or set\n";
     Ok(out)
 }
 
@@ -286,6 +286,8 @@ mod tests {
 
     const PIN: &str = "4859";
     const PASSWORD: &str = "correct horse battery staple";
+    /// When the sandbox's PIN was set.
+    const SET_AT: u64 = 1_700_000_000;
 
     struct Sandbox {
         _dir: tempfile::TempDir,
@@ -310,7 +312,7 @@ mod tests {
         let sandbox = Sandbox { _dir: dir, places, caller };
         sandbox.write_user_file(&format!("hash = {}\n", Yescrypt.hash(PIN, 4).unwrap()));
         // The budget and lock file properpin set creates.
-        sandbox.places.files(&sandbox.caller).unwrap().start_budget(&properpin_core::Budget::default()).unwrap();
+        sandbox.places.files(&sandbox.caller).unwrap().start_budget(&properpin_core::Budget::fresh(SET_AT)).unwrap();
         sandbox
     }
 
@@ -483,22 +485,22 @@ mod tests {
         let sandbox = sandbox();
         let (code, output, _) = sandbox.ask(Request::Status, "");
         assert_eq!(code, exit::YES);
-        // The sandbox's budget is the older kind, without the times.
         let path = sandbox.places.etc.join("users/alice");
+        let set_at = local_time(SET_AT);
         let expected = format!(
             "user                  alice
-PIN                   enabled, since not recorded
-hash                  set, since not recorded, in {}
+PIN                   enabled since {set_at}
+hash                  set since {set_at}, in {}
 rules for a new PIN   4 to 64 characters, at least 3 of them not digits, yescrypt cost 5
 consecutive failures  0/3
-concerning failures
+suspicious failures
     0/10   within 24 hours
     0/25   within 7 days
     0/60   since this PIN was set
     0      waiting to be forgiven
 policy
     3 consecutive failures pause the PIN, until a password unlock
-    too many concerning failures, as above, disable it, until sudo properpin enable or set
+    too many suspicious failures, as above, disable it, until sudo properpin enable or set
 ",
             path.display()
         );
@@ -507,7 +509,7 @@ policy
             sandbox.ask(Request::Check, wrong);
         }
         let output = sandbox.ask(Request::Status, "").1;
-        // Recorded by the third failure, even in a budget of the older kind.
+        // Recorded by the third failure.
         assert!(output.contains("PIN                   paused since 20"), "{output}");
         assert!(output.contains(", after 3 consecutive failures; unlocking with the password resumes it"), "{output}");
         fs::remove_file(sandbox.places.etc.join("users/alice")).unwrap();
@@ -542,7 +544,7 @@ policy
     /// Guesses nobody forgives, a wrong password included, are judged later, logged, and disable
     /// the PIN; the password then doesn't bring it back.
     #[test]
-    fn concerning_failures_are_logged_and_disable_the_pin() {
+    fn suspicious_failures_are_logged_and_disable_the_pin() {
         let sandbox = sandbox();
         let alice = &sandbox.caller;
         // Three failures in a row would pause the PIN, the wrong password among them, since it is
@@ -554,22 +556,22 @@ policy
         // Two minutes on, the correct PIN comes too late to forgive them.
         let (code, _, log) = sandbox.ask_with(&Later { ahead: 120 }, alice, Request::Check, PIN);
         assert_eq!(code, exit::YES);
-        assert!(log.contains("3 failure(s) not followed by an unlock in time, now concerning: 3 within 24 hours"), "{log}");
+        assert!(log.contains("3 failure(s) not followed by an unlock in time, now suspicious: 3 within 24 hours"), "{log}");
         let output = sandbox.ask_with(&Later { ahead: 120 }, alice, Request::Status, "").1;
         assert!(output.contains("    3/10   within 24 hours\n    3/25   within 7 days\n    3/60   since this PIN was set\n"), "{output}");
 
-        sandbox.write_config("max_concerning_24h = 4\n");
+        sandbox.write_config("max_suspicious_24h = 4\n");
         sandbox.ask_with(&Later { ahead: 120 }, alice, Request::Check, "3333");
         let (code, _, log) = sandbox.ask_with(&Later { ahead: 300 }, alice, Request::Check, PIN);
         assert_eq!(code, exit::NO);
-        assert!(log.contains("PIN disabled after 4 concerning failures within 24 hours; sudo properpin enable or set"), "{log}");
-        assert!(log.contains("alice: PIN disabled after 4 concerning failures within 24 hours, password required"), "{log}");
+        assert!(log.contains("PIN disabled after 4 suspicious failures within 24 hours; sudo properpin enable or set"), "{log}");
+        assert!(log.contains("alice: PIN disabled after 4 suspicious failures within 24 hours, password required"), "{log}");
         let (code, _, log) = sandbox.ask_with(&Later { ahead: 300 }, alice, Request::Housekeeping, PASSWORD);
         assert_eq!((code, log.contains("password correct, but the PIN stays disabled after")), (exit::YES, true), "{log}");
         let output = sandbox.ask_with(&Later { ahead: 300 }, alice, Request::Status, "").1;
         assert!(
             output.contains("PIN                   disabled since ")
-                && output.contains(", after 4 concerning failures within 24 hours; sudo properpin enable"),
+                && output.contains(", after 4 suspicious failures within 24 hours; sudo properpin enable"),
             "{output}"
         );
     }

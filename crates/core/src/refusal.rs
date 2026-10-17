@@ -7,7 +7,7 @@ use crate::Limit;
 pub enum Refusal {
     /// Paused: too many consecutive failures, until the next password unlock.
     Paused { consecutive: u32 },
-    /// Disabled: too many concerning failures, until root turns it back on or sets a new PIN.
+    /// Disabled: too many suspicious failures, until root turns it back on or sets a new PIN.
     Disabled(Limit),
 }
 

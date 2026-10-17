@@ -3,7 +3,7 @@
 //! ```text
 //! sudo properpin set [--user NAME]     choose a new PIN, typed twice; the lock screen takes it at
 //!                                      once, and its budget of failures starts over
-//! sudo properpin enable [--user NAME]  turn a PIN disabled by too many concerning failures back on
+//! sudo properpin enable [--user NAME]  turn a PIN disabled by too many suspicious failures back on
 //! sudo properpin remove [--user NAME]  delete the PIN, its budget and its lock file, whatever state
 //!                                      they are in; the lock screen takes the password only
 //! sudo properpin remove --all          the same for every user, after a question
@@ -76,7 +76,7 @@ enum Action {
     /// Choose a new PIN, typed twice; the lock screen takes it at once, and its budget of failures
     /// starts over
     Set(Confirmable),
-    /// Turn a PIN disabled by too many concerning failures back on, keeping it
+    /// Turn a PIN disabled by too many suspicious failures back on, keeping it
     Enable(Confirmable),
     /// Delete the PIN, its budget and its lock file, whatever state they are in; the lock screen
     /// takes the password only
@@ -203,7 +203,7 @@ fn set(cli: &Cli, account: &Account, yes: bool) -> Result<()> {
             &mut input,
             yes,
             &format!(
-                "This is the PIN already set. Setting it again starts its budget over, and forgets its {total} concerning failures \
+                "This is the PIN already set. Setting it again starts its budget over, and forgets its {total} suspicious failures \
                  since it was set, which may have been someone guessing it."
             ),
         )?;
@@ -228,11 +228,11 @@ fn enable(cli: &Cli, account: &Account, yes: bool) -> Result<()> {
     let judge = || -> Result<_> {
         let mut budget = files.load_budget().map_err(see_doctor)?;
         let judged = budget.judge(SystemClock.now()?, &settings);
-        if budget.total >= settings.max_concerning_total {
+        if budget.total >= settings.max_suspicious_total {
             bail!(
-                "{} concerning failures since this PIN was set, and {} are allowed; choose a new one with: properpin set",
+                "{} suspicious failures since this PIN was set, and {} are allowed; choose a new one with: properpin set",
                 budget.total,
-                settings.max_concerning_total
+                settings.max_suspicious_total
             );
         }
         Ok((budget, judged))

@@ -29,12 +29,12 @@ pub struct Settings {
     pub forgive_before_correct_pin: u64,
     /// The same before a correct password.
     pub forgive_before_correct_password: u64,
-    /// Concerning failures within 24 hours that disable the PIN.
-    pub max_concerning_24h: u32,
-    /// Concerning failures within 7 days that disable the PIN.
-    pub max_concerning_7d: u32,
-    /// Concerning failures since the PIN was set that disable it.
-    pub max_concerning_total: u64,
+    /// Suspicious failures within 24 hours that disable the PIN.
+    pub max_suspicious_24h: u32,
+    /// Suspicious failures within 7 days that disable the PIN.
+    pub max_suspicious_7d: u32,
+    /// Suspicious failures since the PIN was set that disable it.
+    pub max_suspicious_total: u64,
     /// The shortest time a correct PIN takes to unlock, counted from when the PAM module is called;
     /// the module waits out the rest. kscreenlocker 6.8 takes an answer within 50 ms for a broken
     /// authenticator, so below that the PIN stops unlocking. Only a correct PIN waits: anything
@@ -53,9 +53,9 @@ impl Default for Settings {
             hash_cost: 5,
             forgive_before_correct_pin: 45,
             forgive_before_correct_password: 90,
-            max_concerning_24h: 10,
-            max_concerning_7d: 25,
-            max_concerning_total: 60,
+            max_suspicious_24h: 10,
+            max_suspicious_7d: 25,
+            max_suspicious_total: 60,
             min_milliseconds_before_pin_unlock: 75,
         }
     }
@@ -72,9 +72,9 @@ impl fmt::Debug for Settings {
             .field("hash_cost", &self.hash_cost)
             .field("forgive_before_correct_pin", &self.forgive_before_correct_pin)
             .field("forgive_before_correct_password", &self.forgive_before_correct_password)
-            .field("max_concerning_24h", &self.max_concerning_24h)
-            .field("max_concerning_7d", &self.max_concerning_7d)
-            .field("max_concerning_total", &self.max_concerning_total)
+            .field("max_suspicious_24h", &self.max_suspicious_24h)
+            .field("max_suspicious_7d", &self.max_suspicious_7d)
+            .field("max_suspicious_total", &self.max_suspicious_total)
             .field("min_milliseconds_before_pin_unlock", &self.min_milliseconds_before_pin_unlock)
             .finish()
     }
@@ -109,10 +109,10 @@ impl Settings {
                 "hash_cost" => self.hash_cost = in_range(source, key, raw, 1, 11)?,
                 "forgive_before_correct_pin" => self.forgive_before_correct_pin = in_range(source, key, raw, 0, 3600)?,
                 "forgive_before_correct_password" => self.forgive_before_correct_password = in_range(source, key, raw, 0, 3600)?,
-                // The budget keeps at most MAX_CONCERNING concerning failures, so no limit may need more.
-                "max_concerning_24h" => self.max_concerning_24h = in_range(source, key, raw, 1, 100)?,
-                "max_concerning_7d" => self.max_concerning_7d = in_range(source, key, raw, 1, 200)?,
-                "max_concerning_total" => self.max_concerning_total = in_range(source, key, raw, 1, 100_000)?,
+                // The budget keeps at most MAX_SUSPICIOUS suspicious failures, so no limit may need more.
+                "max_suspicious_24h" => self.max_suspicious_24h = in_range(source, key, raw, 1, 100)?,
+                "max_suspicious_7d" => self.max_suspicious_7d = in_range(source, key, raw, 1, 200)?,
+                "max_suspicious_total" => self.max_suspicious_total = in_range(source, key, raw, 1, 100_000)?,
                 // Under 50 ms breaks the PIN on kscreenlocker 6.8; allowed, for other lock screens.
                 "min_milliseconds_before_pin_unlock" => self.min_milliseconds_before_pin_unlock = in_range(source, key, raw, 0, 1000)?,
                 _ => return Err(Error::UnknownSetting { file: source.into(), key: key.into() }),
@@ -188,8 +188,8 @@ mod tests {
     #[test]
     fn every_setting_is_read() {
         let text = "max_failures = 5\nmin_pin_length = 6\nrequired_non_digits_count = 1\nhash_cost = 6\n\
-                    forgive_before_correct_pin = 30\nforgive_before_correct_password = 60\nmax_concerning_24h = 5\n\
-                    max_concerning_7d = 15\nmax_concerning_total = 50\nmin_milliseconds_before_pin_unlock = 200\n";
+                    forgive_before_correct_pin = 30\nforgive_before_correct_password = 60\nmax_suspicious_24h = 5\n\
+                    max_suspicious_7d = 15\nmax_suspicious_total = 50\nmin_milliseconds_before_pin_unlock = 200\n";
         let expected = Settings {
             max_failures: 5,
             min_pin_length: 6,
@@ -197,9 +197,9 @@ mod tests {
             hash_cost: 6,
             forgive_before_correct_pin: 30,
             forgive_before_correct_password: 60,
-            max_concerning_24h: 5,
-            max_concerning_7d: 15,
-            max_concerning_total: 50,
+            max_suspicious_24h: 5,
+            max_suspicious_7d: 15,
+            max_suspicious_total: 50,
             min_milliseconds_before_pin_unlock: 200,
             ..Settings::default()
         };
@@ -224,12 +224,12 @@ mod tests {
 
     #[test]
     fn a_user_file_holds_the_hash_and_no_rule() {
-        for text in ["max_failures = 2", "min_pin_length = 6", "max_concerning_24h = 50", "min_milliseconds_before_pin_unlock = 0"] {
+        for text in ["max_failures = 2", "min_pin_length = 6", "max_suspicious_24h = 50", "min_milliseconds_before_pin_unlock = 0"] {
             assert!(matches!(apply(text, true), Err(Error::OnlyTheHash { .. })), "{text}");
         }
         let error = apply("hash = $y$j9T$abc$def\nmax_failures = 2\n", true).unwrap_err().to_string();
         assert_eq!(error, "f: holds max_failures, but a user's own file may only hold the hash; the setting belongs in the config");
-        assert!(matches!(apply("max_concerning_7d = 201", false), Err(Error::BadValue { .. })));
+        assert!(matches!(apply("max_suspicious_7d = 201", false), Err(Error::BadValue { .. })));
         assert!(matches!(apply("hash = $y$x\nencrypted_pepper = 00\n", true), Err(Error::UnknownSetting { .. })));
     }
 

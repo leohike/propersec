@@ -56,7 +56,7 @@ A correct PIN never unlocks sooner than 75 ms after the `check` line was called:
 | `/etc/properpin/users/` | One file per user with a PIN | `root:properpin 0750` |
 | `/etc/properpin/users/<user>` | That user's yescrypt hash, and nothing else | `root:properpin 0640`: the pinchecker reads it, nobody else but root |
 | `/var/lib/properpin/` | Every user's failure budget, on disk, so it survives reboots; kept in shape by `/etc/tmpfiles.d/properpin.conf` | `root:properpin 1770`: only the group can enter, and the sticky bit lets each file be replaced or deleted only by its owner |
-| `/var/lib/properpin/<uid>.budget` | The consecutive count, failures waiting to be forgiven, concerning failures of the last 7 days, the total since the PIN was set, whether it is disabled, and when the PIN was set and last became enabled or paused | `<uid>:properpin 0600`: the user it describes owns it, but can't enter the directory to reach it |
+| `/var/lib/properpin/<uid>.budget` | The consecutive count, failures waiting to be forgiven, suspicious failures of the last 7 days, the total since the PIN was set, whether it is disabled, and when the PIN was set and last became enabled or paused | `<uid>:properpin 0600`: the user it describes owns it, but can't enter the directory to reach it |
 | `/var/lib/properpin/<uid>.lock` | Keeps two attempts from interleaving | `<uid>:properpin 0600` |
 | `/usr/local/libexec/properpin/properpin-pinchecker` | The pinchecker | `root:properpin 2755` (setgid only) |
 | `/etc/sysusers.d/properpin.conf` | The `properpin` system group (`g properpin -`): no members, no account | `root:root 0644` |
@@ -82,7 +82,7 @@ sudo packaging/install.sh install    # after a diff and a yes: the files, then t
 sudo packaging/install.sh check      # kind, mode, owner, bytes, SELinux label and what the binaries load; the group empty and locked; the PAM lines current
 sudo packaging/install.sh uninstall  # the lines out of /etc/pam.d/kde, then the files
 sudo properpin set                                # choose the PIN, typed twice; the lock screen takes it at once
-sudo properpin enable                             # only if too many concerning failures disabled it
+sudo properpin enable                             # only if too many suspicious failures disabled it
 ```
 
 When a PIN doesn't work, `properpin status` says why, and so does `sudo properpin doctor`, for every user at once, with the command that fixes each problem. Doctor changes nothing, and there are no repairs, only these commands:
@@ -125,12 +125,12 @@ The consecutive count stops a burst of guesses, but a correct PIN starts it over
 - **Every input typed at the lock screen that doesn't unlock is a failure,** wrong passwords included, since the `check` line sees everything before `pam_unix` does. An empty input isn't, and nothing is counted for a user without a PIN.
 - **The user's own typos are forgiven:** a correct PIN forgives the failures of the 45 seconds before it (`forgive_before_correct_pin`), the correct password those of the 90 seconds before it (`forgive_before_correct_password`, through `housekeeping`, after `unix_chkpwd` accepted it). A correct password typed at the lock screen is itself a failure for a moment, until `housekeeping` forgives it.
 - **A paused or disabled PIN records nothing:** the input isn't checked, so it isn't a guess, and typing at a paused PIN can't push it on to disabled.
-- **A failure nothing forgave in time is concerning.** It is judged at the pinchecker's next run; no daemon is needed.
-- **The PIN is disabled** at 10 concerning failures within 24 hours (`max_concerning_24h`), 25 within 7 days (`max_concerning_7d`), or 60 since the PIN was set (`max_concerning_total`). Disabled, the PIN is refused and the password doesn't bring it back, until `sudo properpin enable` (same PIN, after asking; recent failures forgotten, the total kept, so it refuses once the total is reached) or `sudo properpin set` (a fresh budget).
+- **A failure nothing forgave in time is suspicious.** It is judged at the pinchecker's next run; no daemon is needed.
+- **The PIN is disabled** at 10 suspicious failures within 24 hours (`max_suspicious_24h`), 25 within 7 days (`max_suspicious_7d`), or 60 since the PIN was set (`max_suspicious_total`). Disabled, the PIN is refused and the password doesn't bring it back, until `sudo properpin enable` (same PIN, after asking; recent failures forgotten, the total kept, so it refuses once the total is reached) or `sudo properpin set` (a fresh budget).
 - **It survives reboots:** the budget, consecutive count included, is in `/var/lib/properpin`, stamped with the wall clock. Whoever can set the clock could age failures out of the 24-hour and 7-day windows, but never out of the total; setting it takes root, which wins anyway, and `docs/chaos/current-concerns.md` at the repo root says why the network and a reboot don't change that.
 - **A damaged or foreign budget refuses the PIN** instead of being read as a fresh one; `set` starts it over.
 
-Like every setting, the five live in `/etc/properpin/config`. `properpin status` shows the counts, and the journal has a line for each failure that becomes concerning and for the moment the PIN is disabled. The total limit is what bounds an attacker: whatever their pace, about 60 guesses per PIN, against 60 million two-word PINs or 10,000 four-digit ones.
+Like every setting, the five live in `/etc/properpin/config`. `properpin status` shows the counts, and the journal has a line for each failure that becomes suspicious and for the moment the PIN is disabled. The total limit is what bounds an attacker: whatever their pace, about 60 guesses per PIN, against 60 million two-word PINs or 10,000 four-digit ones.
 
 ## Like the lock screen
 
@@ -174,4 +174,4 @@ clippy and fmt are not in CI: run `just lint` before pushing. Results are in the
 
 ## Not done yet
 
-SELinux labels verified on a real system (install.sh sets and checks them, but only a real machine or a VM enforces them, and the pinchecker and `/var/lib/properpin` may need a policy of their own), the real greeter, alerts for concerning failures, duress and a TPM-backed counter. `docs/chaos/plan.md` at the repo root lists what is next, `docs/chaos/concerns.md` every smaller open point, and the rest of `docs/chaos/` the research behind the bigger ones.
+SELinux labels verified on a real system (install.sh sets and checks them, but only a real machine or a VM enforces them, and the pinchecker and `/var/lib/properpin` may need a policy of their own), the real greeter, alerts for suspicious failures, duress and a TPM-backed counter. `docs/chaos/plan.md` at the repo root lists what is next, `docs/chaos/concerns.md` every smaller open point, and the rest of `docs/chaos/` the research behind the bigger ones.

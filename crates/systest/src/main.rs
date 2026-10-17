@@ -610,7 +610,7 @@ fn the_group_stays_empty_and_locked(_world: &World) -> Outcome {
 }
 
 /// The user's own mistakes never count: a wrong PIN, then the right one; a wrong password, then
-/// the right one. Nothing is left waiting, nothing is concerning.
+/// the right one. Nothing is left waiting, nothing is suspicious.
 fn typos_are_forgiven(world: &World) -> Outcome {
     world.pin_refused("1111", "not the PIN, consecutive failure 1 of 3")?;
     world.pin_unlocks()?;
@@ -628,7 +628,7 @@ fn typos_are_forgiven(world: &World) -> Outcome {
 /// two minutes later, which starts the consecutive count over but can't forgive the guess. With
 /// the daily limit at 3, the third round finds the PIN disabled.
 fn the_slow_attack_is_stopped(world: &World) -> Outcome {
-    write_file(&world.config(), "max_concerning_24h = 3\n", 0, 0, 0o644)?;
+    write_file(&world.config(), "max_suspicious_24h = 3\n", 0, 0, 0o644)?;
     for round in 1..=2 {
         world.pin_refused("1111", "not the PIN, consecutive failure 1 of 3")?;
         world.edit_budget(|budget| budget.pending.iter_mut().for_each(|at| *at -= 120))?;
@@ -636,23 +636,23 @@ fn the_slow_attack_is_stopped(world: &World) -> Outcome {
     }
     world.pin_refused("1111", "not the PIN, consecutive failure 1 of 3")?;
     world.edit_budget(|budget| budget.pending.iter_mut().for_each(|at| *at -= 120))?;
-    world.pin_refused(PIN, "PIN disabled after 3 concerning failures within 24 hours")?;
+    world.pin_refused(PIN, "PIN disabled after 3 suspicious failures within 24 hours")?;
     world.password_unlocks()
 }
 
-/// Nine concerning failures already today, and one more guess the user never forgives: the PIN is
+/// Nine suspicious failures already today, and one more guess the user never forgives: the PIN is
 /// disabled, the password doesn't bring it back, and `enable`, after asking, does at once.
 fn unforgiven_guesses_disable_the_pin(world: &World) -> Outcome {
     let now = SystemClock.now().map_err(message)?;
     world.edit_budget(|budget| {
-        budget.concerning = (1..=9).map(|hour| now - hour * 600).rev().collect();
+        budget.suspicious = (1..=9).map(|hour| now - hour * 600).rev().collect();
         budget.total = 9;
     })?;
     world.pin_refused("1111", "not the PIN, consecutive failure 1 of 3")?;
     // Two minutes pass before the user comes back: too late to forgive the guess.
     world.edit_budget(|budget| budget.pending.iter_mut().for_each(|at| *at -= 120))?;
     let attempt = world.kde(PIN)?;
-    let why = "PIN disabled after 10 concerning failures within 24 hours";
+    let why = "PIN disabled after 10 suspicious failures within 24 hours";
     expect(!attempt.unlocked && attempt.log.contains("sudo properpin enable or set") && attempt.log.contains(why), why, &attempt)?;
     let password = world.kde(PASSWORD)?;
     expect(
@@ -677,7 +677,7 @@ fn the_lifetime_limit_takes_a_new_pin(world: &World) -> Outcome {
     world.edit_budget(|budget| budget.total = 59)?;
     world.pin_refused("1111", "not the PIN")?;
     world.edit_budget(|budget| budget.pending.iter_mut().for_each(|at| *at -= 120))?;
-    world.pin_refused(PIN, "PIN disabled after 60 concerning failures since the PIN was set")?;
+    world.pin_refused(PIN, "PIN disabled after 60 suspicious failures since the PIN was set")?;
     match properpin_as_root(&["enable", "--user", USER, "--yes"], "") {
         Err(said) if said.contains("choose a new one with: properpin set") => {}
         other => return Err(format!("enable lifted the lifetime limit: {other:?}")),

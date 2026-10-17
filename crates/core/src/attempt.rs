@@ -151,7 +151,7 @@ pub fn try_unlock_with_pin(
     if pin.is_ok() {
         budget.consecutive = budget.consecutive.saturating_add(1);
         if budget.paused(&settings) {
-            budget.since = Some(now);
+            budget.since = now;
         }
     }
     store.save_budget(&budget)?;
@@ -185,7 +185,7 @@ pub fn housekeeping_after_password_unlock(store: &impl Store, clock: &impl Clock
     let judged = budget.judge(now, &settings);
     budget.forgive(now, settings.forgive_before_correct_password);
     if budget.paused(&settings) {
-        budget.since = Some(now);
+        budget.since = now;
     }
     budget.consecutive = 0;
     store.save_budget(&budget)?;
@@ -360,7 +360,7 @@ mod tests {
             try_pin(&store, &clock, "2222");
             clock.advance(600);
         }
-        // Five rounds of two guesses; the next correct PIN finds 10 concerning failures within 24 hours.
+        // Five rounds of two guesses; the next correct PIN finds 10 suspicious failures within 24 hours.
         assert_eq!(rounds, 5);
         assert_eq!(try_pin(&store, &clock, PIN), Verdict::Refused(Refusal::Disabled(crate::Limit::Day(10))));
         // The password doesn't bring it back.
@@ -429,9 +429,9 @@ mod tests {
         try_pin(&store, &clock, "2222");
         clock.advance(10);
         try_pin(&store, &clock, PIN);
-        assert_eq!(since(), None);
+        assert_eq!(since(), 0);
         housekeeping_after_password_unlock(&store, &clock).unwrap();
-        assert_eq!(since(), None, "the password only moves it when it resumes a paused PIN");
+        assert_eq!(since(), 0, "the password only moves it when it resumes a paused PIN");
         for wrong in ["1111", "2222"] {
             try_pin(&store, &clock, wrong);
         }
@@ -440,10 +440,10 @@ mod tests {
         try_pin(&store, &clock, "3333");
         clock.advance(10);
         try_pin(&store, &clock, PIN);
-        assert_eq!(since(), Some(paused_at), "a refused attempt changes nothing");
+        assert_eq!(since(), paused_at, "a refused attempt changes nothing");
         clock.advance(10);
         housekeeping_after_password_unlock(&store, &clock).unwrap();
-        assert_eq!(since(), Some(clock.now().unwrap()));
+        assert_eq!(since(), clock.now().unwrap());
     }
 
     /// Paused or disabled, input isn't checked, so it isn't a guess: nothing is recorded, and
@@ -469,7 +469,7 @@ mod tests {
     }
 
     /// A refused attempt writes nothing, unless judging changed the budget by itself: here, the
-    /// three failures nobody forgave turn concerning once the forgiveness windows have passed.
+    /// three failures nobody forgave turn suspicious once the forgiveness windows have passed.
     #[test]
     fn a_refused_attempt_saves_only_what_judging_changed() {
         let (store, clock) = enabled();
@@ -481,7 +481,7 @@ mod tests {
         assert_eq!(store.saves.get(), saves, "nothing changed, nothing written");
         clock.advance(store.settings.forgive_before_correct_pin.max(store.settings.forgive_before_correct_password) + 1);
         try_pin(&store, &clock, PIN);
-        assert_eq!(store.saves.get(), saves + 1, "the failures turned concerning, and that is saved");
+        assert_eq!(store.saves.get(), saves + 1, "the failures turned suspicious, and that is saved");
         assert_eq!((store.pending(), store.budget.borrow().total), (0, 3));
         try_pin(&store, &clock, PIN);
         assert_eq!(store.saves.get(), saves + 1);
@@ -534,7 +534,7 @@ mod tests {
         );
         assert_eq!(
             Verdict::Refused(Refusal::Disabled(crate::Limit::Day(10))).to_string(),
-            "PIN disabled after 10 concerning failures within 24 hours, password required"
+            "PIN disabled after 10 suspicious failures within 24 hours, password required"
         );
     }
 
@@ -558,7 +558,7 @@ mod tests {
         fn the_pin_unlocks_exactly_when_the_model_says_so(events in prop::collection::vec(event(), 0..60)) {
             // The budget is tested on its own; here its limits are out of reach.
             let mut store = MemoryStore::with_pin();
-            store.settings = Settings { max_concerning_24h: 100, max_concerning_7d: 200, max_concerning_total: 100_000, ..store.settings };
+            store.settings = Settings { max_suspicious_24h: 100, max_suspicious_7d: 200, max_suspicious_total: 100_000, ..store.settings };
             let clock = FakeClock::new();
             let limit = store.settings.max_failures;
             let mut consecutive = 0;

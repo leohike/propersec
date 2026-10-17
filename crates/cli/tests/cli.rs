@@ -194,7 +194,7 @@ fn setting_the_same_pin_again_asks_first() {
     sandbox.write_budget(&Budget { total: 7, ..Budget::default() });
     let assert = sandbox.properpin(&["set"], &new_pin("cat4859", "cat4859")).failure();
     says(&assert, "This is the PIN already set");
-    says(&assert, "forgets its 7 concerning failures");
+    says(&assert, "forgets its 7 suspicious failures");
     says(&assert, "--yes skips the question");
     assert!(stdout(&sandbox.properpin(&["status"], "").success()).contains("7/60   since this PIN was set"));
     sandbox.properpin(&["set", "--yes"], &new_pin("cat4859", "cat4859")).success();
@@ -249,11 +249,11 @@ fn enable_and_set_bring_a_disabled_pin_back() {
     says(&sandbox.properpin(&["enable"], "").failure(), "no PIN is set");
     sandbox.properpin(&["set"], &new_pin("cat4859", "cat4859")).success();
     let disabled = Some(Disabled { limit: Limit::Day(10), at: 1_800_000_000 });
-    sandbox.write_budget(&Budget { concerning: vec![1_800_000_000], total: 10, disabled, ..Budget::default() });
+    sandbox.write_budget(&Budget { suspicious: vec![1_800_000_000], total: 10, disabled, ..Budget::default() });
     assert!(!unlocks(&sandbox, "cat4859"), "a disabled PIN never unlocks");
     sandbox.housekeeping();
     assert!(!unlocks(&sandbox, "cat4859"), "the password doesn't bring a disabled PIN back");
-    says(&sandbox.properpin(&["status"], "").success(), ", after 10 concerning failures within 24 hours");
+    says(&sandbox.properpin(&["status"], "").success(), ", after 10 suspicious failures within 24 hours");
 
     let assert = sandbox.properpin(&["enable"], "").failure();
     says(&assert, "may have been someone guessing it");
@@ -319,7 +319,7 @@ fn doctor_and_status_say_why_a_pin_is_refused() {
 
     sandbox.write_budget(&Budget { disabled: Some(Disabled { limit: Limit::Day(10), at: 1_800_000_000 }), ..Budget::default() });
     let doctor = sandbox.properpin(&["doctor"], "").failure();
-    says(&doctor, &format!("{me}'s PIN is disabled after 10 concerning failures within 24 hours"));
+    says(&doctor, &format!("{me}'s PIN is disabled after 10 suspicious failures within 24 hours"));
     says(&doctor, &format!("fix: sudo properpin enable --user {me} keeps the PIN"));
     sandbox.properpin(&["enable", "--yes"], "").success();
 

@@ -7,7 +7,7 @@ A short note, written on 2026-10-16, on how added complexity in properpin could 
 A PIN unlocks only when every layer agrees, and any layer saying no sends the user to the password:
 
 - **A simple total limit,** in software: every failure counts, typos included, against a generous limit of several hundred; the count only ever goes up, and only `set` resets it. A few dozen lines in a file of its own, sharing nothing with the budget but the lock.
-- **The forgiving budget,** in software, as built: typos forgiven by a correct PIN or password within 45 or 90 seconds, concerning failures limited per day, per week and per PIN. The good user experience lives here, and so does the most room for subtle mistakes.
+- **The forgiving budget,** in software, as built: typos forgiven by a correct PIN or password within 45 or 90 seconds, suspicious failures limited per day, per week and per PIN. The good user experience lives here, and so does the most room for subtle mistakes.
 - **The TPM,** in hardware: the PIN can be checked only by asking the TPM, which counts every failure itself since the last password unlock, and whose counter only the password can reset (the "option 4" design: a per-user PinFail index, with the secret sealed under a policy that requires authorising it with KDF(pepper‖PIN)).
 
 A bug has to get through all of them to matter. That works in properpin because a wrong "no" is cheap: the password still works. In pinpam, where a wrong "no" is a lockout only root can lift, stacking layers would cost far more.

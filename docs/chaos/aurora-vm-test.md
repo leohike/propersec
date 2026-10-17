@@ -126,13 +126,13 @@ At 15:21:03 and 15:21:07 two `sudo` attempts failed through `unix_chkpwd`, and t
 
 ### The failure budget
 
-Every failure up to 15:20 was followed by a correct PIN within 45 seconds or the password within 90, so all were forgiven, and `properpin status` showed `concerning failures: 0 within 24 hours (of 10), 0 within 7 days (of 20), 0 since the PIN was set (of 100); 0 waiting to be forgiven`. The longest gap was 15:19:09 to 15:19:55, 46 seconds, ended by the password, within its 90.
+Every failure up to 15:20 was followed by a correct PIN within 45 seconds or the password within 90, so all were forgiven, and `properpin status` showed `suspicious failures: 0 within 24 hours (of 10), 0 within 7 days (of 20), 0 since the PIN was set (of 100); 0 waiting to be forgiven`. The longest gap was 15:19:09 to 15:19:55, 46 seconds, ended by the password, within its 90.
 
-To see a failure become concerning, a wrong PIN was left alone for longer than 90 seconds:
+To see a failure become suspicious, a wrong PIN was left alone for longer than 90 seconds:
 
 ```
 15:23:26 properpin-helper: aragorn: not the PIN, failure 1 of 3
-15:26:03 properpin-helper: aragorn: 1 failure(s) not followed by an unlock in time, now concerning: 1 within 24 hours, 1 within 7 days, 1 since the PIN was set
+15:26:03 properpin-helper: aragorn: 1 failure(s) not followed by an unlock in time, now suspicious: 1 within 24 hours, 1 within 7 days, 1 since the PIN was set
 15:26:03 properpin-helper: aragorn: unlocked with the PIN
 ```
 
@@ -151,13 +151,13 @@ The VM was rebooted at 15:33 (boot at 15:33:45).
 …
 15:44:35 properpin-helper: aragorn: not the PIN, failure 1 of 3
 15:44:40 properpin-helper: aragorn: not the PIN, failure 2 of 3
-15:46:46 properpin-helper: aragorn: 2 failure(s) not followed by an unlock in time, now concerning: 3 within 24 hours, 3 within 7 days, 3 since the PIN was set
+15:46:46 properpin-helper: aragorn: 2 failure(s) not followed by an unlock in time, now suspicious: 3 within 24 hours, 3 within 7 days, 3 since the PIN was set
 15:46:46 properpin-helper: aragorn: unlocked with the PIN
 ```
 
 - **The PIN is refused after boot** until the first password unlock, then works.
 - **The tmpfiles rule ran at a real boot** for the first time. Until now `install.sh` had always created `/run/properpin` itself. After the reboot it was back as `drwxrwx--T root properpin`, `var_run_t`, on the `/run` tmpfs; `systemd-tmpfiles --cat-config` lists properpin's two `d` lines, and `systemd-tmpfiles-setup` logged nothing about properpin (its only warnings were about `/home`, `/srv` and `/root`, which are symlinks on ostree).
-- **The budget survived the reboot:** the concerning failure from before it was still counted, and two more wrong PINs left for two minutes made 3.
+- **The budget survived the reboot:** the suspicious failure from before it was still counted, and two more wrong PINs left for two minutes made 3.
 
 The files after the reboot, as root:
 
@@ -174,12 +174,12 @@ The files after the reboot, as root:
 ```
 $ sudo cat /var/lib/properpin/1000.budget
 pending = none
-concerning = 1792074206 1792075475 1792075480
+suspicious = 1792074206 1792075475 1792075480
 total = 3
 disabled = no
 ```
 
-The three timestamps are 15:23:26, 15:44:35 and 15:44:40, the three failures the journal reports as concerning. No stray `.1000.*` temporary files were in either directory. The state file and the PIN file were not printed: while the PIN is armed the state holds the pepper in clear text, and with the PIN file's hash that is enough to guess the PIN offline.
+The three timestamps are 15:23:26, 15:44:35 and 15:44:40, the three failures the journal reports as suspicious. No stray `.1000.*` temporary files were in either directory. The state file and the PIN file were not printed: while the PIN is armed the state holds the pepper in clear text, and with the PIN file's hash that is enough to guess the PIN offline.
 
 `properpin status` after the reboot:
 
@@ -189,7 +189,7 @@ PIN        set, in /etc/properpin/users/aragorn
 policy     armed for 8h after a password unlock, until 3 failures in a row
 set rules  4 to 12 characters, yescrypt cost 5, pepper sealed at cost 8
 note       a password change stops the PIN from working, and nothing can tell why; sudo properpin set makes a new one
-budget     concerning failures: 3 within 24 hours (of 10), 3 within 7 days (of 20), 3 since the PIN was set (of 100); 0 waiting to be forgiven
+budget     suspicious failures: 3 within 24 hours (of 10), 3 within 7 days (of 20), 3 since the PIN was set (of 100); 0 waiting to be forgiven
 right now  PIN armed for another 7h56m, 0 of 3 failures so far
 ```
 
@@ -212,7 +212,7 @@ Nothing was found that needs a code change.
 ## What remains untested on a real system
 
 - **Uninstall on the real system:** `install.sh disable` and `uninstall`, their interactive diff and prompt, the relabelling of the restored `/etc/pam.d/kde`, and the leftovers matching what the uninstall cases allow. Nothing was uninstalled in this round.
-- **The PIN disabled by the budget,** at 10 concerning failures in 24 hours (or a lower limit in `/etc/properpin/config` for the test), then refused even after the password, and `sudo properpin enable` bringing it back.
+- **The PIN disabled by the budget,** at 10 suspicious failures in 24 hours (or a lower limit in `/etc/properpin/config` for the test), then refused even after the password, and `sudo properpin enable` bringing it back.
 - **Expiry** after 8 hours armed.
 - **A password change,** which should stop the PIN silently until the next `set`.
 - **Suspend and resume** with the PIN armed.

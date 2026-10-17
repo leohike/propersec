@@ -233,10 +233,6 @@ fn status_needs_no_input_and_prints_the_rules() {
     };
     let before = files(&sandbox.path("var"));
     let status = sandbox.status();
-    assert!(
-        status.contains("hash                  set, since not recorded, in ")
-            && status.contains("    3 consecutive failures pause the PIN"),
-        "{status}"
-    );
+    assert!(status.contains("hash                  set since ") && status.contains("    3 consecutive failures pause the PIN"), "{status}");
     assert_eq!(files(&sandbox.path("var")), before, "status wrote nothing");
 }
