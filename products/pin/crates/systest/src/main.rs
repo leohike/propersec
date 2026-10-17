@@ -485,13 +485,21 @@ fn one_users_pinchecker_cannot_touch_anothers_counts(world: &World) -> Outcome {
     world.pin_refused("2222", "not the PIN, consecutive failure 2 of 3")
 }
 
-/// Before alice's first attempt, bob with the pinchecker's group creates her lock file, writable by
-/// anyone, and a fresh budget in her name. Her PIN is refused, and the log says whose lock file it
-/// is. The password still works, and `set` clears them.
+/// `set` creates alice's lock file and budget, so while they are there bob with the pinchecker's
+/// group can't plant his own in her name. Once they are gone (deleted here as root), he creates her
+/// lock file, writable by anyone, and a fresh budget. Her PIN is refused, and the log says whose
+/// lock file it is. The password still works, and `set` replaces them.
 fn planted_counts_are_refused(world: &World) -> Outcome {
     let bob = Account::by_name("bob").map_err(message)?;
     let lock = format!("{BUDGET_DIR}/{}.lock", world.user.uid);
     let script = format!("umask 0 && touch {lock} && chmod 666 {lock} && cat > {}", world.budget_file().display());
+    let planted = world.as_identity(bob.uid, world.pinchecker_gid, &["sh", "-c", &script], Budget::default().format().as_bytes())?;
+    if planted.status.success() {
+        return Err("bob could plant files over alice's".into());
+    }
+    for path in [PathBuf::from(&lock), world.budget_file()] {
+        fs::remove_file(&path).map_err(|error| format!("{}: {error}", path.display()))?;
+    }
     let planted = world.as_identity(bob.uid, world.pinchecker_gid, &["sh", "-c", &script], Budget::default().format().as_bytes())?;
     if !planted.status.success() {
         return Err(format!("couldn't plant the files: {}", String::from_utf8_lossy(&planted.stderr)));
@@ -894,12 +902,8 @@ impl World {
         PathBuf::from(format!("{BUDGET_DIR}/{}.budget", self.user.uid))
     }
 
-    /// alice's budget, which the first attempt creates; a fresh one, as the pinchecker would write
-    /// it, when there was no attempt yet.
+    /// alice's budget, which `set` creates.
     fn budget(&self) -> Outcome<Budget> {
-        if !self.budget_file().exists() {
-            write_file(&self.budget_file(), &Budget::default().format(), self.user.uid, self.pinchecker_gid, 0o600)?;
-        }
         let text = fs::read_to_string(self.budget_file()).map_err(message)?;
         Budget::parse(&text).ok_or_else(|| format!("the budget doesn't parse: {text}"))
     }
@@ -912,8 +916,7 @@ impl World {
 
     /// Back to just after set-up: the PIN set and enabled, nothing tampered with.
     fn reset(&self) -> Outcome {
-        let lock = PathBuf::from(format!("{BUDGET_DIR}/{}.lock", self.user.uid));
-        for path in [lock, self.budget_file(), self.config(), self.user_file().with_extension("real")] {
+        for path in [self.config(), self.user_file().with_extension("real")] {
             match fs::remove_file(&path) {
                 Err(error) if error.kind() != ErrorKind::NotFound => return Err(format!("{}: {error}", path.display())),
                 _ => {}
@@ -923,6 +926,10 @@ impl World {
         write_file(&self.user_file(), &String::from_utf8_lossy(&self.pin_file), 0, self.pinchecker_gid, 0o640)?;
         chown(BUDGET_DIR, Some(0), Some(self.pinchecker_gid)).map_err(message)?;
         fs::set_permissions(BUDGET_DIR, Permissions::from_mode(0o1770)).map_err(message)?;
+        // What properpin set leaves: an empty lock file and a fresh budget, both the user's.
+        let lock = PathBuf::from(format!("{BUDGET_DIR}/{}.lock", self.user.uid));
+        write_file(&lock, "", self.user.uid, self.pinchecker_gid, 0o600)?;
+        write_file(&self.budget_file(), &Budget::default().format(), self.user.uid, self.pinchecker_gid, 0o600)?;
         let _ = fs::remove_dir_all(SCRATCH);
         self.syslog.take();
         Ok(())

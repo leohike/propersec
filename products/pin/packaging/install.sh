@@ -370,6 +370,17 @@ remove_old_versions() {
         fi
     done
     rm -rf -- "$root$old_run_dir"
+    # Versions before 2026-10-17 created the budget and the lock file at the first attempt; now set
+    # does, and a PIN without them is refused until it runs.
+    local name uid
+    for file in "$root$users"/*; do
+        [[ -f $file ]] || continue
+        name=$(basename "$file")
+        uid=$(id -u "$name" 2>/dev/null) || continue
+        if [[ ! -f $root$budget_dir/$uid.lock || ! -f $root$budget_dir/$uid.budget ]]; then
+            echo "warning: the PIN of $name has no budget yet, so the lock screen refuses it; run: sudo properpin set --user $name"
+        fi
+    done
     if [[ -f $root$etc/config ]] && grep -qE '^[[:space:]]*(expiry_hours|seal_cost)[[:space:]]*=' "$root$etc/config"; then
         echo "warning: $etc/config sets expiry_hours or seal_cost, which no longer exist; take them out, or the PIN is refused"
     fi

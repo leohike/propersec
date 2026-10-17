@@ -297,6 +297,8 @@ mod tests {
         let caller = Account { name: "alice".into(), uid, gid: current_egid() };
         let sandbox = Sandbox { _dir: dir, places, caller };
         sandbox.write_user_file(&format!("hash = {}\n", Yescrypt.hash(PIN, 4).unwrap()));
+        // The budget and lock file properpin set creates.
+        sandbox.places.files(&sandbox.caller).unwrap().start_budget(&properpin_core::Budget::default()).unwrap();
         sandbox
     }
 
@@ -405,9 +407,12 @@ mod tests {
     fn without_a_pin_there_is_nothing_to_do() {
         let sandbox = sandbox();
         fs::remove_file(sandbox.places.etc.join("users/alice")).unwrap();
+        let budget = sandbox.places.budget_dir.join(format!("{}.budget", sandbox.caller.uid));
+        let before = fs::read(&budget).unwrap();
         let (code, _, log) = sandbox.ask(Request::Housekeeping, PASSWORD);
         assert_eq!((code, log.as_str()), (exit::NO, "alice: no PIN is set, so there is nothing to do"));
-        assert_eq!(fs::read_dir(&sandbox.places.budget_dir).unwrap().count(), 0, "nothing written");
+        assert_eq!(fs::read(&budget).unwrap(), before, "nothing written");
+        assert_eq!(fs::read_dir(&sandbox.places.budget_dir).unwrap().count(), 2, "nothing created");
     }
 
     #[test]

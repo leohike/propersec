@@ -8,8 +8,8 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use properpin_core::{MAX_INPUT_BYTES, exit};
-use properpin_sys::{Account, Yescrypt, current_uid};
+use properpin_core::{Budget, MAX_INPUT_BYTES, exit};
+use properpin_sys::{Account, UserFiles, Yescrypt, current_egid, current_uid};
 
 const PINCHECKER: &str = env!("CARGO_BIN_EXE_properpin-pinchecker");
 const PIN: &str = "4859";
@@ -37,6 +37,10 @@ impl Sandbox {
         fs::create_dir_all(user_file.parent().unwrap()).unwrap();
         fs::write(&user_file, format!("hash = {}\n", Yescrypt.hash(PIN, 4).unwrap())).unwrap();
         fs::set_permissions(&user_file, Permissions::from_mode(0o640)).unwrap();
+        // The budget and lock file properpin set creates.
+        let uid = current_uid();
+        let files = UserFiles::new(sandbox.path("etc"), uid, &user, uid).unwrap();
+        files.with_budget(sandbox.path("var"), uid, current_egid()).start_budget(&Budget::default()).unwrap();
         let chkpwd = sandbox.path("unix_chkpwd");
         let script = format!("#!/bin/bash\nIFS= read -r -d '' password\n[[ $1 == \"$(id -un)\" && $password == '{PASSWORD}' ]]\n");
         fs::write(&chkpwd, script).unwrap();
@@ -217,7 +221,14 @@ fn the_password_checker_must_exist() {
 #[test]
 fn status_needs_no_input_and_prints_the_rules() {
     let sandbox = Sandbox::new();
+    let files = |dir: &Path| -> Vec<(PathBuf, Vec<u8>)> {
+        let mut files: Vec<_> =
+            dir.read_dir().unwrap().map(|entry| entry.unwrap().path()).map(|path| (path.clone(), fs::read(path).unwrap())).collect();
+        files.sort();
+        files
+    };
+    let before = files(&sandbox.path("var"));
     let status = sandbox.status();
     assert!(status.contains("PIN        set") && status.contains("policy     paused after 3 consecutive failures"), "{status}");
-    assert!(!Path::new(&sandbox.path("var")).read_dir().unwrap().any(|_| true), "status wrote nothing");
+    assert_eq!(files(&sandbox.path("var")), before, "status wrote nothing");
 }

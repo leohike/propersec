@@ -29,8 +29,10 @@ const LOCK_TIMEOUT: Duration = Duration::from_secs(1);
 /// installed, the test's own uid in tests. The budgets live in one directory for all users, which
 /// only the pinchecker's group can enter, so a user can neither read nor reset their counts. The
 /// directory is sticky, and each user's budget and lock files must belong to that user, so one
-/// user's run of the pinchecker can't read, replace or plant another's. Whoever writes the budget or
-/// creates the lock file, the user or root, gives it to the user. [`UserFiles::new`] gives the
+/// user's run of the pinchecker can't read or replace another's. Both are created by root, at
+/// `properpin set` ([`UserFiles::start_budget`]), and given to the user; the pinchecker only opens
+/// them, so nobody's run ever creates a file there that another user's could find in their name.
+/// Whoever writes the budget, the user or root, gives it to the user. [`UserFiles::new`] gives the
 /// `etc` side, which `properpin set` and `remove` need; [`UserFiles::with_budget`] adds the
 /// budget.
 #[derive(Debug, Clone)]
@@ -125,10 +127,35 @@ impl UserFiles {
         }
     }
 
-    /// Start the budget over: `set` gives a new PIN a fresh one, and `remove` leaves none behind.
-    /// The lock file goes too. Root can delete both whoever owns them, which also clears a budget
-    /// or a lock file planted in the user's name: on disk, a planted lock file would otherwise
-    /// refuse the user's PIN for good.
+    /// Give a new PIN its budget and lock file, as root: `properpin set`. The lock is taken first,
+    /// so an attempt still running finishes before the budget is replaced. A lock file that isn't
+    /// the user's own goes, so does whatever stands in its place, and a new one is created for the
+    /// user: root can delete anything here, so whatever got there, a fresh `set` repairs it.
+    pub fn start_budget(&self, budget: &Budget) -> Result<(), Error> {
+        let dir = self.trusted_budget_dir()?;
+        let group = self.budget.as_ref().expect("checked by trusted_budget_dir").group;
+        let path = dir.join(format!("{}.lock", self.uid));
+        let file = match self.open_lock(&path) {
+            Ok(file) => file,
+            Err(_) => {
+                let create = || -> std::io::Result<File> {
+                    match fs::remove_file(&path) {
+                        Err(error) if error.kind() != ErrorKind::NotFound => return Err(error),
+                        _ => {}
+                    }
+                    let file = OpenOptions::new().write(true).create_new(true).mode(0o600).custom_flags(O_NOFOLLOW).open(&path)?;
+                    fchown(&file, Some(self.uid), Some(group))?;
+                    Ok(file)
+                };
+                create().map_err(|error| system(path.display(), error))?
+            }
+        };
+        let _lock = flock(file, &path)?;
+        self.save_budget(budget)
+    }
+
+    /// Delete the budget and the lock file: `remove`, which leaves none behind. Root can delete
+    /// both whoever owns them.
     pub fn remove_budget(&self) -> Result<bool, Error> {
         let dir = self.trusted_budget_dir()?;
         let remove = |path: PathBuf| match fs::remove_file(&path) {
@@ -145,6 +172,22 @@ impl UserFiles {
     fn trusted_budget_dir(&self) -> Result<&Path, Error> {
         let budget = self.budget.as_ref().ok_or_else(|| Error::System("no budget directory given".into()))?;
         trusted_dir(budget, "budget directory")
+    }
+
+    /// The user's lock file at `path`, which must exist, be a regular file and be the user's own.
+    fn open_lock(&self, path: &Path) -> Result<File, Error> {
+        // Read and write: opening a FIFO planted in its place for reading alone would block.
+        let file =
+            OpenOptions::new().read(true).write(true).custom_flags(O_NOFOLLOW).open(path).map_err(|error| system(path.display(), error))?;
+        let info = file.metadata().map_err(|error| system(path.display(), error))?;
+        let refuse = |why: String| Err(Error::System(format!("{}: {why}; sudo properpin set makes a new one", path.display())));
+        if !info.is_file() {
+            return refuse("not a regular file".into());
+        }
+        if info.uid() != self.uid {
+            return refuse(format!("owned by uid {}, not {}", info.uid(), self.uid));
+        }
+        Ok(file)
     }
 }
 
@@ -181,64 +224,25 @@ impl Store for UserFiles {
         Ok(settings)
     }
 
-    /// Every write of the budget happens under this lock, so checking here that the lock file is the
-    /// user's own refuses a lock file planted in their name by someone else's run.
-    ///
-    /// An existing file is opened without `O_CREAT`: with `fs.protected_regular` set, root may not
-    /// `O_CREAT`-open a file of the user's in this sticky, group-writable directory, even one that
-    /// exists. A new one is created exclusively and given to the user, so root creating it (in
-    /// `properpin enable`) doesn't leave a lock file the user's runs refuse.
+    /// Every write of the budget happens under this lock. The lock file must exist, created by
+    /// `properpin set`, and be the user's own: one that is missing or isn't refuses the PIN, and a
+    /// fresh `set` repairs it. Opened without `O_CREAT`, which `fs.protected_regular` would refuse
+    /// root in this sticky, group-writable directory, even for a file that exists.
     fn lock(&self) -> Result<Flock<File>, Error> {
-        let dir = self.trusted_budget_dir()?;
-        let group = self.budget.as_ref().expect("checked by trusted_budget_dir").group;
-        let path = dir.join(format!("{}.lock", self.uid));
-        let options = |create: bool| {
-            let mut options = OpenOptions::new();
-            options.read(true).write(true).create_new(create).mode(0o600).custom_flags(O_NOFOLLOW);
-            options
-        };
-        let open = match options(false).open(&path) {
-            Err(error) if error.kind() == ErrorKind::NotFound => match options(true).open(&path) {
-                // Another attempt created it in between, as two first attempts at once do: use theirs.
-                Err(error) if error.kind() == ErrorKind::AlreadyExists => options(false).open(&path),
-                created => created.and_then(|file| match fchown(&file, Some(self.uid), Some(group)) {
-                    Ok(()) => Ok(file),
-                    Err(error) => {
-                        let _ = fs::remove_file(&path); // a lock file of the wrong owner would refuse every run
-                        Err(error)
-                    }
-                }),
-            },
-            result => result,
-        };
-        let mut file = open.map_err(|error| system(path.display(), error))?;
-        let info = file.metadata().map_err(|error| system(path.display(), error))?;
-        if !info.is_file() {
-            return Err(Error::System(format!("{}: not a regular file", path.display())));
-        }
-        if info.uid() != self.uid {
-            return Err(Error::System(format!("{}: owned by uid {}, not {}", path.display(), info.uid(), self.uid)));
-        }
-        let deadline = Instant::now() + LOCK_TIMEOUT;
-        loop {
-            match Flock::lock(file, FlockArg::LockExclusiveNonblock) {
-                Ok(lock) => return Ok(lock),
-                Err((_, errno)) if Instant::now() >= deadline => return Err(system(path.display(), errno)),
-                Err((returned, _)) => file = returned,
-            }
-            sleep(Duration::from_millis(10));
-        }
+        let path = self.trusted_budget_dir()?.join(format!("{}.lock", self.uid));
+        let file = self.open_lock(&path)?;
+        flock(file, &path)
     }
 
     /// The budget must be the user's own and private; one that isn't is an error, never an empty
     /// budget.
     fn load_budget(&self) -> Result<Budget, Error> {
         let path = self.trusted_budget_dir()?.join(format!("{}.budget", self.uid));
+        let refuse = |why: &str| Err(Error::System(format!("{}: {why}; sudo properpin set starts it over", path.display())));
         let (info, text) = match read_regular_file(&path) {
-            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Budget::default()),
+            Err(error) if error.kind() == ErrorKind::NotFound => return refuse("missing"),
             result => result.map_err(|error| system(path.display(), error))?,
         };
-        let refuse = |why: &str| Err(Error::System(format!("{}: {why}; sudo properpin set starts it over", path.display())));
         if info.uid() != self.uid {
             return refuse(&format!("owned by uid {}, not {}", info.uid(), self.uid));
         }
@@ -267,8 +271,19 @@ impl Store for UserFiles {
     }
 }
 
-/// The metadata and text of `path`, which must be a regular file and not a symlink. Both come from
-/// one open file, so the file checked is the file read.
+/// An exclusive lock on `file`, waiting at most [`LOCK_TIMEOUT`] for whoever holds it.
+fn flock(mut file: File, path: &Path) -> Result<Flock<File>, Error> {
+    let deadline = Instant::now() + LOCK_TIMEOUT;
+    loop {
+        match Flock::lock(file, FlockArg::LockExclusiveNonblock) {
+            Ok(lock) => return Ok(lock),
+            Err((_, errno)) if Instant::now() >= deadline => return Err(system(path.display(), errno)),
+            Err((returned, _)) => file = returned,
+        }
+        sleep(Duration::from_millis(10));
+    }
+}
+
 /// The global settings alone, from the config at `path`, for the PAM module: it runs as the user,
 /// who can't read their own file. Trusted when owned by root, or by `uid`, the user the module
 /// runs as: the one setting the module uses changes only how long that user's own correct PIN
@@ -304,6 +319,8 @@ fn read_trusted(path: &Path, owners: &[u32], private: bool) -> Result<Option<Str
     Ok(Some(text))
 }
 
+/// The metadata and text of `path`, which must be a regular file and not a symlink. Both come from
+/// one open file, so the file checked is the file read.
 fn read_regular_file(path: &Path) -> std::io::Result<(Metadata, String)> {
     let file = OpenOptions::new().read(true).custom_flags(O_NOFOLLOW).open(path)?;
     let info = file.metadata()?;
@@ -418,6 +435,7 @@ mod tests {
             assert!(files.save_budget(&Budget::default()).is_err());
         }
         fs::set_permissions(&dir, Permissions::from_mode(0o1770)).unwrap();
+        files.start_budget(&Budget::default()).unwrap();
         assert!(files.lock().is_ok());
     }
 
@@ -441,10 +459,11 @@ mod tests {
         assert!(linked.lock().unwrap_err().to_string().contains("not a directory"));
     }
 
-    /// A test can't make files owned by someone else, so it plays the other side: the files are
-    /// built for another uid, and the files the test creates stand in for planted ones.
+    /// The pinchecker never creates the lock file, so a missing one is refused. A test can't make
+    /// files owned by someone else, so it plays the other side: the files are built for another
+    /// uid, and the file the test creates stands in for a planted one.
     #[test]
-    fn a_lock_file_planted_by_someone_else_is_refused() {
+    fn a_missing_or_planted_lock_file_is_refused() {
         let Scratch { files, .. } = &scratch();
         let budget = files.budget.clone().unwrap();
         let victim = UserFiles::new(files.etc.clone(), files.etc_owner, "victim", files.uid + 1).unwrap().with_budget(
@@ -452,13 +471,26 @@ mod tests {
             budget.owner,
             budget.group,
         );
-        // Creating it for the victim takes root, so a test's attempt fails and leaves nothing.
         let error = victim.lock().unwrap_err().to_string();
-        assert!(error.contains("Operation not permitted"), "{error}");
-        assert!(!victim.lock_file().unwrap().exists());
+        assert!(error.contains("No such file"), "{error}");
+        assert!(!victim.lock_file().unwrap().exists(), "and nothing was created");
         write(&victim.lock_file().unwrap(), "", 0o600);
         let error = victim.lock().unwrap_err().to_string();
         assert!(error.contains(&format!("owned by uid {}, not {}", files.uid, files.uid + 1)), "{error}");
+        assert!(error.contains("sudo properpin set makes a new one"), "{error}");
+    }
+
+    /// Whatever stands where the lock file should be, set replaces it with a lock file of the user's.
+    #[test]
+    fn set_replaces_anything_in_place_of_the_lock_file() {
+        let Scratch { files, _dir } = &scratch();
+        let lock = files.lock_file().unwrap();
+        symlink(_dir.path().join("elsewhere"), &lock).unwrap();
+        assert!(files.lock().is_err());
+        files.start_budget(&Budget::default()).unwrap();
+        assert!(fs::symlink_metadata(&lock).unwrap().is_file());
+        assert_eq!(fs::metadata(&lock).unwrap().mode() & 0o7777, 0o600);
+        assert!(files.lock().is_ok());
     }
 
     #[test]
@@ -470,8 +502,10 @@ mod tests {
     }
 
     #[test]
-    fn the_budget_round_trips_and_starts_empty() {
+    fn the_budget_starts_at_set_and_round_trips() {
         let Scratch { files, .. } = &scratch();
+        assert!(files.load_budget().unwrap_err().to_string().contains("missing; sudo properpin set starts it over"));
+        files.start_budget(&Budget::default()).unwrap();
         assert_eq!(files.load_budget().unwrap(), Budget::default());
         let budget = Budget { consecutive: 2, pending: vec![1], concerning: vec![2], total: 3, disabled: None };
         files.save_budget(&budget).unwrap();
@@ -482,7 +516,7 @@ mod tests {
         assert!(!files.lock_file().unwrap().exists(), "the lock file goes with the budget");
         drop(lock);
         assert!(!files.remove_budget().unwrap());
-        assert_eq!(files.load_budget().unwrap(), Budget::default());
+        assert!(files.load_budget().is_err());
     }
 
     #[test]
@@ -531,9 +565,11 @@ mod tests {
     #[test]
     fn a_held_lock_times_out_instead_of_hanging() {
         let Scratch { files, .. } = &scratch();
+        files.start_budget(&Budget::default()).unwrap();
         let _held = files.lock().unwrap();
         let started = Instant::now();
         assert!(files.lock().is_err());
         assert!(started.elapsed() < LOCK_TIMEOUT * 2);
+        assert!(files.start_budget(&Budget::default()).is_err(), "set waits for an attempt still running, too");
     }
 }

@@ -33,7 +33,7 @@ use std::process::{Command, ExitCode, Stdio};
 
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
-use properpin_core::{Clock, Hasher, MAX_PIN_BYTES, Secret, Store, exit};
+use properpin_core::{Budget, Clock, Hasher, MAX_PIN_BYTES, Secret, Store, exit};
 use properpin_sys::{Account, SystemClock, UserFiles, Yescrypt, current_euid, current_uid, group_by_name, shadow_hash};
 
 /// Manage the PIN that unlocks the KDE lock screen.
@@ -175,7 +175,7 @@ fn set(cli: &Cli, account: &Account, yes: bool) -> Result<()> {
     // Only the hash changes. Per-user settings already in the file are kept.
     files.save_pin(&[(properpin_core::HASH_SETTING, &hash)], group)?;
     // A new PIN, so no failure against the old one counts any more, and nothing stays paused or disabled.
-    files.remove_budget()?;
+    files.start_budget(&Budget::default())?;
     println!("PIN set for {}. The lock screen takes it from now on.", account.name);
     Ok(())
 }

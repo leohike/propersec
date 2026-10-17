@@ -26,7 +26,8 @@ use std::time::{Duration, Instant};
 
 use pamharness::host::{self, Sigchld};
 use pamharness::{Attempt, PamClient, PamSession};
-use properpin_sys::{Account, Yescrypt, current_uid};
+use properpin_core::Budget;
+use properpin_sys::{Account, UserFiles, Yescrypt, current_egid, current_uid};
 
 const PIN: &str = "4859";
 const PASSWORD: &str = "correct horse battery staple";
@@ -62,6 +63,10 @@ impl Sandbox {
         let user_file = sandbox.path("etc/users").join(&sandbox.user);
         fs::write(&user_file, format!("hash = {}\n", Yescrypt.hash(PIN, 4).unwrap())).unwrap();
         fs::set_permissions(&user_file, Permissions::from_mode(0o640)).unwrap();
+        // The budget and lock file properpin set creates.
+        let uid = current_uid();
+        let files = UserFiles::new(sandbox.path("etc"), uid, &sandbox.user, uid).unwrap();
+        files.with_budget(sandbox.path("var"), uid, current_egid()).start_budget(&Budget::default()).unwrap();
         // unix_chkpwd's protocol: the password on stdin, ending in a NUL; exit 0 for a match.
         let chkpwd = format!("#!/bin/bash\nIFS= read -r -d '' password\n[[ $1 == \"$(id -un)\" && $password == '{PASSWORD}' ]]\n");
         sandbox.script("unix_chkpwd", &chkpwd);

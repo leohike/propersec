@@ -12,7 +12,7 @@ Fixed on 2026-10-17: `enable` and `disable` are gone, and `install` takes proper
 
 Before, `/run/properpin` was emptied at every boot; nothing in `/var/lib/properpin` ever is.
 
-- A lock file planted in a user's name (which takes an exploited pinchecker) blocks their PIN until `sudo properpin set` or `remove`, which delete it. `enable` still doesn't.
+- A lock file planted in a user's name (which takes an exploited pinchecker) blocks their PIN until `sudo properpin set` or `remove`, which delete it. `enable` still doesn't. Fixed on 2026-10-17 at the root: `set` creates the lock file and the budget, the pinchecker never creates either, and nothing can be planted while they exist.
 - Stray `.<uid>.*` temporary files from attempts killed mid-write pile up for good.
 - Every attempt, even one refused while the PIN is paused or disabled, saves the budget and syncs the file and the directory while the lock screen waits. Usually milliseconds, more on a slow or busy disk.
 
@@ -22,11 +22,11 @@ The fix: `enable` clears the lock file too; the pinchecker deletes its own tempo
 
 - The system test looked for the pinchecker's process under its old name (`properpin-helpe`) after the rename, so "no pinchecker left running" checked nothing until it was noticed. Nothing guards against an assertion like that going silently empty again.
 - The property test's model lost its reboot event. "A reboot changes nothing" now holds only because nothing is left to change, and no unit test simulates one.
-- The fix for two first attempts racing to create the lock file (the loser now opens the winner's) has no unit test; only a timing-dependent container scenario covers it.
+- The fix for two first attempts racing to create the lock file (the loser now opens the winner's) has no unit test; only a timing-dependent container scenario covers it. Gone on 2026-10-17, with the creation it raced on.
 - The confirmation prompt on a real terminal, the answers `y` and `N`, is untested; only the refusal without a terminal and `--yes` are.
 - Mutation testing hasn't been run on the new code.
 
-The fix: a self-check in the system test that the process name it looks for is the installed binary's, cut to 15 bytes; a unit test for the `AlreadyExists` path; a run of `just mutants` and work through what survives.
+The fix: a self-check in the system test that the process name it looks for is the installed binary's, cut to 15 bytes; a run of `just mutants` and work through what survives.
 
 ## The PIN-equals-password check is narrower than it looks
 
