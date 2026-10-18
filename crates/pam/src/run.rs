@@ -23,8 +23,8 @@ pub trait Transaction {
     fn user(&self) -> Result<String, Error>;
     /// What the user typed, asking for it if no module has yet. Stored by libpam as `PAM_AUTHTOK`,
     /// so pam_unix in the stock stack below reuses it instead of asking again. This is a copy of
-    /// its own, wiped when dropped; libpam's stays for the rest of the stack and libpam wipes it
-    /// itself (docs/chaos/pin-pam-copy.md).
+    /// its own, wiped when dropped; libpam's stays for the rest of the stack, unless it was the
+    /// PIN, and libpam wipes it itself (docs/chaos/pin-pam-copy.md).
     fn typed(&self) -> Result<Secret, Error>;
 }
 

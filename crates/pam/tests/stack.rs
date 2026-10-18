@@ -240,6 +240,32 @@ fn setcred_reaches_the_housekeeping_line_after_a_password_unlock_only() {
     }
 }
 
+/// A line after a correct PIN, as `postlogin` would be in properpin's own file
+/// (docs/where-the-pin-belongs-in-pam-IMPORTANT.md), finds no typed password and has to ask, as
+/// after a fingerprint unlock; after any other input it finds what was typed. `pam_exec
+/// expose_authtok` stands for a module that keeps the password, and asks when there is none.
+#[test]
+fn a_correct_pin_is_not_left_for_the_lines_after_it() {
+    let sandbox = Sandbox::new();
+    sandbox.script("reader", "#!/bin/sh\ncat >/dev/null\n");
+    let module = built().join("libpam_properpin.so");
+    let text = format!(
+        "auth [success=ok default=ignore] {} check pinchecker={} log={}\nauth required pam_exec.so quiet expose_authtok {}\n",
+        module.display(),
+        sandbox.path("pinchecker").display(),
+        sandbox.path("log").display(),
+        sandbox.path("reader").display()
+    );
+    fs::write(sandbox.path("pam.d/kde-then-reader"), text).unwrap();
+    let client = PamClient::new(sandbox.path("pam.d"), "kde-then-reader", &sandbox.user);
+    for (typed, prompts) in [("1111", 1), (PIN, 2)] {
+        let attempt = client.authenticate(typed);
+        assert!(attempt.unlocked(), "{typed}: {attempt:?} {}", sandbox.log());
+        assert_eq!(attempt.prompts.len(), prompts, "{typed}: {attempt:?}");
+    }
+    assert!(sandbox.log().contains("unlocked with the PIN"), "{}", sandbox.log());
+}
+
 #[test]
 fn wrong_pins_fall_through_and_three_require_the_password() {
     let sandbox = Sandbox::new();

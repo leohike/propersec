@@ -2,7 +2,7 @@
 //! All of the module's `unsafe` code is in this file.
 #![allow(unsafe_code)]
 
-use std::ffi::{CStr, CString, c_char, c_int};
+use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
@@ -26,6 +26,7 @@ pub struct PamHandle {
 unsafe extern "C" {
     fn pam_get_user(pamh: *mut PamHandle, user: *mut *const c_char, prompt: *const c_char) -> c_int;
     fn pam_get_authtok(pamh: *mut PamHandle, item: c_int, authtok: *mut *const c_char, prompt: *const c_char) -> c_int;
+    fn pam_set_item(pamh: *mut PamHandle, item: c_int, value: *const c_void) -> c_int;
     fn pam_syslog(pamh: *const PamHandle, priority: c_int, fmt: *const c_char, ...);
 }
 
@@ -69,7 +70,11 @@ pub unsafe extern "C" fn pam_sm_authenticate(pamh: *mut PamHandle, _flags: c_int
             Some(file) => file,
             None => &pam,
         };
-        if run_and_log(&pam, &args, log, run) { PAM_SUCCESS } else { PAM_IGNORE }
+        if !run_and_log(&pam, &args, log, run) {
+            return PAM_IGNORE;
+        }
+        pam.forget_typed(log);
+        PAM_SUCCESS
     }))
     .unwrap_or(PAM_IGNORE)
 }
@@ -200,6 +205,21 @@ impl Transaction for Pam {
         // SAFETY: a non-null result is a NUL-terminated string owned by libpam. It is copied once,
         // into a Vec of exactly its length that `Secret` then owns and wipes.
         Ok(Secret::new(unsafe { CStr::from_ptr(typed) }.to_bytes().to_vec()))
+    }
+}
+
+impl Pam {
+    /// After a correct PIN: clear `PAM_AUTHTOK`, which libpam wipes as it lets go of it. Any line
+    /// after this one then finds no typed password, as after a fingerprint unlock, instead of
+    /// taking the PIN for the password (docs/where-the-pin-belongs-in-pam-IMPORTANT.md). Today the
+    /// `check` line's success ends the stack, so nothing would read it anyway; this is hygiene, and
+    /// failing at it doesn't refuse the PIN.
+    fn forget_typed(&self, log: &dyn Log) {
+        // SAFETY: `self.0` is the live handle; a null value is how a module clears an item.
+        let status = unsafe { pam_set_item(self.0, PAM_AUTHTOK, std::ptr::null()) };
+        if status != PAM_SUCCESS {
+            log.log(&format!("clearing what was typed failed with {status}"));
+        }
     }
 }
 

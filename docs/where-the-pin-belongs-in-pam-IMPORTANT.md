@@ -59,7 +59,7 @@ Today a correct PIN ends the `kde` stack at once (`sufficient` with success mean
 
 The PIN is one more way to unlock, like a fingerprint, so it follows the same pattern: its own check, then `postlogin`. That is the `include postlogin` at the end of properpin's file. Either way `postlogin` runs exactly once: at the end of properpin's file after a PIN unlock, at the end of `kde` after a password unlock.
 
-One care: `postlogin`'s modules already have to cope with fingerprint and smartcard unlocks, where no password was typed. After a PIN unlock they would find the PIN where PAM keeps the typed password (`PAM_AUTHTOK`), and a module that keeps "the password" for later, like `pam_ecryptfs unwrap`, would keep the PIN. So after a correct PIN the module should clear `PAM_AUTHTOK`, making the PIN unlock look to `postlogin` exactly like a fingerprint unlock, and wiping libpam's copy of the PIN sooner (reasoned, not tried).
+One care: `postlogin`'s modules already have to cope with fingerprint and smartcard unlocks, where no password was typed. After a PIN unlock they would find the PIN where PAM keeps the typed password (`PAM_AUTHTOK`), and a module that keeps "the password" for later, like `pam_ecryptfs unwrap`, would keep the PIN. So after a correct PIN the module clears `PAM_AUTHTOK`, making the PIN unlock look to `postlogin` exactly like a fingerprint unlock, and wiping libpam's copy of the PIN sooner. Built on 2026-10-18, ahead of properpin's own file: `crates/pam/tests/stack.rs` shows a line after a correct PIN finding nothing typed and having to ask, and after any other input finding it.
 
 ## In one sentence
 
@@ -70,6 +70,6 @@ The PIN gets the same gates and the same after-login hooks as every other way to
 - A test in `crates/pam/tests/stack.rs` for the trap described in the section on the proper shape: with faillock's `preauth` succeeding and the PIN wrong, properpin's file must fail, and so must a `postlogin` with an `optional` line that succeeds.
 - That `sufficient` works on a `substack` line as on a module line, and that the setcred replay after a PIN unlock stops after the first `kde` line, so the housekeeping idea in `docs/current-setcred.md` still holds.
 - That `pam_faillock preauth` really lets everything through when no stack records failures, and what it does when another service, set up by hand, does record them.
-- That clearing `PAM_AUTHTOK` after a correct PIN changes nothing for kscreenlocker, which never reads it.
+- That clearing `PAM_AUTHTOK` after a correct PIN changes nothing for the real kscreenlocker, which never reads it (shown only with the test harness so far).
 - The sets of `password-auth` lines `add` and `doctor` accept, and their message when they refuse.
 - `integrate-into-pam.sh` replacing today's `check` line with the `substack` line, and install and uninstall handling the new file.
