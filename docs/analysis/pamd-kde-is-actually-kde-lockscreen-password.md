@@ -59,11 +59,11 @@ Two leftovers on this machine: `/etc/pam.d/kscreensaver` and `/etc/pam.d/kcheckp
 
 ## What if properpin's lines went into plasmalogin
 
-Guessed on 2026-10-18; not checked.
+Checked on 2026-10-18; `docs/why-not-loginscreen.md` has the details and the reasons properpin stays off the login screen.
 
-- **`sudo` would be unaffected.** Each program reads only its own PAM file, `sudo` reads `/etc/pam.d/sudo`, which pulls in `system-auth`, and nothing pulls in `plasmalogin`. Only lines in `sudo` itself or in `system-auth` would reach it.
-- **The PIN wouldn't work at login either.** The login screen checks the password as root, before anyone is logged in. The module refuses to run as root ("running as root; properpin belongs in the lock screen's stack only"), and so does the pinchecker, which takes the user whose PIN it checks from whoever runs it, root at login. The PIN would always be refused, the password would still work, and each login would log one "PIN refused" line.
-- **Making it work** would need a redesign: the pinchecker would have to accept a user name from root, and the threat model, the lock screen only today, would grow.
+- **Only graphical login would be reached** (verified here). Among the programs that link libpam, only `/usr/libexec/plasmalogin-helper` names `plasmalogin`, and no PAM file pulls it in. `sudo`, `sshd`, polkit, `run0` and the text console (`agetty` → `/bin/login` → `login` → `system-auth`) read their own files.
+- **The PIN wouldn't work at login** (verified here). `plasmalogin-helper` checks the password as root, and both the module ("running as root; properpin belongs in the lock screen's stack only") and the pinchecker ("refused: root has no lock screen to unlock") refuse root. The PIN would always be refused, the password would still work, and each login would log an error.
+- **Making it work** would need the pinchecker to accept a user name from root, would leave the wallet locked (`pam_kwallet` needs the real password at login), and would mean an `/etc/pam.d/plasmalogin` that hides Fedora's `/usr/lib/pam.d/plasmalogin` (reasoned).
 
 ## A possible hardening
 
