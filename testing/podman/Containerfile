@@ -26,9 +26,10 @@ RUN --mount=type=cache,target=/root/.cargo/registry \
     testing/podman/build-broken.sh
 
 FROM registry.fedoraproject.org/fedora:44
-# util-linux brings su and login, each with its PAM service; install.sh needs diff and cmp, and
-# readelf from binutils to check what the binaries load.
-RUN dnf -y install --setopt=install_weak_deps=False sudo util-linux diffutils binutils cpio && dnf clean all
+# util-linux brings su and login, each with its PAM service, and util-linux-script the terminal the
+# command gets to run itself through sudo; install.sh needs diff and cmp, and readelf from binutils
+# to check what the binaries load.
+RUN dnf -y install --setopt=install_weak_deps=False sudo util-linux util-linux-script diffutils binutils cpio && dnf clean all
 # The lock screen's /etc/pam.d/kde exactly as Fedora ships it, without the rest of plasma-workspace.
 RUN cd /tmp \
     && dnf -y download plasma-workspace \

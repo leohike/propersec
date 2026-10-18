@@ -17,7 +17,9 @@
 //!
 //! Everything but `status` reads or changes files only root may, so it runs under sudo or pkexec,
 //! and getting there takes the password. That's the point: someone at an unlocked desk must not be
-//! able to plant a PIN they know. The PIN is read from the terminal, or from stdin when it isn't one,
+//! able to plant a PIN they know. Typed on a terminal without either, it runs itself again through
+//! sudo, which asks for the password just as typing sudo would; without a terminal, as in a
+//! script, nothing could answer that question, so it says to run it with sudo. The PIN is read from the terminal, or from stdin when it isn't one,
 //! never from the command line, where other users could see it in the process list.
 //!
 //! The hash file is written readable by the PIN checker's group only, so the user can't read it either:
@@ -35,6 +37,7 @@
 
 use std::fs;
 use std::io::{BufRead, IsTerminal, Read, Write, stdin};
+use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Command, ExitCode, Stdio};
 
@@ -44,6 +47,10 @@ use screenlock_pin_core::{Budget, Clock, Hasher, MAX_PIN_BYTES, Secret, Settings
 use screenlock_pin_sys::{Account, AllUsers, SystemClock, UserFiles, Yescrypt, current_euid, current_uid, group_by_name, shadow_hash};
 
 mod doctor;
+
+/// What everything but `status` runs itself again through, by its full path, so that no program
+/// earlier in `PATH` gets the password.
+const SUDO: &str = "/usr/bin/sudo";
 
 /// Manage the PIN that unlocks the KDE lock screen.
 #[derive(Debug, Parser)]
@@ -138,6 +145,9 @@ fn main() -> ExitCode {
 
 /// `Ok(false)` is a clean "no".
 fn run(cli: &Cli) -> Result<bool> {
+    if !matches!(cli.command, Action::Status) {
+        run_again_through_sudo(cli)?;
+    }
     match &cli.command {
         Action::Set(asked) => set(cli, &target_account(&asked.target)?, asked.yes)?,
         Action::Enable(asked) => enable(cli, &target_account(&asked.target)?, asked.yes)?,
@@ -366,6 +376,20 @@ fn status(cli: &Cli) -> Result<bool> {
         _ if output.stdout.is_empty() => bail!("{} failed ({}) without saying why", cli.pin_checker.display(), output.status),
         _ => bail!("{} failed ({})", cli.pin_checker.display(), output.status),
     }
+}
+
+/// Typed on a terminal by someone other than root, run this very program again through sudo, with
+/// the same arguments, and never come back. Otherwise, and when sudo has already run it, carry on,
+/// and `require_owner` says what is wrong. The program is this binary, not the wrapper in
+/// /usr/local/bin, whose paths are among the arguments.
+fn run_again_through_sudo(cli: &Cli) -> Result<()> {
+    if cli.owner != 0 || current_euid() == 0 || !stdin().is_terminal() || std::env::var_os("SUDO_USER").is_some() {
+        return Ok(());
+    }
+    let program = std::env::current_exe().context("finding this program, to run it through sudo")?;
+    eprintln!("screenlock-pin: this needs root, so it runs again through sudo, which may ask for your password");
+    let error = Command::new(SUDO).arg("--").arg(program).args(std::env::args_os().skip(1)).exec();
+    Err(error).with_context(|| format!("running {SUDO}; run it with sudo yourself"))
 }
 
 fn require_owner(owner: u32) -> Result<()> {

@@ -103,6 +103,8 @@ sudo screenlock-pin set                            # choose the PIN, typed twice
 sudo screenlock-pin enable                         # only if too many suspicious failures disabled it
 ```
 
+Every `screenlock-pin` command but `status` needs root. Typed on a terminal without `sudo`, it runs itself again through `/usr/bin/sudo`, with the same arguments, so sudo asks for your password just as if you had typed it; `set` without `--user` then still means your own PIN, since sudo says who called it. Without a terminal, as in a script, it never starts sudo, which nobody could answer, and says to run it with sudo.
+
 When a PIN doesn't work, `screenlock-pin status` says why, and so does `sudo screenlock-pin doctor`, for every user at once, with the command that fixes each problem. Doctor changes nothing, and there are no repairs, only these commands:
 
 ```

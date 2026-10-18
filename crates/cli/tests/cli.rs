@@ -221,6 +221,34 @@ fn status_shows_what_the_pin_checker_sees() {
     says(&sandbox.screenlock_pin(&["status"], "").failure(), "pin-checker");
 }
 
+/// Without a terminal nothing could answer sudo's question, so a command that needs root never
+/// starts sudo, and says to run it with sudo instead. On a terminal it runs itself again through
+/// sudo, which the container test shows, since that needs a real sudo.
+#[test]
+fn without_a_terminal_it_says_to_run_it_with_sudo() {
+    if current_uid() == 0 {
+        return;
+    }
+    let sandbox = Sandbox::new();
+    let root = sandbox.0.path();
+    for command in ["set", "enable", "remove", "restore-defaults", "doctor"] {
+        // No --owner: root owns the files, as once installed.
+        let assert = Command::cargo_bin("screenlock-pin")
+            .unwrap()
+            .env_remove("SUDO_USER")
+            .env_remove("PKEXEC_UID")
+            .args(["--etc", root.join("etc").to_str().unwrap(), "--pin-checker", root.join("pin-checker").to_str().unwrap()])
+            .args(["--budget", root.join("var").to_str().unwrap(), command])
+            .write_stdin(new_pin("cat4859", "cat4859"))
+            .assert()
+            .failure();
+        says(&assert, "this changes files only root may change; run it with sudo");
+        let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+        assert!(!stderr.contains("through sudo"), "{command}: {stderr}");
+    }
+    assert!(sandbox.user_files().is_empty());
+}
+
 #[test]
 fn set_needs_the_pin_checker_group_to_exist() {
     let sandbox = Sandbox::new();

@@ -188,6 +188,7 @@ fn run() -> ExitCode {
         ("one user's PIN checker can't touch another's counts", one_users_pin_checker_cannot_touch_anothers_counts),
         ("counts planted in another user's name are refused", planted_counts_are_refused),
         ("the PIN checker's group stays empty and locked, with no account", the_group_stays_empty_and_locked),
+        ("typed on a terminal without root, the command runs itself through sudo", the_command_runs_itself_through_sudo),
         ("typos followed by the PIN or the password are forgiven", typos_are_forgiven),
         ("the slow attack: a guess, the user's PIN much later, again", the_slow_attack_is_stopped),
         ("guesses nobody forgives disable the PIN, and the password can't help", unforgiven_guesses_disable_the_pin),
@@ -573,6 +574,31 @@ fn planted_counts_are_refused(world: &World) -> Outcome {
     // On disk the planted lock file would refuse the PIN for good; set clears it.
     screenlock_pin_as_root(&["set", "--user", USER, "--yes"], &format!("{PIN}\n{PIN}\n"))?;
     world.pin_unlocks()
+}
+
+/// Typed on a terminal without root, the command runs itself again through sudo, which would ask for
+/// the password as typing sudo does; here it doesn't, since the scenario lets alice use sudo without
+/// one, and only while it runs. `script` gives the command a terminal. Without one, the command
+/// never starts sudo, and says to run it with sudo.
+fn the_command_runs_itself_through_sudo(world: &World) -> Outcome {
+    let piped = world.as_user(USER, &["/usr/local/bin/screenlock-pin", "doctor"], b"")?;
+    let said = String::from_utf8_lossy(&piped.stderr);
+    if piped.status.success() || !said.contains("run it with sudo") || said.contains("through sudo") {
+        return Err(format!("without a terminal, doctor said: {said}"));
+    }
+    let sudoers = Path::new("/etc/sudoers.d/screenlock-pin-systest");
+    write_file(sudoers, &format!("{USER} ALL=(root) NOPASSWD: ALL\n"), 0, 0, 0o440)?;
+    let typed = world.as_user(USER, &["script", "-qec", "/usr/local/bin/screenlock-pin doctor", "/dev/null"], b"");
+    fs::remove_file(sudoers).map_err(message)?;
+    let typed = typed?;
+    let said = format!("{}{}", String::from_utf8_lossy(&typed.stdout), String::from_utf8_lossy(&typed.stderr));
+    if !typed.status.success()
+        || !said.contains("runs again through sudo")
+        || !said.contains(&format!("no problems; a PIN is set for {USER}"))
+    {
+        return Err(format!("on a terminal, doctor said: {said}"));
+    }
+    Ok(())
 }
 
 /// Anyone with the PIN checker's group can read every hash and change every count, so install.sh check
