@@ -1,8 +1,8 @@
-//! The lock-screen stack, through the real libpam and the real `pam_properpin.so`.
+//! The lock-screen stack, through the real libpam and the real `pam_screenlock_pin.so`.
 //!
 //! The PAM files come from a temporary directory (`pam_start_confdir`). The stack is the shipped
 //! `packaging/kde-auth.pam` with only two things swapped: the module path points at the freshly built
-//! `.so`, given `pinchecker=` with a script that runs the freshly built `properpin-pinchecker` against
+//! `.so`, given `pin_checker=` with a script that runs the freshly built `screenlock-pin-checker` against
 //! the sandbox (through its `--dev-*` options, which it accepts here because it isn't setgid), and
 //! the stock `password-auth` substack becomes one of two stand-ins, `pam_permit` (the password was
 //! right) or `pam_deny` (it was wrong). The control columns are the shipped ones.
@@ -12,7 +12,7 @@
 //! SIGCHLD, each in a process of its own, since SIGCHLD is one setting for the whole process
 //! (docs/chaos/harness-closer-to-kscreenlocker.md).
 //!
-//! What this can't show: how the real pam_unix, the real setgid pinchecker and the real greeter
+//! What this can't show: how the real pam_unix, the real setgid PIN checker and the real greeter
 //! behave. The container test covers the first two.
 
 use std::fs::{self, Permissions};
@@ -26,14 +26,14 @@ use std::time::{Duration, Instant};
 
 use pamharness::host::{self, Sigchld};
 use pamharness::{Attempt, PamClient, PamSession};
-use properpin_core::Budget;
-use properpin_sys::{Account, UserFiles, Yescrypt, current_egid, current_uid};
+use screenlock_pin_core::Budget;
+use screenlock_pin_sys::{Account, UserFiles, Yescrypt, current_egid, current_uid};
 
 const PIN: &str = "4859";
 const PASSWORD: &str = "correct horse battery staple";
 const SHIPPED: &str = include_str!("../../../packaging/kde-auth.pam");
 /// Set in the environment of a test binary started again for one test alone; names that test.
-const ALONE: &str = "PROPERPIN_STACK_TEST_ALONE";
+const ALONE: &str = "SCREENLOCK_PIN_STACK_TEST_ALONE";
 
 #[derive(Clone, Copy)]
 enum Password {
@@ -47,8 +47,8 @@ struct Sandbox {
 }
 
 impl Sandbox {
-    /// A sandboxed `/etc/properpin` with a PIN set for the current user, an empty budget dir, a
-    /// pinchecker that uses them, and a PAM config dir.
+    /// A sandboxed `/etc/screenlock-pin` with a PIN set for the current user, an empty budget dir, a
+    /// PIN checker that uses them, and a PAM config dir.
     fn new() -> Self {
         let dir = tempfile::tempdir().unwrap();
         let user = Account::by_uid(current_uid()).unwrap().name;
@@ -66,27 +66,27 @@ impl Sandbox {
         let user_file = sandbox.path("etc/users").join(&sandbox.user);
         fs::write(&user_file, format!("hash = {}\n", Yescrypt.hash(PIN, 4).unwrap())).unwrap();
         fs::set_permissions(&user_file, Permissions::from_mode(0o640)).unwrap();
-        // The budget and lock file properpin set creates.
+        // The budget and lock file screenlock-pin set creates.
         let uid = current_uid();
         let files = UserFiles::new(sandbox.path("etc"), uid, &sandbox.user, uid).unwrap();
         files.with_budget(sandbox.path("var"), uid, current_egid()).start_budget(&Budget::default()).unwrap();
-        sandbox.pinchecker("");
+        sandbox.pin_checker("");
         // The two services sessions use, written once, so threads can open sessions at will.
         sandbox.stack_as("kde-right", Password::Right, "");
         sandbox.stack_as("kde-wrong", Password::Wrong, "");
         sandbox
     }
 
-    /// The pinchecker: a script that runs `first` and then the built pinchecker against the sandbox.
-    fn pinchecker(&self, first: &str) {
-        let pinchecker = format!(
+    /// The PIN checker: a script that runs `first` and then the built PIN checker against the sandbox.
+    fn pin_checker(&self, first: &str) {
+        let pin_checker = format!(
             "#!/bin/sh\n{first}\nexec {} \"$@\" --dev-etc {} --dev-budget {} --dev-log {}\n",
-            built().join("properpin-pinchecker").display(),
+            built().join("screenlock-pin-checker").display(),
             self.path("etc").display(),
             self.path("var").display(),
             self.path("log").display()
         );
-        self.script("pinchecker", &pinchecker);
+        self.script("pin-checker", &pin_checker);
     }
 
     fn path(&self, relative: &str) -> PathBuf {
@@ -114,9 +114,9 @@ impl Sandbox {
 
     fn stack_as(&self, service: &str, password: Password, extra: &str) {
         let module = format!(
-            "{} pinchecker={} log={} {extra} ",
-            built().join("libpam_properpin.so").display(),
-            self.path("pinchecker").display(),
+            "{} pin_checker={} log={} {extra} ",
+            built().join("libpam_screenlock_pin.so").display(),
+            self.path("pin-checker").display(),
             self.path("log").display()
         );
         let substack = match password {
@@ -124,7 +124,7 @@ impl Sandbox {
             Password::Wrong => " password-auth-wrong\n",
         };
         let mut text: String = SHIPPED.lines().filter(|line| !line.starts_with('#')).map(|line| format!("{line}\n")).collect();
-        for (old, new) in [("/usr/local/lib64/security/pam_properpin.so ", module.as_str()), (" password-auth\n", substack)] {
+        for (old, new) in [("/usr/local/lib64/security/pam_screenlock_pin.so ", module.as_str()), (" password-auth\n", substack)] {
             // Fail loudly if the shipped file changes shape, rather than test something else.
             assert!(text.contains(old), "{old:?} is no longer in packaging/kde-auth.pam");
             text = text.replace(old, new);
@@ -159,7 +159,7 @@ impl Sandbox {
     }
 }
 
-/// The directory with a fresh `pam_properpin.so` and `properpin-pinchecker`. `cargo test` rebuilds this
+/// The directory with a fresh `pam_screenlock_pin.so` and `screenlock-pin-checker`. `cargo test` rebuilds this
 /// crate's rlib for the tests but not its cdylib, so build both here, once per test run, or the
 /// tests would load a stale module.
 fn built() -> PathBuf {
@@ -172,16 +172,16 @@ fn built() -> PathBuf {
                 "build",
                 "--quiet",
                 "--package",
-                "pam_properpin",
+                "pam_screenlock_pin",
                 "--package",
-                "properpin-pinchecker",
+                "screenlock-pin-checker",
                 "--manifest-path",
                 concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"),
             ]);
             if profile_dir.ends_with("release") {
                 cargo.arg("--release");
             }
-            assert!(cargo.status().unwrap().success(), "building pam_properpin and properpin-pinchecker failed");
+            assert!(cargo.status().unwrap().success(), "building pam_screenlock_pin and screenlock-pin-checker failed");
             profile_dir
         })
         .clone()
@@ -244,7 +244,7 @@ fn setcred_reaches_the_after_password_auth_line_after_a_password_unlock_only() {
     }
 }
 
-/// A line after a correct PIN, as `postlogin` would be in properpin's own file
+/// A line after a correct PIN, as `postlogin` would be in screenlock-pin's own file
 /// (docs/where-the-pin-belongs-in-pam-IMPORTANT.md), finds no typed password and has to ask, as
 /// after a fingerprint unlock; after any other input it finds what was typed. `pam_exec
 /// expose_authtok` stands for a module that keeps the password, and asks when there is none.
@@ -252,11 +252,11 @@ fn setcred_reaches_the_after_password_auth_line_after_a_password_unlock_only() {
 fn a_correct_pin_is_not_left_for_the_lines_after_it() {
     let sandbox = Sandbox::new();
     sandbox.script("reader", "#!/bin/sh\ncat >/dev/null\n");
-    let module = built().join("libpam_properpin.so");
+    let module = built().join("libpam_screenlock_pin.so");
     let text = format!(
-        "auth [success=ok default=ignore] {} check pinchecker={} log={}\nauth required pam_exec.so quiet expose_authtok {}\n",
+        "auth [success=ok default=ignore] {} check pin_checker={} log={}\nauth required pam_exec.so quiet expose_authtok {}\n",
         module.display(),
-        sandbox.path("pinchecker").display(),
+        sandbox.path("pin-checker").display(),
         sandbox.path("log").display(),
         sandbox.path("reader").display()
     );
@@ -292,18 +292,17 @@ fn the_pin_only_works_for_the_user_the_lock_screen_runs_as() {
 }
 
 /// A line the module can't read refuses the PIN alone. The module still asks for the input, once,
-/// so lines after it that only read it, as an older version's `pam_unix.so use_first_pass` does,
-/// still find it: the container test shows the password working through such lines.
+/// so lines after it that only read it, as `pam_unix.so use_first_pass` does, still find it.
 #[test]
 fn a_bad_pam_line_refuses_instead_of_guessing() {
     let sandbox = Sandbox::new();
     sandbox.stack(Password::Wrong, "no_such_option");
     assert!(!PamClient::new(sandbox.path("pam.d"), "kde", &sandbox.user).authenticate(PIN).unlocked());
     assert!(sandbox.log().contains("bad PAM line: unknown argument \"no_such_option\""), "{}", sandbox.log());
-    sandbox.stack(Password::Right, "config=/etc/properpin/config");
+    sandbox.stack(Password::Right, "config=/etc/screenlock-pin/config");
     let attempt = PamClient::new(sandbox.path("pam.d"), "kde", &sandbox.user).authenticate(PASSWORD);
     assert!(attempt.unlocked() && attempt.prompts.len() == 1, "the module asks, once, even on a bad line: {attempt:?}");
-    assert!(sandbox.log().contains("bad PAM line: unknown argument \"config=/etc/properpin/config\""), "{}", sandbox.log());
+    assert!(sandbox.log().contains("bad PAM line: unknown argument \"config=/etc/screenlock-pin/config\""), "{}", sandbox.log());
 }
 
 /// libpam loads and unloads the module on every transaction. Rust `.so`s have crashed on unload
@@ -324,21 +323,21 @@ fn survives_many_loads_and_unloads_across_threads() {
     });
 }
 
-/// Whatever goes wrong with the pinchecker, the PIN is refused and the password still works.
+/// Whatever goes wrong with the PIN checker, the PIN is refused and the password still works.
 #[test]
-fn a_broken_pinchecker_fails_closed() {
-    for (name, pinchecker) in [
+fn a_broken_pin_checker_fails_closed() {
+    for (name, pin_checker) in [
         ("missing", None),
         ("exits with an odd code", Some("#!/bin/sh\nexit 3\n")),
         ("killed by a signal", Some("#!/bin/sh\nkill -9 $$\n")),
         ("quits without reading", Some("#!/bin/sh\nexit 0\n")),
     ] {
         let sandbox = Sandbox::new();
-        match pinchecker {
-            None => fs::remove_file(sandbox.path("pinchecker")).unwrap(),
-            Some(text) => sandbox.script("pinchecker", text),
+        match pin_checker {
+            None => fs::remove_file(sandbox.path("pin-checker")).unwrap(),
+            Some(text) => sandbox.script("pin-checker", text),
         }
-        // "quits without reading" exits 0, a yes: the module trusts the pinchecker's answer, so that
+        // "quits without reading" exits 0, a yes: the module trusts the PIN checker's answer, so that
         // one unlocks. The point there is that writing to it raises no SIGPIPE in the host.
         let unlocked = sandbox.attempt(Password::Wrong, PIN).unlocked();
         assert_eq!(unlocked, name == "quits without reading", "{name}: {}", sandbox.log());
@@ -373,9 +372,9 @@ fn one_session_serves_many_attempts() {
     assert!(sandbox.log().contains("unlocked with the PIN"));
 }
 
-/// A correct PIN never unlocks sooner than the config's minimum, counted from when the pinchecker
+/// A correct PIN never unlocks sooner than the config's minimum, counted from when the PIN checker
 /// starts, 75 ms by default; a wrong PIN and the password go on at once. The stand-ins for the
-/// stock stack and its failure delay take no time, so whatever waits here is the pinchecker.
+/// stock stack and its failure delay take no time, so whatever waits here is the PIN checker.
 #[test]
 fn only_a_correct_pin_waits_out_the_minimum() {
     let sandbox = Sandbox::new();
@@ -436,8 +435,8 @@ fn the_usual_answers(sandbox: &Sandbox) {
     assert!(pin.authenticate(PIN).unlocked(), "{}", sandbox.log());
 }
 
-/// With SIGCHLD ignored, the kernel would reap the pinchecker and throw its answer away; the module
-/// sets the default while the pinchecker runs, and puts "ignore" back.
+/// With SIGCHLD ignored, the kernel would reap the PIN checker and throw its answer away; the module
+/// sets the default while the PIN checker runs, and puts "ignore" back.
 #[test]
 fn a_host_that_ignores_sigchld_still_gets_answers() {
     if in_own_process("a_host_that_ignores_sigchld_still_gets_answers").is_some() {
@@ -450,7 +449,7 @@ fn a_host_that_ignores_sigchld_still_gets_answers() {
 }
 
 /// A handler that reaps every child can't run while the module has SIGCHLD at its default, so it
-/// never takes the pinchecker, and it is back afterwards.
+/// never takes the PIN checker, and it is back afterwards.
 #[test]
 fn a_host_that_reaps_every_child_still_gets_answers() {
     if in_own_process("a_host_that_reaps_every_child_still_gets_answers").is_some() {
@@ -460,10 +459,10 @@ fn a_host_that_reaps_every_child_still_gets_answers() {
     let handler = host::reap_on_sigchld();
     the_usual_answers(&sandbox);
     assert_eq!(host::sigchld(), handler);
-    assert_eq!(host::reaped(), 0, "the host's handler reaped a pinchecker");
+    assert_eq!(host::reaped(), 0, "the host's handler reaped a PIN checker");
 }
 
-/// A host thread looping on `waitpid(-1)` takes the pinchecker's exit status whatever SIGCHLD is set
+/// A host thread looping on `waitpid(-1)` takes the PIN checker's exit status whatever SIGCHLD is set
 /// to. The module then has no answer and refuses: the PIN may fail, a wrong PIN never unlocks, and
 /// the password still works. A known limit, documented here rather than fixed.
 #[test]
@@ -512,8 +511,8 @@ fn the_hosts_own_children_survive_an_attempt() {
     let sandbox = Sandbox::new();
     let handler = host::notice_sigchld();
     assert!(sandbox.session(Password::Right).authenticate(PASSWORD).unlocked());
-    // The pinchecker starts late, so the host's child exits while the module is waiting for it.
-    sandbox.pinchecker("sleep 0.3");
+    // The PIN checker starts late, so the host's child exits while the module is waiting for it.
+    sandbox.pin_checker("sleep 0.3");
     let mut own = Command::new("sh").args(["-c", "sleep 0.1; exit 7"]).spawn().unwrap();
     assert!(sandbox.session(Password::Wrong).authenticate(PIN).unlocked(), "{}", sandbox.log());
     assert_eq!(own.wait().unwrap().code(), Some(7), "the host lost its own child's exit status");

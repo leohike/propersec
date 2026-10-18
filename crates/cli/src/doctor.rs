@@ -1,14 +1,14 @@
-//! `properpin doctor`: what makes the lock screen refuse a PIN, for every user, and the command that
-//! fixes it. Every file is judged by the same code the pinchecker uses (`properpin_sys`), so doctor
+//! `screenlock-pin doctor`: what makes the lock screen refuse a PIN, for every user, and the command that
+//! fixes it. Every file is judged by the same code the PIN checker uses (`screenlock_pin_sys`), so doctor
 //! finds what an attempt would refuse, and nothing it wouldn't. It runs as root, which can read every
-//! file, so those rules also check that the pinchecker, running as the user, could read each one.
+//! file, so those rules also check that the PIN checker, running as the user, could read each one.
 //!
-//! It changes nothing. Its fixes are `properpin` commands: `remove`, `set`, `enable` and
+//! It changes nothing. Its fixes are `screenlock-pin` commands: `remove`, `set`, `enable` and
 //! `restore-defaults`, or installing again for the directories install makes.
 
 use anyhow::Result;
-use properpin_core::{Clock, Hasher, Store};
-use properpin_sys::{Account, AllUsers};
+use screenlock_pin_core::{Clock, Hasher, Store};
+use screenlock_pin_sys::{Account, AllUsers};
 
 /// One thing wrong: what, what it does at the lock screen, and what fixes it.
 #[derive(Debug)]
@@ -30,10 +30,10 @@ pub struct Findings {
 pub fn examine(all: &AllUsers, hasher: &impl Hasher, clock: &impl Clock) -> Result<Findings> {
     let mut found = Findings::default();
     let mut problem = |what: String, so: &str, fix: String| found.problems.push(Problem { what, so: so.into(), fix });
-    let again = "install properpin again, which puts the directory right".to_string();
+    let again = "install screenlock-pin again, which puts the directory right".to_string();
     let config = all.config_settings();
     if let Err(error) = &config {
-        let fix = "correct it by hand, or delete the config, which brings back every default: sudo properpin restore-defaults";
+        let fix = "correct it by hand, or delete the config, which brings back every default: sudo screenlock-pin restore-defaults";
         problem(error.to_string(), "the lock screen refuses every PIN", fix.into());
     }
     let budget_dir = all.check_budget_dir();
@@ -41,7 +41,7 @@ pub fn examine(all: &AllUsers, hasher: &impl Hasher, clock: &impl Clock) -> Resu
         problem(error.to_string(), "the lock screen refuses every PIN", again.clone());
     }
     if let Err(error) = all.check_users_dir() {
-        problem(error.to_string(), "it isn't as install makes it, so the pinchecker may not reach the files in it", again);
+        problem(error.to_string(), "it isn't as install makes it, so the PIN checker may not reach the files in it", again);
     }
     for name in all.names()? {
         let path = all.users_dir().join(&name);
@@ -49,19 +49,19 @@ pub fn examine(all: &AllUsers, hasher: &impl Hasher, clock: &impl Clock) -> Resu
             Ok(account) if account.uid != 0 => account,
             Ok(_) => {
                 let what = format!("{}: root has no lock screen to unlock", path.display());
-                problem(what, "nobody's PIN", format!("sudo properpin remove --user {name}"));
+                problem(what, "nobody's PIN", format!("sudo screenlock-pin remove --user {name}"));
                 continue;
             }
             Err(_) => {
                 let what = format!("{}: no account is named {name}", path.display());
                 let so = "nobody's PIN, but an account made later with that name would get it";
-                problem(what, so, format!("sudo properpin remove --user {name}"));
+                problem(what, so, format!("sudo screenlock-pin remove --user {name}"));
                 continue;
             }
         };
         let files = all.user(&name, account.uid)?;
         let refused = format!("the lock screen refuses {name}'s PIN");
-        let new_pin = format!("sudo properpin remove --user {name}, then a new PIN with: sudo properpin set --user {name}");
+        let new_pin = format!("sudo screenlock-pin remove --user {name}, then a new PIN with: sudo screenlock-pin set --user {name}");
         // A file that can't be read counts as a PIN: it is one, almost always.
         let settings = files.user_settings();
         if settings.as_ref().is_ok_and(|settings| settings.pin_hash.is_empty()) {
@@ -83,7 +83,7 @@ pub fn examine(all: &AllUsers, hasher: &impl Hasher, clock: &impl Clock) -> Resu
             continue;
         }
         if let Err(error) = files.check_budget() {
-            let fix = format!("sudo properpin set --user {name}, with the same PIN or a new one, which starts both over");
+            let fix = format!("sudo screenlock-pin set --user {name}, with the same PIN or a new one, which starts both over");
             problem(error.to_string(), &refused, fix);
             continue;
         }
@@ -92,7 +92,7 @@ pub fn examine(all: &AllUsers, hasher: &impl Hasher, clock: &impl Clock) -> Resu
         }
         if let Some(limit) = files.load_budget()?.judge(clock.now()?, &files.settings()?).disabled {
             let what = format!("{name}'s PIN is disabled after {limit}");
-            let fix = format!("sudo properpin enable --user {name} keeps the PIN; sudo properpin set --user {name} replaces it");
+            let fix = format!("sudo screenlock-pin enable --user {name} keeps the PIN; sudo screenlock-pin set --user {name} replaces it");
             problem(what, &format!("{refused} until it is enabled again or replaced"), fix);
         }
     }

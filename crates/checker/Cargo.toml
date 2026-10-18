@@ -1,6 +1,6 @@
 [package]
-name = "properpin-pinchecker"
-description = "properpin-pinchecker: the setgid program that holds the PIN hashes and counts, and answers yes or no."
+name = "screenlock-pin-checker"
+description = "screenlock-pin-checker: the setgid program that holds the PIN hashes and counts, and answers yes or no."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,13 +8,13 @@ publish.workspace = true
 license.workspace = true
 
 [[bin]]
-name = "properpin-pinchecker"
+name = "screenlock-pin-checker"
 path = "src/main.rs"
 
 [dependencies]
 libc.workspace = true
-properpin-core.workspace = true
-properpin-sys.workspace = true
+screenlock-pin-core.workspace = true
+screenlock-pin-sys.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

@@ -1,4 +1,4 @@
-# properpin's system test: a stock Fedora 44 with properpin installed by packaging/install.sh and
+# screenlock-pin's system test: a stock Fedora 44 with screenlock-pin installed by packaging/install.sh and
 # its lines put into the real /etc/pam.d/kde by packaging/integrate-into-pam.sh, then exercised
 # through the real pam_unix and unix_chkpwd by crates/systest. Run it with `just podman`; the build
 # context is the repo root.
@@ -13,13 +13,13 @@ COPY packaging packaging
 COPY testing testing
 RUN --mount=type=cache,target=/root/.cargo/registry \
     --mount=type=cache,target=/src/target \
-    cargo build --release --locked -p pam_properpin -p properpin-pinchecker -p properpin-cli -p properpin-systest \
+    cargo build --release --locked -p pam_screenlock_pin -p screenlock-pin-checker -p screenlock-pin-cli -p screenlock-pin-systest \
     && mkdir -p /out/build \
-    && cp target/release/libpam_properpin.so target/release/properpin-pinchecker target/release/properpin /out/build/ \
-    && cp target/release/properpin-systest /out/
-# A pinchecker with a library search path of its own, as Homebrew's toolchain can make one, which
+    && cp target/release/libpam_screenlock_pin.so target/release/screenlock-pin-checker target/release/screenlock-pin /out/build/ \
+    && cp target/release/screenlock-pin-systest /out/
+# A PIN checker with a library search path of its own, as Homebrew's toolchain can make one, which
 # install must refuse.
-RUN echo 'int main(void) { return 0; }' | gcc -x c - -Wl,-rpath,/home/linuxbrew/.linuxbrew/lib -o /out/pinchecker-with-runpath
+RUN echo 'int main(void) { return 0; }' | gcc -x c - -Wl,-rpath,/home/linuxbrew/.linuxbrew/lib -o /out/pin-checker-with-runpath
 # The deliberately broken variants the uninstall cases install, built after the real ones.
 RUN --mount=type=cache,target=/root/.cargo/registry \
     --mount=type=cache,target=/src/target \
@@ -35,8 +35,8 @@ RUN cd /tmp \
     && rpm2cpio plasma-workspace-*.rpm | cpio -idm --quiet ./etc/pam.d/kde \
     && install -m 0644 etc/pam.d/kde /etc/pam.d/kde \
     && rm -rf /tmp/* && dnf clean all
-# alice has a PIN; bob is the other user on the machine. install.sh creates the properpin group.
+# alice has a PIN; bob is the other user on the machine. install.sh creates the screenlock-pin group.
 RUN useradd -m alice && echo 'alice:correct horse battery staple' | chpasswd && useradd -m bob
-COPY --from=build /out/ /opt/properpin/
-COPY packaging /opt/properpin/packaging
-CMD ["/opt/properpin/properpin-systest", "run"]
+COPY --from=build /out/ /opt/screenlock-pin/
+COPY packaging /opt/screenlock-pin/packaging
+CMD ["/opt/screenlock-pin/screenlock-pin-systest", "run"]

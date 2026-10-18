@@ -1,6 +1,6 @@
 # Where the PIN belongs in PAM
 
-Written on 2026-10-18. A design direction, not built yet: today properpin's `check` line sits directly in `/etc/pam.d/kde`, just above `auth substack password-auth` (`packaging/kde-auth.pam`). This doc says why the PIN should instead live in a small file of properpin's own, pulled into `kde` with `substack`, with the same gates and after-login hooks as every other way to unlock, and why that matters even on a machine where it changes nothing today. `docs/current-setcred.md` holds a related idea, moving the PIN unpause into `pam_sm_setcred`, which fits this layout. Claims are marked "verified" (read in code or seen on the development machine) or "reasoned" (thought through, not tested).
+Written on 2026-10-18. A design direction, not built yet: today screenlock-pin's `check` line sits directly in `/etc/pam.d/kde`, just above `auth substack password-auth` (`packaging/kde-auth.pam`). This doc says why the PIN should instead live in a small file of screenlock-pin's own, pulled into `kde` with `substack`, with the same gates and after-login hooks as every other way to unlock, and why that matters even on a machine where it changes nothing today. `docs/current-setcred.md` holds a related idea, moving the PIN unpause into `pam_sm_setcred`, which fits this layout. Claims are marked "verified" (read in code or seen on the development machine) or "reasoned" (thought through, not tested).
 
 ## A few terms first
 
@@ -13,43 +13,43 @@ Written on 2026-10-18. A design direction, not built yet: today properpin's `che
   - **After-login hooks**, in `postlogin`.
 - **The rule:** the PIN replaces one secret check, nothing more. Gates and after-login hooks must apply to the PIN exactly as to the password. The other secret checks must never see the PIN: they would treat it as a wrong password, and `pam_sss` might send it to a server.
 
-## Why properpin must not go into password-auth without extra checks
+## Why screenlock-pin must not go into password-auth without extra checks
 
 Leaving aside that authselect generates `password-auth` and would overwrite an edit, three things make it the wrong place.
 
-**It is shared.** On the development machine `kde`, `sshd`, `samba`, `cups`, `ppp`, `vmtoolsd` and `remote` all use `password-auth` (verified). The PIN is built for one person at the locked keyboard: it is short, and its guessing limits are sized for that. In `password-auth` it would face the network: anyone who can reach SSH or Samba could guess it, and every wrong guess would count against the user's budget, so after 10 a day anyone on the network could switch the user's PIN off at will. Today those programs check passwords as root, and both the module (`crates/pam/src/run.rs`) and the pinchecker (`crates/pinchecker/src/main.rs`) refuse root (verified), so the PIN would be refused there and every SSH login would log an error. But that refusal is a safety net for mistakes, not a design: a program checking passwords as the user would accept the PIN. Doing it properly would need a check that doesn't exist: the module refusing every service but `kde`.
+**It is shared.** On the development machine `kde`, `sshd`, `samba`, `cups`, `ppp`, `vmtoolsd` and `remote` all use `password-auth` (verified). The PIN is built for one person at the locked keyboard: it is short, and its guessing limits are sized for that. In `password-auth` it would face the network: anyone who can reach SSH or Samba could guess it, and every wrong guess would count against the user's budget, so after 10 a day anyone on the network could switch the user's PIN off at will. Today those programs check passwords as root, and both the module (`crates/pam/src/run.rs`) and the PIN checker (`crates/checker/src/main.rs`) refuse root (verified), so the PIN would be refused there and every SSH login would log an error. But that refusal is a safety net for mistakes, not a design: a program checking passwords as the user would accept the PIN. Doing it properly would need a check that doesn't exist: the module refusing every service but `kde`.
 
 **The position decides what the PIN skips.** Above the gates, the PIN bypasses faillock, the second factor and smartcard-required. Even in the best spot, next to `pam_unix`, some setups need the real password, which a PIN can't give: homed may need it to unlock the home again after sleep, and Kerberos to get a fresh ticket (both reasoned). Those need a refusal wherever the line sits.
 
-**Every login on the machine would depend on it.** A broken properpin (a crash, a hang, a missing file) would break SSH, Samba and the rest, not just the lock screen. In `kde` a mistake can at worst break the lock screen, and a text console still lets you log in and fix it.
+**Every login on the machine would depend on it.** A broken screenlock-pin (a crash, a hang, a missing file) would break SSH, Samba and the rest, not just the lock screen. In `kde` a mistake can at worst break the lock screen, and a text console still lets you log in and fix it.
 
-## The proper shape: properpin's own file, substacked into kde
+## The proper shape: screenlock-pin's own file, substacked into kde
 
-PAM can't say "run `password-auth`'s gates but skip its secret checks". So properpin keeps a small file of its own with the gate it can safely repeat, the PIN check, and the after-login hooks:
+PAM can't say "run `password-auth`'s gates but skip its secret checks". So screenlock-pin keeps a small file of its own with the gate it can safely repeat, the PIN check, and the after-login hooks:
 
 ```
-# properpin's own file, for example /usr/local/share/properpin/pin-auth
+# screenlock-pin's own file, for example /usr/local/share/screenlock-pin/pin-auth
 auth  [success=ignore default=die]  pam_faillock.so preauth silent
-auth  [success=ok default=die]      /usr/local/lib64/security/pam_properpin.so check
+auth  [success=ok default=die]      /usr/local/lib64/security/pam_screenlock_pin.so check
 auth  include                       postlogin
 ```
 ```
 # /etc/pam.d/kde
-auth  sufficient  substack /usr/local/share/properpin/pin-auth
+auth  sufficient  substack /usr/local/share/screenlock-pin/pin-auth
 auth  substack    password-auth
-auth  optional    /usr/local/lib64/security/pam_properpin.so after-password-auth
+auth  optional    /usr/local/lib64/security/pam_screenlock_pin.so after-password-auth
 auth  include     postlogin
 ```
 
-- **The faillock line** is the gate that is safe to have always. When faillock is off nothing records failures, so it lets everything through (reasoned); when it is on, a locked account can't use the PIN either, and the pinchecker isn't even asked, so the PIN's counts don't change.
-- **`default=die` on the check is the important detail.** Any answer but "yes, this is the PIN" ends properpin's file with "no" right there; the module answers `PAM_IGNORE` for anything that isn't the PIN (verified, `crates/pam/src/pam.rs`), and `default` covers that too. Without it, a line that succeeded earlier or later in the file (faillock's `preauth` as a plain `required` line, or an `optional` line from `postlogin`) could make the whole file succeed, and **any input would unlock**. The same trap is why authselect ends `password-auth` with `pam_deny`. A test must cover exactly this.
-- **`substack`, not `include`,** so that "no" ends only properpin's file, and the input goes on to `password-auth` as if properpin weren't there. The password path stays exactly as the stock stack decides it, faillock and all.
+- **The faillock line** is the gate that is safe to have always. When faillock is off nothing records failures, so it lets everything through (reasoned); when it is on, a locked account can't use the PIN either, and the PIN checker isn't even asked, so the PIN's counts don't change.
+- **`default=die` on the check is the important detail.** Any answer but "yes, this is the PIN" ends screenlock-pin's file with "no" right there; the module answers `PAM_IGNORE` for anything that isn't the PIN (verified, `crates/pam/src/pam.rs`), and `default` covers that too. Without it, a line that succeeded earlier or later in the file (faillock's `preauth` as a plain `required` line, or an `optional` line from `postlogin`) could make the whole file succeed, and **any input would unlock**. The same trap is why authselect ends `password-auth` with `pam_deny`. A test must cover exactly this.
+- **`substack`, not `include`,** so that "no" ends only screenlock-pin's file, and the input goes on to `password-auth` as if screenlock-pin weren't there. The password path stays exactly as the stock stack decides it, faillock and all.
 - **Outside `/etc/pam.d`,** so the file isn't a PAM service of its own that any program could open to check a PIN. Linux-PAM takes an absolute path for `substack` (verified, `libpam/pam_handlers.c:307`), and the module doesn't check the service name (verified).
-- **Checked against `password-auth`.** properpin's file can't follow `password-auth` when authselect rewrites it. So `integrate-into-pam.sh add` and `properpin doctor` compare `password-auth`'s `auth` lines with the sets properpin knows, and refuse the PIN, leaving the password working, when they find anything else: a gate the file doesn't repeat (U2F second factor, smartcard-required) or a secret check a PIN can't stand in for (homed, sssd). A new setting then switches the PIN off instead of being silently skipped by it. Whether the module should also compare at each attempt, so that a change made after `add` fails closed at once, is open.
+- **Checked against `password-auth`.** screenlock-pin's file can't follow `password-auth` when authselect rewrites it. So `integrate-into-pam.sh add` and `screenlock-pin doctor` compare `password-auth`'s `auth` lines with the sets screenlock-pin knows, and refuse the PIN, leaving the password working, when they find anything else: a gate the file doesn't repeat (U2F second factor, smartcard-required) or a secret check a PIN can't stand in for (homed, sssd). A new setting then switches the PIN off instead of being silently skipped by it. Whether the module should also compare at each attempt, so that a change made after `add` fails closed at once, is open.
 
-Why this matters even on the development machine, which has none of those features (authselect profile `local` with `with-fingerprint`, `with-mdns4`, `with-silent-lastlog`, verified): there the faillock line lets everything through, so it costs nothing. But properpin is meant for other machines too (secureblue turns faillock on by default), and this one can change with one command, `authselect enable-feature with-faillock`. With the `check` line directly in `kde`, as now, the PIN would then work even while faillock has the account locked; with properpin's own file, it wouldn't.
+Why this matters even on the development machine, which has none of those features (authselect profile `local` with `with-fingerprint`, `with-mdns4`, `with-silent-lastlog`, verified): there the faillock line lets everything through, so it costs nothing. But screenlock-pin is meant for other machines too (secureblue turns faillock on by default), and this one can change with one command, `authselect enable-feature with-faillock`. With the `check` line directly in `kde`, as now, the PIN would then work even while faillock has the account locked; with screenlock-pin's own file, it wouldn't.
 
-What properpin's file should not repeat, so that nobody adds it later by copying `password-auth` whole: the other secret checks (`pam_unix`, `pam_sss`, `pam_systemd_home`), which would get the PIN as a password; faillock's `authfail`, which would count every password unlock as a failure, since the password fails properpin's file before `password-auth` accepts it; `pam_u2f` as an alternative (`sufficient`), which would only ask for the key twice; and `pam_gnome_keyring`, which would keep the PIN as the password. `pam_u2f` as a second factor and smartcard-required's `pam_deny` could be repeated, but only when that feature is on, which would make the file follow authselect's settings; refusing the PIN on such machines is simpler.
+What screenlock-pin's file should not repeat, so that nobody adds it later by copying `password-auth` whole: the other secret checks (`pam_unix`, `pam_sss`, `pam_systemd_home`), which would get the PIN as a password; faillock's `authfail`, which would count every password unlock as a failure, since the password fails screenlock-pin's file before `password-auth` accepts it; `pam_u2f` as an alternative (`sufficient`), which would only ask for the key twice; and `pam_gnome_keyring`, which would keep the PIN as the password. `pam_u2f` as a second factor and smartcard-required's `pam_deny` could be repeated, but only when that feature is on, which would make the file follow authselect's settings; refusing the PIN on such machines is simpler.
 
 ## Why the PIN should not skip postlogin
 
@@ -57,17 +57,17 @@ What properpin's file should not repeat, so that nobody adds it later by copying
 
 Today a correct PIN ends the `kde` stack at once (`sufficient` with success means done), so the PIN is the only way to unlock that skips `postlogin`. On the development machine `postlogin` has no `auth` lines, only `session` ones, which the lock screen never runs (verified), so nothing is lost today. But the moment someone adds one, through an authselect feature like `with-ecryptfs` or by hand, it runs after the password, the fingerprint and the smartcard, and silently not after the PIN. Nobody would expect that, and nobody would notice.
 
-The PIN is one more way to unlock, like a fingerprint, so it follows the same pattern: its own check, then `postlogin`. That is the `include postlogin` at the end of properpin's file. Either way `postlogin` runs exactly once: at the end of properpin's file after a PIN unlock, at the end of `kde` after a password unlock.
+The PIN is one more way to unlock, like a fingerprint, so it follows the same pattern: its own check, then `postlogin`. That is the `include postlogin` at the end of screenlock-pin's file. Either way `postlogin` runs exactly once: at the end of screenlock-pin's file after a PIN unlock, at the end of `kde` after a password unlock.
 
-One care: `postlogin`'s modules already have to cope with fingerprint and smartcard unlocks, where no password was typed. After a PIN unlock they would find the PIN where PAM keeps the typed password (`PAM_AUTHTOK`), and a module that keeps "the password" for later, like `pam_ecryptfs unwrap`, would keep the PIN. So after a correct PIN the module clears `PAM_AUTHTOK`, making the PIN unlock look to `postlogin` exactly like a fingerprint unlock, and wiping libpam's copy of the PIN sooner. Built on 2026-10-18, ahead of properpin's own file: `crates/pam/tests/stack.rs` shows a line after a correct PIN finding nothing typed and having to ask, and after any other input finding it.
+One care: `postlogin`'s modules already have to cope with fingerprint and smartcard unlocks, where no password was typed. After a PIN unlock they would find the PIN where PAM keeps the typed password (`PAM_AUTHTOK`), and a module that keeps "the password" for later, like `pam_ecryptfs unwrap`, would keep the PIN. So after a correct PIN the module clears `PAM_AUTHTOK`, making the PIN unlock look to `postlogin` exactly like a fingerprint unlock, and wiping libpam's copy of the PIN sooner. Built on 2026-10-18, ahead of screenlock-pin's own file: `crates/pam/tests/stack.rs` shows a line after a correct PIN finding nothing typed and having to ask, and after any other input finding it.
 
 ## In one sentence
 
-The PIN gets the same gates and the same after-login hooks as every other way to unlock, the secret checks never see it, and where properpin can't be sure of that, it turns the PIN off and leaves the password alone.
+The PIN gets the same gates and the same after-login hooks as every other way to unlock, the secret checks never see it, and where screenlock-pin can't be sure of that, it turns the PIN off and leaves the password alone.
 
 ## Open points
 
-- A test in `crates/pam/tests/stack.rs` for the trap described in the section on the proper shape: with faillock's `preauth` succeeding and the PIN wrong, properpin's file must fail, and so must a `postlogin` with an `optional` line that succeeds.
+- A test in `crates/pam/tests/stack.rs` for the trap described in the section on the proper shape: with faillock's `preauth` succeeding and the PIN wrong, screenlock-pin's file must fail, and so must a `postlogin` with an `optional` line that succeeds.
 - That `sufficient` works on a `substack` line as on a module line, and that the setcred replay after a PIN unlock stops after the first `kde` line, so unpausing the PIN in `pam_sm_setcred`, as `docs/current-setcred.md` describes, still holds.
 - That `pam_faillock preauth` really lets everything through when no stack records failures, and what it does when another service, set up by hand, does record them.
 - That clearing `PAM_AUTHTOK` after a correct PIN changes nothing for the real kscreenlocker, which never reads it (shown only with the test harness so far).

@@ -11,12 +11,12 @@ use zeroize::{Zeroize, Zeroizing};
 /// [`Secret::new`] from a `Vec` that already has its final length.
 ///
 /// ```compile_fail,E0277
-/// let secret = properpin_core::Secret::new(b"4859".to_vec());
+/// let secret = screenlock_pin_core::Secret::new(b"4859".to_vec());
 /// println!("{secret}"); // no Display
 /// ```
 ///
 /// ```compile_fail,E0599
-/// let secret = properpin_core::Secret::new(b"4859".to_vec());
+/// let secret = screenlock_pin_core::Secret::new(b"4859".to_vec());
 /// let copy = secret.clone(); // no Clone
 /// ```
 pub struct Secret(Zeroizing<Vec<u8>>);

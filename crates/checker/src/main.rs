@@ -1,24 +1,24 @@
-//! `properpin-pinchecker`, the setgid program. See the library (`lib.rs`) for what it answers.
+//! `screenlock-pin-checker`, the setgid program. See the library (`lib.rs`) for what it answers.
 //!
 //! ```text
-//! properpin-pinchecker check|unpause|status
+//! screenlock-pin-checker check|unpause|status
 //! ```
 //!
-//! Installed `root:properpin 2755`, setgid to the `properpin` group, with fixed locations: the
-//! hashes in `/etc/properpin` (owned by root, readable by the group), the counts in
-//! `/var/lib/properpin` (root's, sticky, writable by the group), and logs to syslog.
+//! Installed `root:screenlock-pin 2755`, setgid to the `screenlock-pin` group, with fixed locations: the
+//! hashes in `/etc/screenlock-pin` (owned by root, readable by the group), the counts in
+//! `/var/lib/screenlock-pin` (root's, sticky, writable by the group), and logs to syslog.
 //!
 //! For local tests, and only when started without elevated rights, these options replace them:
 //!
 //! ```text
-//! --dev-etc DIR       instead of /etc/properpin                   required with any --dev option
-//! --dev-budget DIR    instead of /var/lib/properpin               required with any --dev option
+//! --dev-etc DIR       instead of /etc/screenlock-pin                   required with any --dev option
+//! --dev-budget DIR    instead of /var/lib/screenlock-pin               required with any --dev option
 //! --dev-owner UID     who must own --dev-budget and the files under --dev-etc   default: the caller
 //! --dev-log FILE      append log lines here instead of syslog
 //! ```
 //!
 //! Started with elevated rights (setgid, as installed), any `--dev` option is refused outright; see
-//! `dev_options_allowed` for the two checks. Without elevated rights the pinchecker can do nothing its
+//! `dev_options_allowed` for the two checks. Without elevated rights the PIN checker can do nothing its
 //! caller couldn't do directly, so letting the caller choose the locations gives nothing away.
 
 // Stricter checks for shipped code (docs/chaos/plan-tools.md): every unsafe block explains why it is
@@ -30,9 +30,9 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Instant;
 
-use properpin_core::{Log, Secret, exit};
-use properpin_pinchecker::{Context, Places, Request, dev_options_allowed, read_input, serve};
-use properpin_sys::{Account, FileLog, SystemClock, Yescrypt, current_egid, current_euid, current_gid, current_uid};
+use screenlock_pin_checker::{Context, Places, Request, dev_options_allowed, read_input, serve};
+use screenlock_pin_core::{Log, Secret, exit};
+use screenlock_pin_sys::{Account, FileLog, SystemClock, Yescrypt, current_egid, current_euid, current_gid, current_uid};
 
 mod secure;
 
@@ -97,9 +97,9 @@ fn run(args: &[OsString], started: Instant) -> u8 {
     };
     let places = match &options.dev {
         None => Places {
-            etc: "/etc/properpin".into(),
+            etc: "/etc/screenlock-pin".into(),
             etc_owner: 0,
-            budget_dir: "/var/lib/properpin".into(),
+            budget_dir: "/var/lib/screenlock-pin".into(),
             budget_owner: 0,
             budget_group: current_egid(),
         },

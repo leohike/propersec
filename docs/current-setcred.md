@@ -4,27 +4,27 @@ Written on 2026-10-18, from a conversation about how to stop the PIN unpause fro
 
 ## What is built now
 
-The `after-password-auth` line's `pam_sm_authenticate` answers `PAM_IGNORE` at once and never reads `PAM_AUTHTOK`. Its `pam_sm_setcred` asks the pinchecker for `unpause`, which now reads nothing on stdin and runs `unpause_pin_after_password_unlock`, logging `unlocked with the password, PIN enabled`. Any flag counts. `unix_chkpwd`, the `PasswordCheck` trait, `crates/sys/src/chkpwd.rs`, `--dev-chkpwd` and the stand-in `unix_chkpwd` scripts in the tests are gone. The PAM lines are unchanged, so nobody's `/etc/pam.d/kde` needs editing.
+The `after-password-auth` line's `pam_sm_authenticate` answers `PAM_IGNORE` at once and never reads `PAM_AUTHTOK`. Its `pam_sm_setcred` asks the PIN checker for `unpause`, which now reads nothing on stdin and runs `unpause_pin_after_password_unlock`, logging `unlocked with the password, PIN enabled`. Any flag counts. `unix_chkpwd`, the `PasswordCheck` trait, `crates/sys/src/chkpwd.rs`, `--dev-chkpwd` and the stand-in `unix_chkpwd` scripts in the tests are gone. The PAM lines are unchanged, so nobody's `/etc/pam.d/kde` needs editing.
 
-On the way there, from commit `6c9b21d` to the tag `both-setcred-and-password`, a setting `pin_unpause_by` (`password-check`, `setcred` or `both`) chose between the two ways, with a recipe to install each; the tests and the VM runs below used it. It is gone too, and a config that still holds it is refused like any unknown setting: the PIN is refused until the line is removed (`properpin doctor` names it).
+On the way there, from commit `6c9b21d` to the tag `both-setcred-and-password`, a setting `pin_unpause_by` (`password-check`, `setcred` or `both`) chose between the two ways, with a recipe to install each; the tests and the VM runs below used it. It is gone too, and a config that still holds it is refused like any unknown setting: the PIN is refused until the line is removed (`screenlock-pin doctor` names it).
 
 One change to the `check` line was needed, described more fully under how libpam picks the lines: its `pam_sm_setcred` answers `PAM_SUCCESS` instead of `PAM_IGNORE`. kscreenlocker ignores what `pam_setcred` answers.
 
-Tested on 2026-10-18: `crates/pam/tests/stack.rs` (the three paths in each mode, and a bad value), `crates/pinchecker/tests/pinchecker.rs` (`unlocked` in each mode, with a `unix_chkpwd` that must not run), and four new scenarios in `crates/systest` that `just podman` ran on a stock Fedora 44 through the real `kde` stack and `pam_unix`: all 45 scenarios passed. Faillock is not covered yet.
+Tested on 2026-10-18: `crates/pam/tests/stack.rs` (the three paths in each mode, and a bad value), `crates/checker/tests/checker.rs` (`unlocked` in each mode, with a `unix_chkpwd` that must not run), and four new scenarios in `crates/systest` that `just podman` ran on a stock Fedora 44 through the real `kde` stack and `pam_unix`: all 45 scenarios passed. Faillock is not covered yet.
 
 On a real lock screen, on 2026-10-18: kscreenlocker on the Aurora VM (`aurora-first`), installed with `just install-both`. Every password unlock logged `pam_setcred(PAM_REFRESH_CRED) after a password unlock; pin_unpause_by is both`, between the password check's `password correct, PIN enabled` and the setcred path's `unlocked through the password stack (setcred), PIN enabled`. No PIN unlock and no wrong input logged a `pam_setcred` line. Three wrong inputs paused the PIN, further wrong passwords left it paused, and the password unpaused it. kscreenlocker passes `PAM_REFRESH_CRED`, as its source says. A greeter started before `integrate-into-pam` kept the old lines it had read at `pam_start`, so its first attempts logged "bad PAM line" and refused the PIN alone, as designed.
 
-Then with `just install-setcred`, the same day and VM: no `password correct` or `wrong password` line at all, so the pinchecker never saw the password. Every password unlock logged `pam_setcred(PAM_REFRESH_CRED) after a password unlock; pin_unpause_by is setcred` and `unlocked through the password stack (setcred), PIN enabled`, and only those. The password unpaused a paused PIN, and the password itself, counted for a moment as a failed PIN, was forgiven (status showed nothing left waiting to be forgiven). No PIN unlock and no wrong input reached `pam_setcred`.
+Then with `just install-setcred`, the same day and VM: no `password correct` or `wrong password` line at all, so the PIN checker never saw the password. Every password unlock logged `pam_setcred(PAM_REFRESH_CRED) after a password unlock; pin_unpause_by is setcred` and `unlocked through the password stack (setcred), PIN enabled`, and only those. The password unpaused a paused PIN, and the password itself, counted for a moment as a failed PIN, was forgiven (status showed nothing left waiting to be forgiven). No PIN unlock and no wrong input reached `pam_setcred`.
 
 ## The problem
 
-Today the `after-password-auth` line in `/etc/pam.d/kde` runs after the stock `password-auth` substack whatever it answered, since a failed substack doesn't stop the stack. So it runs after a wrong password too, and to tell a right password from a wrong one it reads `PAM_AUTHTOK`, passes it to the pinchecker, and the pinchecker checks it through `unix_chkpwd`. That makes properpin take the password, check it as the password, and so know that it holds the right one.
+Today the `after-password-auth` line in `/etc/pam.d/kde` runs after the stock `password-auth` substack whatever it answered, since a failed substack doesn't stop the stack. So it runs after a wrong password too, and to tell a right password from a wrong one it reads `PAM_AUTHTOK`, passes it to the PIN checker, and the PIN checker checks it through `unix_chkpwd`. That makes screenlock-pin take the password, check it as the password, and so know that it holds the right one.
 
 The `check` line sees every input too, but only as a PIN candidate: it never learns which input was the password. Holding a password we know is right is a bigger risk than that, and is what this idea removes.
 
 ## Why the password check buys no security
 
-The check was there so that nothing the user runs could unpause the PIN or forgive its failures. But `docs/chaos/security-target.md` already says code running as the user can unlock the session directly anyway (`loginctl unlock-session`), read the user's files and keylog the PIN. All it could gain by resetting the counts is guessing the PIN through the pinchecker faster than keylogging it, which matters only if the PIN is reused elsewhere, and the security target leaves reuse to the user. Like a burglar already inside the flat: he doesn't need your spare key.
+The check was there so that nothing the user runs could unpause the PIN or forgive its failures. But `docs/chaos/security-target.md` already says code running as the user can unlock the session directly anyway (`loginctl unlock-session`), read the user's files and keylog the PIN. All it could gain by resetting the counts is guessing the PIN through the PIN checker faster than keylogging it, which matters only if the PIN is reused elsewhere, and the security target leaves reuse to the user. Like a burglar already inside the flat: he doesn't need your spare key.
 
 What the check does still do, in today's layout, is stop someone at the keyboard: without it, any wrong "password" would unpause the PIN. So whatever replaces it must mean "the screen was really unlocked", not "someone typed something".
 
@@ -56,12 +56,12 @@ There is one exception, which the first stack test found: it stops where `pam_au
 
 ## The idea
 
-Move the PIN unpause's work from `pam_sm_authenticate` of the `after-password-auth` line, which runs after a wrong password too, to its `pam_sm_setcred`, which runs only after a real unlock. With properpin's shipped lines (`packaging/kde-auth.pam`):
+Move the PIN unpause's work from `pam_sm_authenticate` of the `after-password-auth` line, which runs after a wrong password too, to its `pam_sm_setcred`, which runs only after a real unlock. With screenlock-pin's shipped lines (`packaging/kde-auth.pam`):
 
 ```
-auth  sufficient  pam_properpin.so check          ← line 1
+auth  sufficient  pam_screenlock_pin.so check          ← line 1
 auth  substack    password-auth                   ← line 2 (pam_env, pam_faildelay, pam_unix, pam_deny)
-auth  optional    pam_properpin.so after-password-auth   ← line 3
+auth  optional    pam_screenlock_pin.so after-password-auth   ← line 3
 auth  include     postlogin                       ← line 4
 ```
 
@@ -75,7 +75,7 @@ No daemon: the module is already loaded in the lock screen's process and libpam 
 
 - **`packaging/kde-auth.pam`:** the lines stay exactly as they are; only the comment changes. Nothing to edit in anyone's `/etc/pam.d/kde`, and no need to run `integrate-into-pam.sh` again.
 - **`crates/pam/src/pam.rs`:** `pam_sm_authenticate` on the `after-password-auth` line answers `PAM_IGNORE` and does nothing. `pam_sm_setcred`, which now always answers `PAM_IGNORE`, does the PIN unpause when its argument is `after-password-auth`, and never reads `PAM_AUTHTOK`. It should keep answering `PAM_IGNORE` either way.
-- **`crates/pinchecker/src/lib.rs`:** the `unpause` request takes no input and checks no password. `unix_chkpwd`, the `PasswordCheck` trait (`crates/core/src/attempt.rs`), `crates/sys/src/chkpwd.rs` and `--dev-chkpwd` go, along with the stand-in `unix_chkpwd` scripts in the tests.
+- **`crates/checker/src/lib.rs`:** the `unpause` request takes no input and checks no password. `unix_chkpwd`, the `PasswordCheck` trait (`crates/core/src/attempt.rs`), `crates/sys/src/chkpwd.rs` and `--dev-chkpwd` go, along with the stand-in `unix_chkpwd` scripts in the tests.
 - **Docs:** the sentence "Nothing the user runs can read a hash or reset a count" in `docs/chaos/security-target.md`, and the parts of `README-BIG.md` that describe the PIN unpause, its password check and the tests for it.
 
 ## What it would fix
@@ -86,8 +86,8 @@ No daemon: the module is already loaded in the lock screen's process and libpam 
 
 ## What we would accept
 
-- Anything the user runs can unpause the PIN and forgive the failures of the last 90 seconds, by asking the pinchecker for `unpause` directly, and probably also by running `pam_setcred` on the `kde` service itself (reasoned, not tried). The section on why the password check buys no security, above, is why that is fine.
-- A disabled PIN still stays disabled until `properpin enable` or `set`; the PIN unpause never lifts it.
+- Anything the user runs can unpause the PIN and forgive the failures of the last 90 seconds, by asking the PIN checker for `unpause` directly, and probably also by running `pam_setcred` on the `kde` service itself (reasoned, not tried). The section on why the password check buys no security, above, is why that is fine.
+- A disabled PIN still stays disabled until `screenlock-pin enable` or `set`; the PIN unpause never lifts it.
 - A fingerprint or smartcard unlock still doesn't unpause the PIN, as now.
 
 ## One line instead of two

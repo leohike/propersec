@@ -10,8 +10,8 @@ publish = false
 license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
-properpin-core = { path = "crates/core" }
-properpin-sys = { path = "crates/sys" }
+screenlock-pin-core = { path = "crates/core" }
+screenlock-pin-sys = { path = "crates/sys" }
 pamharness = { path = "crates/pamharness" }
 
 anyhow = "1.0.104"
@@ -28,7 +28,7 @@ assert_cmd = "2.2.2"
 proptest = "1.11.0"
 
 [workspace.lints.rust]
-# Denied everywhere; only the FFI modules in properpin-sys, pam_properpin, pamharness and the test-only brokenpin allow it.
+# Denied everywhere; only the FFI modules in screenlock-pin-sys, pam_screenlock_pin, pamharness and the test-only brokenpin allow it.
 unsafe_code = "deny"
 
 [workspace.lints.clippy]

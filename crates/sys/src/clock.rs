@@ -1,5 +1,5 @@
 use nix::time::{ClockId, clock_gettime};
-use properpin_core::{Clock, Error};
+use screenlock_pin_core::{Clock, Error};
 
 use crate::system;
 
@@ -16,7 +16,7 @@ impl Clock for SystemClock {
 
 /// `at`, seconds since 1970, as this machine's local time with its zone and offset, such as
 /// `2026-10-17 21:56:03 CEST (+0200)`. The zone is glibc's: `TZ` if set, else `/etc/localtime`.
-/// The pinchecker clears its environment first, so there it is always `/etc/localtime`, which only
+/// The PIN checker clears its environment first, so there it is always `/etc/localtime`, which only
 /// root can change. A time glibc can't convert comes back as the bare number.
 #[allow(unsafe_code)]
 pub fn local_time(at: u64) -> String {

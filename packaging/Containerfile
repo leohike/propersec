@@ -1,7 +1,7 @@
-# properpin's release build: the module, the setgid pinchecker and the command, built with Fedora 44's
+# screenlock-pin's release build: the module, the setgid PIN checker and the command, built with Fedora 44's
 # own toolchain and libraries, never the host's, so they load only the system's libraries on any
 # Fedora 44, Aurora included. Run it with `just release`, which writes the three files to
-# target/properpin, where install.sh looks by default; the build context is the repo root.
+# target/screenlock-pin, where install.sh looks by default; the build context is the repo root.
 
 FROM registry.fedoraproject.org/fedora:44 AS build
 RUN dnf -y install --setopt=install_weak_deps=False rust cargo gcc binutils libxcrypt-devel diffutils && dnf clean all
@@ -11,9 +11,9 @@ COPY crates crates
 COPY packaging packaging
 RUN --mount=type=cache,target=/root/.cargo/registry \
     --mount=type=cache,target=/src/target \
-    cargo build --release --locked -p pam_properpin -p properpin-pinchecker -p properpin-cli \
+    cargo build --release --locked -p pam_screenlock_pin -p screenlock-pin-checker -p screenlock-pin-cli \
     && mkdir -p /out \
-    && cp target/release/libpam_properpin.so target/release/properpin-pinchecker target/release/properpin /out/ \
+    && cp target/release/libpam_screenlock_pin.so target/release/screenlock-pin-checker target/release/screenlock-pin /out/ \
     && packaging/install.sh check-build --from /out
 
 # Only the three files, which podman build --output writes out.

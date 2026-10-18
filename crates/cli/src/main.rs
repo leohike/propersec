@@ -1,17 +1,17 @@
-//! `properpin`: manage the PIN that unlocks the KDE lock screen.
+//! `screenlock-pin`: manage the PIN that unlocks the KDE lock screen.
 //!
 //! ```text
-//! sudo properpin set [--user NAME]     choose a new PIN, typed twice; the lock screen takes it at
+//! sudo screenlock-pin set [--user NAME]     choose a new PIN, typed twice; the lock screen takes it at
 //!                                      once, and its budget of failures starts over
-//! sudo properpin enable [--user NAME]  turn a PIN disabled by too many suspicious failures back on
-//! sudo properpin remove [--user NAME]  delete the PIN, its budget and its lock file, whatever state
+//! sudo screenlock-pin enable [--user NAME]  turn a PIN disabled by too many suspicious failures back on
+//! sudo screenlock-pin remove [--user NAME]  delete the PIN, its budget and its lock file, whatever state
 //!                                      they are in; the lock screen takes the password only
-//! sudo properpin remove --all          the same for every user, after a question
-//! sudo properpin restore-defaults      delete the global config, after a question: every setting is
+//! sudo screenlock-pin remove --all          the same for every user, after a question
+//! sudo screenlock-pin restore-defaults      delete the global config, after a question: every setting is
 //!                                      back to its default
-//! sudo properpin doctor                what makes the lock screen refuse a PIN, for every user, and
+//! sudo screenlock-pin doctor                what makes the lock screen refuse a PIN, for every user, and
 //!                                      the command that fixes it
-//! properpin status                     your PIN: what is set, which rules apply, and whether it is
+//! screenlock-pin status                     your PIN: what is set, which rules apply, and whether it is
 //!                                      enabled, paused, disabled or refused, and why
 //! ```
 //!
@@ -20,8 +20,8 @@
 //! able to plant a PIN they know. The PIN is read from the terminal, or from stdin when it isn't one,
 //! never from the command line, where other users could see it in the process list.
 //!
-//! The hash file is written readable by the pinchecker's group only, so the user can't read it either:
-//! `status` asks the setgid pinchecker, which is the only program that reads hashes and counts.
+//! The hash file is written readable by the PIN checker's group only, so the user can't read it either:
+//! `status` asks the setgid PIN checker, which is the only program that reads hashes and counts.
 //!
 //! `set` refuses a PIN that is the user's password, comparing it, as root, with the user's hash in
 //! `/etc/shadow`, so it never asks for the password. `set` with the PIN already set, and `enable`
@@ -40,32 +40,32 @@ use std::process::{Command, ExitCode, Stdio};
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Parser, Subcommand};
-use properpin_core::{Budget, Clock, Hasher, MAX_PIN_BYTES, Secret, Settings, Store, exit};
-use properpin_sys::{Account, AllUsers, SystemClock, UserFiles, Yescrypt, current_euid, current_uid, group_by_name, shadow_hash};
+use screenlock_pin_core::{Budget, Clock, Hasher, MAX_PIN_BYTES, Secret, Settings, Store, exit};
+use screenlock_pin_sys::{Account, AllUsers, SystemClock, UserFiles, Yescrypt, current_euid, current_uid, group_by_name, shadow_hash};
 
 mod doctor;
 
 /// Manage the PIN that unlocks the KDE lock screen.
 #[derive(Debug, Parser)]
-#[command(name = "properpin", version)]
+#[command(name = "screenlock-pin", version)]
 struct Cli {
-    /// Where config and users/ live; /etc/properpin once installed
+    /// Where config and users/ live; /etc/screenlock-pin once installed
     #[arg(long, value_name = "DIR")]
     etc: PathBuf,
-    /// Where each user's budget of failures lives; /var/lib/properpin once installed
+    /// Where each user's budget of failures lives; /var/lib/screenlock-pin once installed
     #[arg(long, value_name = "DIR")]
     budget: PathBuf,
     /// The shadow file set compares a new PIN with, to refuse the password as a PIN
     #[arg(long, value_name = "PATH", default_value = "/etc/shadow")]
     shadow: PathBuf,
-    /// The setgid pinchecker, which status asks; /usr/local/libexec/properpin/properpin-pinchecker once installed
+    /// The setgid PIN checker, which status asks; /usr/local/libexec/screenlock-pin/screenlock-pin-checker once installed
     #[arg(long, value_name = "PATH")]
-    pinchecker: PathBuf,
+    pin_checker: PathBuf,
     /// Who must own the files under --etc, and the --budget directory
     #[arg(long, value_name = "UID", default_value_t = 0)]
     owner: u32,
-    /// The pinchecker's group, the only one that may read hash files
-    #[arg(long, value_name = "GROUP", default_value = "properpin")]
+    /// The PIN checker's group, the only one that may read hash files
+    #[arg(long, value_name = "GROUP", default_value = "screenlock-pin")]
     group: String,
     #[command(subcommand)]
     command: Action,
@@ -130,7 +130,7 @@ fn main() -> ExitCode {
         Ok(true) => ExitCode::SUCCESS,
         Ok(false) => ExitCode::FAILURE,
         Err(error) => {
-            eprintln!("properpin: {error:#}");
+            eprintln!("screenlock-pin: {error:#}");
             ExitCode::FAILURE
         }
     }
@@ -158,8 +158,8 @@ fn files(cli: &Cli, account: &Account) -> Result<UserFiles> {
 }
 
 /// A file the PIN can't be used with, as `set` and `enable` meet it: doctor says what fixes it.
-fn see_doctor(error: properpin_core::Error) -> anyhow::Error {
-    anyhow!("{error}; sudo properpin doctor says how to fix it")
+fn see_doctor(error: screenlock_pin_core::Error) -> anyhow::Error {
+    anyhow!("{error}; sudo screenlock-pin doctor says how to fix it")
 }
 
 /// Whose PIN: the one named, else whoever called sudo or pkexec, else whoever runs this.
@@ -230,7 +230,7 @@ fn enable(cli: &Cli, account: &Account, yes: bool) -> Result<()> {
         let judged = budget.judge(SystemClock.now()?, &settings);
         if budget.total >= settings.max_suspicious_total {
             bail!(
-                "{} suspicious failures since this PIN was set, and {} are allowed; choose a new one with: properpin set",
+                "{} suspicious failures since this PIN was set, and {} are allowed; choose a new one with: screenlock-pin set",
                 budget.total,
                 settings.max_suspicious_total
             );
@@ -244,7 +244,7 @@ fn enable(cli: &Cli, account: &Account, yes: bool) -> Result<()> {
             &mut stdin().lock(),
             yes,
             &format!(
-                "The PIN was disabled after {limit}. They may have been someone guessing it; sudo properpin set chooses a new one \
+                "The PIN was disabled after {limit}. They may have been someone guessing it; sudo screenlock-pin set chooses a new one \
                  instead."
             ),
         )?;
@@ -349,22 +349,22 @@ fn doctor(cli: &Cli) -> Result<bool> {
     Ok(found.problems.is_empty())
 }
 
-/// The pinchecker prints the status: only it can read the hash file and the counts. It says why
+/// The PIN checker prints the status: only it can read the hash file and the counts. It says why
 /// when it can't.
 fn status(cli: &Cli) -> Result<bool> {
     if current_uid() == 0 {
         bail!("status shows your own PIN; run it as yourself, without sudo");
     }
-    let output = Command::new(&cli.pinchecker)
+    let output = Command::new(&cli.pin_checker)
         .arg("status")
         .stdin(Stdio::null())
         .output()
-        .with_context(|| format!("running {}", cli.pinchecker.display()))?;
+        .with_context(|| format!("running {}", cli.pin_checker.display()))?;
     print!("{}", String::from_utf8_lossy(&output.stdout));
     match output.status.code().and_then(|code| u8::try_from(code).ok()) {
         Some(exit::YES) => Ok(true),
-        _ if output.stdout.is_empty() => bail!("{} failed ({}) without saying why", cli.pinchecker.display(), output.status),
-        _ => bail!("{} failed ({})", cli.pinchecker.display(), output.status),
+        _ if output.stdout.is_empty() => bail!("{} failed ({}) without saying why", cli.pin_checker.display(), output.status),
+        _ => bail!("{} failed ({})", cli.pin_checker.display(), output.status),
     }
 }
 
@@ -454,6 +454,6 @@ mod tests {
         let long = vec![b'1'; MAX_PIN_BYTES * 3];
         let typed = read_secret_line(&mut &long[..], MAX_PIN_BYTES).unwrap();
         assert_eq!(typed.as_bytes().len(), MAX_PIN_BYTES + 2);
-        assert_eq!(properpin_core::input_that_could_be_a_pin(typed.as_bytes()), None);
+        assert_eq!(screenlock_pin_core::input_that_could_be_a_pin(typed.as_bytes()), None);
     }
 }

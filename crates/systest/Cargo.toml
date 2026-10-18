@@ -1,5 +1,5 @@
 [package]
-name = "properpin-systest"
+name = "screenlock-pin-systest"
 description = "Test-only: install.sh against a fake root, and the whole system inside a container."
 version.workspace = true
 edition.workspace = true
@@ -8,13 +8,13 @@ publish.workspace = true
 license.workspace = true
 
 [[bin]]
-name = "properpin-systest"
+name = "screenlock-pin-systest"
 path = "src/main.rs"
 
 [dependencies]
 pamharness.workspace = true
-properpin-core.workspace = true
-properpin-sys.workspace = true
+screenlock-pin-core.workspace = true
+screenlock-pin-sys.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

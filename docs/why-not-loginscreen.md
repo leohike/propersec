@@ -1,8 +1,8 @@
-# Why properpin is not offered at the login screen
+# Why screenlock-pin is not offered at the login screen
 
-The question: would it be bad to also accept the PIN at Plasma's login screen, the one after boot or after logging out, and not only at the lock screen? The short answer: not because a PIN there would be unsafe, but because it costs more than it gives. It would need properpin code running as root, it would leave the wallet locked, and the login screen is used once per boot.
+The question: would it be bad to also accept the PIN at Plasma's login screen, the one after boot or after logging out, and not only at the lock screen? The short answer: not because a PIN there would be unsafe, but because it costs more than it gives. It would need screenlock-pin code running as root, it would leave the wallet locked, and the login screen is used once per boot.
 
-Written on 2026-10-18 on the Fedora 44 machine properpin is developed on (Plasma Login Manager `plasma-login-manager-6.7.5-1.fc44`, kscreenlocker 6.7.5). Claims are marked "verified here" (observed on this machine) or "reasoned" (thought through, not tested).
+Written on 2026-10-18 on the Fedora 44 machine screenlock-pin is developed on (Plasma Login Manager `plasma-login-manager-6.7.5-1.fc44`, kscreenlocker 6.7.5). Claims are marked "verified here" (observed on this machine) or "reasoned" (thought through, not tested).
 
 ## Two greeters, two PAM files
 
@@ -30,29 +30,29 @@ So the lines would cover exactly graphical login: after boot, after logging out,
 
 ## As built, the PIN would always be refused there
 
-`ps` shows `plasmalogin-helper` running as root while it logs a user in (verified here). Both halves of properpin refuse root:
+`ps` shows `plasmalogin-helper` running as root while it logs a user in (verified here). Both halves of screenlock-pin refuse root:
 
-- The module, in `crates/pam/src/run.rs`: "running as root; properpin belongs in the lock screen's stack only".
-- The pinchecker, in `crates/pinchecker/src/main.rs`: "refused: root has no lock screen to unlock".
+- The module, in `crates/pam/src/run.rs`: "running as root; screenlock-pin belongs in the lock screen's stack only".
+- The PIN checker, in `crates/checker/src/main.rs`: "refused: root has no lock screen to unlock".
 
-The pinchecker decides whose PIN to check from the real uid of whoever runs it and never takes a user name from its caller, so as root it has no user to check. With properpin's lines in `plasmalogin`, the PIN would be refused, the password would still work through `use_first_pass`, and each login would log an error (reasoned).
+The PIN checker decides whose PIN to check from the real uid of whoever runs it and never takes a user name from its caller, so as root it has no user to check. With screenlock-pin's lines in `plasmalogin`, the PIN would be refused, the password would still work through `use_first_pass`, and each login would log an error (reasoned).
 
-On a correctly installed system nothing runs properpin as root: its lines are only in `kde`, only `kscreenlocker_greet` opens `kde`, and it runs as the user; `install.sh` runs as root but never runs the module or the pinchecker (verified here). The refusal matters only after a mistake, such as the lines copied into the wrong file.
+On a correctly installed system nothing runs screenlock-pin as root: its lines are only in `kde`, only `kscreenlocker_greet` opens `kde`, and it runs as the user; `install.sh` runs as root but never runs the module or the PIN checker (verified here). The refusal matters only after a mistake, such as the lines copied into the wrong file.
 
 ## A PIN at login would be about as safe as at the lock screen
 
 Reasoned. With perfect code, a PIN at the login screen would not be much weaker than at the lock screen:
 
-- The pause after three wrong tries is kept on disk, in `/var/lib/properpin`, so it would hold at login too, across reboots; after it, only the password works.
+- The pause after three wrong tries is kept on disk, in `/var/lib/screenlock-pin`, so it would hold at login too, across reboots; after it, only the password works.
 - When the machine is off, the login screen is not the real barrier. With full-disk encryption the attacker first faces the disk passphrase; without it, they can boot from a USB stick and read the disk, and no login screen helps.
 
 So the case against it is not that the PIN would be unsafe there.
 
 ## Why not anyway
 
-- **More code running as root.** At login the password is checked by root. Supporting the PIN there means properpin's module running inside a root process, and a pinchecker that accepts "check user X" from root instead of only "check the user who runs me". That is a new trust model and new code to review.
+- **More code running as root.** At login the password is checked by root. Supporting the PIN there means screenlock-pin's module running inside a root process, and a PIN checker that accepts "check user X" from root instead of only "check the user who runs me". That is a new trust model and new code to review.
 - **The wallet would stay locked.** At login `pam_kwallet` passes the real password to the wallet (`ksecretd --pam-login` runs on this machine; verified here). A PIN login ending the stack with `success=done` would skip `pam_kwallet`, `pam_gnome_keyring` and `postlogin`, and even if they ran, they would get the PIN, not the password. The wallet would stay locked and ask for the password later. The same goes for anything else that needs the password at login, such as an encrypted home directory (reasoned).
 - **It would replace Fedora's file.** The stock file is `/usr/lib/pam.d/plasmalogin`. Adding lines means creating `/etc/pam.d/plasmalogin`, which hides the vendor file completely, so later package updates to it would be silently ignored (reasoned, from how Linux-PAM looks in `/etc/pam.d` before `/usr/lib/pam.d`).
 - **Little value.** The login screen is used once per boot; the lock screen many times a day. The PIN saves typing mainly at the lock screen.
 
-So properpin stays a lock-screen feature: a PIN at login would cost a root code path and a working wallet for little gain.
+So screenlock-pin stays a lock-screen feature: a PIN at login would cost a root code path and a working wallet for little gain.

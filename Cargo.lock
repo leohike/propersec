@@ -288,13 +288,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
-name = "pam_properpin"
+name = "pam_screenlock_pin"
 version = "0.1.0"
 dependencies = [
  "libc",
  "pamharness",
- "properpin-core",
- "properpin-sys",
+ "screenlock-pin-core",
+ "screenlock-pin-sys",
  "tempfile",
 ]
 
@@ -348,59 +348,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "985e7ec9bb745e6ce6535b544d84d6cd6f7ad8bd711c398938ae983b91a766d9"
 dependencies = [
  "unicode-ident",
-]
-
-[[package]]
-name = "properpin-cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "assert_cmd",
- "clap",
- "properpin-core",
- "properpin-sys",
- "rpassword",
- "tempfile",
-]
-
-[[package]]
-name = "properpin-core"
-version = "0.1.0"
-dependencies = [
- "proptest",
- "thiserror",
- "zeroize",
-]
-
-[[package]]
-name = "properpin-pinchecker"
-version = "0.1.0"
-dependencies = [
- "libc",
- "properpin-core",
- "properpin-sys",
- "tempfile",
-]
-
-[[package]]
-name = "properpin-sys"
-version = "0.1.0"
-dependencies = [
- "nix",
- "properpin-core",
- "subtle",
- "tempfile",
- "zeroize",
-]
-
-[[package]]
-name = "properpin-systest"
-version = "0.1.0"
-dependencies = [
- "pamharness",
- "properpin-core",
- "properpin-sys",
- "tempfile",
 ]
 
 [[package]]
@@ -543,6 +490,59 @@ dependencies = [
  "quick-error",
  "tempfile",
  "wait-timeout",
+]
+
+[[package]]
+name = "screenlock-pin-checker"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "screenlock-pin-core",
+ "screenlock-pin-sys",
+ "tempfile",
+]
+
+[[package]]
+name = "screenlock-pin-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "assert_cmd",
+ "clap",
+ "rpassword",
+ "screenlock-pin-core",
+ "screenlock-pin-sys",
+ "tempfile",
+]
+
+[[package]]
+name = "screenlock-pin-core"
+version = "0.1.0"
+dependencies = [
+ "proptest",
+ "thiserror",
+ "zeroize",
+]
+
+[[package]]
+name = "screenlock-pin-sys"
+version = "0.1.0"
+dependencies = [
+ "nix",
+ "screenlock-pin-core",
+ "subtle",
+ "tempfile",
+ "zeroize",
+]
+
+[[package]]
+name = "screenlock-pin-systest"
+version = "0.1.0"
+dependencies = [
+ "pamharness",
+ "screenlock-pin-core",
+ "screenlock-pin-sys",
+ "tempfile",
 ]
 
 [[package]]

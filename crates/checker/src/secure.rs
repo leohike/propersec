@@ -1,4 +1,4 @@
-//! The setgid start-up, and syslog. All of the pinchecker's `unsafe` code is in this file.
+//! The setgid start-up, and syslog. All of the PIN checker's `unsafe` code is in this file.
 //!
 //! A setgid program starts in a state its caller chose: open files, ignored or blocked signals, an
 //! environment, a working directory, a umask, resource limits. Before anything else, `start_clean`
@@ -10,7 +10,7 @@
 
 use std::ffi::CString;
 
-use properpin_core::Log;
+use screenlock_pin_core::Log;
 
 /// Put the process into a known state. Call it first in `main`, before any other thread exists.
 pub fn start_clean() {
@@ -19,14 +19,14 @@ pub fn start_clean() {
     // the file descriptors can't race with anything.
     unsafe {
         // stdin, stdout and stderr open, on /dev/null if the caller closed them, so a file the
-        // pinchecker opens later can never land on fd 0, 1 or 2 and receive what is meant for them.
+        // PIN checker opens later can never land on fd 0, 1 or 2 and receive what is meant for them.
         for fd in 0..=2 {
             if libc::fcntl(fd, libc::F_GETFD) == -1 {
                 // open() returns the lowest free descriptor, which is `fd`.
                 libc::open(c"/dev/null".as_ptr(), libc::O_RDWR);
             }
         }
-        // Every other descriptor the caller left open is closed: the pinchecker uses none of them.
+        // Every other descriptor the caller left open is closed: the PIN checker uses none of them.
         libc::close_range(3, libc::c_uint::MAX, 0);
         // Every signal back to its default action, and none blocked. SIGPIPE stays ignored, so a
         // write to a closed pipe is an error to handle rather than a sudden death.
@@ -54,13 +54,13 @@ pub fn elevated() -> bool {
     unsafe { libc::getauxval(libc::AT_SECURE) != 0 }
 }
 
-/// Logs to the authpriv facility as `properpin-pinchecker`, like pam_unix and unix_chkpwd.
+/// Logs to the authpriv facility as `screenlock-pin-checker`, like pam_unix and unix_chkpwd.
 pub struct Syslog;
 
 impl Syslog {
     pub fn open() -> Self {
         // SAFETY: the identity is a static string, as openlog requires: it keeps the pointer.
-        unsafe { libc::openlog(c"properpin-pinchecker".as_ptr(), libc::LOG_PID, libc::LOG_AUTHPRIV) };
+        unsafe { libc::openlog(c"screenlock-pin-checker".as_ptr(), libc::LOG_PID, libc::LOG_AUTHPRIV) };
         Self
     }
 }

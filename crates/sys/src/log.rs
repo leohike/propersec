@@ -1,9 +1,9 @@
 use std::io::Write;
 use std::path::PathBuf;
 
-use properpin_core::Log;
+use screenlock_pin_core::Log;
 
-/// Appends one line per event to a file. Used by tests and the pinchecker's `--dev-log`; the PAM module
+/// Appends one line per event to a file. Used by tests and the PIN checker's `--dev-log`; the PAM module
 /// logs through `pam_syslog` instead.
 #[derive(Debug, Clone)]
 pub struct FileLog(pub PathBuf);

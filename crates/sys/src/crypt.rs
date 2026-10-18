@@ -1,6 +1,6 @@
 use std::ffi::{CStr, CString, c_char, c_int, c_ulong, c_void};
 
-use properpin_core::{Error, HASH_PREFIX, Hasher, MAX_PIN_BYTES};
+use screenlock_pin_core::{Error, HASH_PREFIX, Hasher, MAX_PIN_BYTES};
 use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
 

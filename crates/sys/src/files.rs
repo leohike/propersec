@@ -7,37 +7,37 @@ use std::time::{Duration, Instant};
 
 use nix::fcntl::{Flock, FlockArg};
 use nix::libc::O_NOFOLLOW;
-use properpin_core::{Budget, Error, HASH_SETTING, MAX_FILE_BYTES, Settings, Store, kv};
+use screenlock_pin_core::{Budget, Error, HASH_SETTING, MAX_FILE_BYTES, Settings, Store, kv};
 
 use crate::system;
 
 /// How long an attempt waits for another one to finish with the budget. The lock screen must never
-/// hang on properpin, so after this the attempt gives up and the password is checked instead.
+/// hang on screenlock-pin, so after this the attempt gives up and the password is checked instead.
 const LOCK_TIMEOUT: Duration = Duration::from_secs(1);
 
-/// One user's properpin files, and the rules for trusting each of them:
+/// One user's screenlock-pin files, and the rules for trusting each of them:
 ///
 /// ```text
 /// <etc>/config               global settings, optional            owner-only writable
-/// <etc>/users/<user>         the user's settings and hash         owner:<pinchecker group> 0640
-/// <budget_dir>/              every user's budget, on disk         owner:<pinchecker group> 1770
-/// <budget_dir>/<uid>.budget  a Budget                             <uid>:<pinchecker group> 0600
-/// <budget_dir>/<uid>.lock    serialises concurrent attempts       <uid>:<pinchecker group> 0600
+/// <etc>/users/<user>         the user's settings and hash         owner:<PIN checker group> 0640
+/// <budget_dir>/              every user's budget, on disk         owner:<PIN checker group> 1770
+/// <budget_dir>/<uid>.budget  a Budget                             <uid>:<PIN checker group> 0600
+/// <budget_dir>/<uid>.lock    serialises concurrent attempts       <uid>:<PIN checker group> 0600
 /// ```
 ///
 /// The settings and the hash must belong to `etc_owner`, so nobody else can change them: root once
-/// installed, the test's own uid in tests. The hash must be readable by the pinchecker's group and
-/// by nobody else, and the config by everyone, since the pinchecker reads it as the user. The
-/// pinchecker can't even open a file it can't read, so those rules matter to root, which reads
-/// everything: `properpin doctor` judges every file by the same rules the pinchecker does, and
+/// installed, the test's own uid in tests. The hash must be readable by the PIN checker's group and
+/// by nobody else, and the config by everyone, since the PIN checker reads it as the user. The
+/// PIN checker can't even open a file it can't read, so those rules matter to root, which reads
+/// everything: `screenlock-pin doctor` judges every file by the same rules the PIN checker does, and
 /// finds what an attempt would refuse. The budgets live in one directory for all users, which
-/// only the pinchecker's group can enter, so a user can neither read nor reset their counts. The
+/// only the PIN checker's group can enter, so a user can neither read nor reset their counts. The
 /// directory is sticky, and each user's budget and lock files must belong to that user, so one
-/// user's run of the pinchecker can't read or replace another's. Both are created by root, at
-/// `properpin set` ([`UserFiles::start_budget`]), and given to the user; the pinchecker only opens
+/// user's run of the PIN checker can't read or replace another's. Both are created by root, at
+/// `screenlock-pin set` ([`UserFiles::start_budget`]), and given to the user; the PIN checker only opens
 /// them, so nobody's run ever creates a file there that another user's could find in their name.
 /// Whoever writes the budget, the user or root, gives it to the user. [`UserFiles::new`] gives the
-/// `etc` side, which `properpin set` and `remove` need; [`UserFiles::with_budget`] adds the
+/// `etc` side, which `screenlock-pin set` and `remove` need; [`UserFiles::with_budget`] adds the
 /// budget.
 #[derive(Debug, Clone)]
 pub struct UserFiles {
@@ -48,7 +48,7 @@ pub struct UserFiles {
     uid: u32,
 }
 
-/// A directory every user's files share: owned by `owner`, with the pinchecker's `group`.
+/// A directory every user's files share: owned by `owner`, with the PIN checker's `group`.
 #[derive(Debug, Clone)]
 struct SharedDir {
     path: PathBuf,
@@ -100,7 +100,7 @@ impl UserFiles {
         kv::parse(&text, &path.display().to_string())
     }
 
-    /// The pinchecker's group, the only one that may read the user's file. It comes with the
+    /// The PIN checker's group, the only one that may read the user's file. It comes with the
     /// budget directory, which has the same group.
     fn group(&self) -> Result<u32, Error> {
         self.budget.as_ref().map(|budget| budget.group).ok_or_else(|| Error::System("no budget directory given".into()))
@@ -112,7 +112,7 @@ impl UserFiles {
     }
 
     /// The user's own file alone, its hash on top of the defaults, by the rules [`Store::settings`]
-    /// applies to it: `properpin doctor`, which tells a problem with this file from one with the
+    /// applies to it: `screenlock-pin doctor`, which tells a problem with this file from one with the
     /// config.
     pub fn user_settings(&self) -> Result<Settings, Error> {
         let mut settings = Settings::default();
@@ -121,7 +121,7 @@ impl UserFiles {
     }
 
     /// Atomically write a new PIN's hash as the user's whole file: owned by the owner, readable by
-    /// the pinchecker's group, mode 0640. Whatever the file held before is gone.
+    /// the PIN checker's group, mode 0640. Whatever the file held before is gone.
     pub fn save_pin(&self, hash: &str) -> Result<(), Error> {
         let path = self.user_file();
         let group = self.group()?;
@@ -155,7 +155,7 @@ impl UserFiles {
         remove_user_file(&self.etc, &self.user)
     }
 
-    /// Give a new PIN its budget and lock file, as root: `properpin set`. The lock is taken first,
+    /// Give a new PIN its budget and lock file, as root: `screenlock-pin set`. The lock is taken first,
     /// so an attempt still running finishes before the budget is replaced. A lock file that isn't
     /// the user's own goes, so does whatever stands in its place, and a new one is created for the
     /// user: root can delete anything here, so whatever got there, a fresh `set` repairs it.
@@ -203,14 +203,14 @@ impl UserFiles {
     }
 
     /// Every check an attempt makes on the lock file and the budget, without taking the lock or
-    /// changing anything: `properpin doctor` and `status`.
+    /// changing anything: `screenlock-pin doctor` and `status`.
     pub fn check_budget(&self) -> Result<(), Error> {
         let dir = self.trusted_budget_dir()?;
         self.open_lock(&dir.join(format!("{}.lock", self.uid)))?;
         self.load_budget().map(drop)
     }
 
-    // --- the pinchecker's side: the budget
+    // --- the PIN checker's side: the budget
 
     fn trusted_budget_dir(&self) -> Result<&Path, Error> {
         let budget = self.budget.as_ref().ok_or_else(|| Error::System("no budget directory given".into()))?;
@@ -261,7 +261,7 @@ impl UserFiles {
 }
 
 /// Refuse a shared directory that isn't exactly as installed: a directory, not a symlink, owned by
-/// the owner and the pinchecker's group, mode 1770. Without the group's write bit the pinchecker can't
+/// the owner and the PIN checker's group, mode 1770. Without the group's write bit the PIN checker can't
 /// keep its files; without the sticky bit one user's run could delete or replace another's files;
 /// any bit for others would let users in.
 fn trusted_dir<'a>(dir: &'a SharedDir, what: &str) -> Result<&'a Path, Error> {
@@ -294,7 +294,7 @@ impl Store for UserFiles {
     }
 
     /// Every write of the budget happens under this lock. The lock file must exist, created by
-    /// `properpin set`, and be the user's own: one that is missing or isn't refuses the PIN, and a
+    /// `screenlock-pin set`, and be the user's own: one that is missing or isn't refuses the PIN, and a
     /// fresh `set` repairs it. Opened without `O_CREAT`, which `fs.protected_regular` would refuse
     /// root in this sticky, group-writable directory, even for a file that exists.
     fn lock(&self) -> Result<Flock<File>, Error> {
@@ -325,8 +325,8 @@ impl Store for UserFiles {
         Budget::parse(&text).map_or_else(|| refuse("not a valid budget"), Ok)
     }
 
-    /// Written for the user and the pinchecker's group whoever writes it: the pinchecker, as the user, or
-    /// `properpin set` and `enable`, as root, always under the lock. Synced, file and directory, since
+    /// Written for the user and the PIN checker's group whoever writes it: the PIN checker, as the user, or
+    /// `screenlock-pin set` and `enable`, as root, always under the lock. Synced, file and directory, since
     /// it must survive a power cut. A write killed halfway leaves its temporary file behind, so the
     /// next one clears any of the user's first (see [`UserFiles::remove_leftovers`]).
     fn save_budget(&self, budget: &Budget) -> Result<(), Error> {
@@ -378,7 +378,7 @@ fn config_settings(path: &Path, owners: &[u32]) -> Result<Settings, Error> {
     Ok(settings)
 }
 
-/// Every user's files at once, for root: what `properpin doctor` looks at, and what `remove --all`
+/// Every user's files at once, for root: what `screenlock-pin doctor` looks at, and what `remove --all`
 /// and `restore-defaults` delete. [`AllUsers::user`] gives one user's [`UserFiles`].
 #[derive(Debug, Clone)]
 pub struct AllUsers {
@@ -389,7 +389,7 @@ pub struct AllUsers {
 
 impl AllUsers {
     /// The files under `etc`, which must belong to `etc_owner`, and the budgets in `budget_dir`,
-    /// which must belong to `budget_owner` and `group`, the pinchecker's.
+    /// which must belong to `budget_owner` and `group`, the PIN checker's.
     pub fn new(etc: impl Into<PathBuf>, etc_owner: u32, budget_dir: impl Into<PathBuf>, budget_owner: u32, group: u32) -> Self {
         Self { etc: etc.into(), etc_owner, budget: SharedDir { path: budget_dir.into(), owner: budget_owner, group } }
     }
@@ -408,7 +408,7 @@ impl AllUsers {
         self.etc.join("users")
     }
 
-    /// The config alone, on top of the defaults, by the rules the pinchecker applies to it.
+    /// The config alone, on top of the defaults, by the rules the PIN checker applies to it.
     pub fn config_settings(&self) -> Result<Settings, Error> {
         config_settings(&self.config(), &[self.etc_owner])
     }
@@ -418,8 +418,8 @@ impl AllUsers {
         trusted_dir(&self.budget, "budget directory").map(drop)
     }
 
-    /// `<etc>/users` as install makes it: a directory owned by the owner and the pinchecker's group,
-    /// mode 0750. The pinchecker never checks it, but can't reach a user's file through a directory
+    /// `<etc>/users` as install makes it: a directory owned by the owner and the PIN checker's group,
+    /// mode 0750. The PIN checker never checks it, but can't reach a user's file through a directory
     /// its group can't enter, which root, reading everything, would never notice.
     pub fn check_users_dir(&self) -> Result<(), Error> {
         let path = self.users_dir();
@@ -537,16 +537,16 @@ fn usable_name(user: &str) -> Result<(), Error> {
 /// Who reads a trusted file, besides root.
 #[derive(Debug, Clone, Copy)]
 enum Readers {
-    /// Everyone: the global config, which the pinchecker reads as the user, and the config isn't
+    /// Everyone: the global config, which the PIN checker reads as the user, and the config isn't
     /// its group's.
     Everyone,
-    /// The pinchecker's group alone: a user's own file, which holds the hash.
+    /// The PIN checker's group alone: a user's own file, which holds the hash.
     Group(u32),
 }
 
 /// The text of `path`, provided it can be trusted: a regular file, not a symlink, owned by one of
 /// `owners`, that nobody else can change, and that `readers` can read: everyone, or the group
-/// alone, which must then be the pinchecker's. `None` when there is no such file.
+/// alone, which must then be the PIN checker's. `None` when there is no such file.
 fn read_trusted(path: &Path, owners: &[u32], readers: Readers) -> Result<Option<String>, Error> {
     let (info, text) = match read_regular_file(path) {
         Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
@@ -562,7 +562,7 @@ fn read_trusted(path: &Path, owners: &[u32], readers: Readers) -> Result<Option<
     }
     // Only root, which reads anything, gets past the open with a file its readers can't read.
     match readers {
-        Readers::Everyone if info.mode() & 0o004 == 0 => refuse("not readable by others, and the pinchecker reads it as the user".into()),
+        Readers::Everyone if info.mode() & 0o004 == 0 => refuse("not readable by others, and the PIN checker reads it as the user".into()),
         Readers::Group(_) if info.mode() & 0o004 != 0 => refuse("readable by others".into()),
         Readers::Group(group) if info.gid() != group => refuse(format!("group {}, not {group}", info.gid())),
         Readers::Group(_) if info.mode() & 0o040 == 0 => refuse("not readable by its group".into()),
@@ -625,10 +625,10 @@ mod tests {
         assert_eq!((settings.max_failures, settings.hash_cost, settings.pin_hash.as_str()), (5, 6, "$y$j9T$abc$def"));
         write(&files.user_file(), "hash = $y$j9T$abc$def\nmax_failures = 2\n", 0o640);
         assert!(matches!(files.settings(), Err(Error::OnlyTheHash { .. })));
-        assert!(matches!(files.user_settings(), Err(Error::OnlyTheHash { .. })), "doctor's rules are the pinchecker's");
+        assert!(matches!(files.user_settings(), Err(Error::OnlyTheHash { .. })), "doctor's rules are the PIN checker's");
     }
 
-    /// The test owns its files, as root would: it can read what the pinchecker couldn't, so the
+    /// The test owns its files, as root would: it can read what the PIN checker couldn't, so the
     /// readers' rules are what refuses those.
     #[test]
     fn untrusted_files_are_refused() {
@@ -637,7 +637,7 @@ mod tests {
             write(&files.user_file(), "hash = $y$x\n", mode);
             let error = files.settings().unwrap_err().to_string();
             assert!(error.contains(why), "{error}");
-            assert_eq!(files.user_settings().unwrap_err().to_string(), error, "doctor's rules are the pinchecker's");
+            assert_eq!(files.user_settings().unwrap_err().to_string(), error, "doctor's rules are the PIN checker's");
         }
         let budget = files.budget.clone().unwrap();
         let other_owner = UserFiles::new(files.etc.clone(), files.etc_owner + 1, "tester", files.uid).unwrap().with_budget(
@@ -654,7 +654,7 @@ mod tests {
 
         write(&files.config(), "max_failures = 2\n", 0o640);
         let error = files.settings().unwrap_err().to_string();
-        assert!(error.contains("not readable by others, and the pinchecker reads it as the user"), "{error}");
+        assert!(error.contains("not readable by others, and the PIN checker reads it as the user"), "{error}");
     }
 
     #[test]
@@ -682,7 +682,7 @@ mod tests {
     #[test]
     fn saving_a_hash_replaces_the_whole_file_and_sets_the_mode() {
         let Scratch { files, .. } = &scratch();
-        // A file from a version with per-user settings, which the pinchecker now refuses.
+        // A file from a version with per-user settings, which the PIN checker now refuses.
         write(&files.user_file(), "hash = $y$old\nmax_failures = 2\n", 0o640);
         files.save_pin("$y$new").unwrap();
         assert_eq!(fs::read_to_string(files.user_file()).unwrap(), "hash = $y$new\n");
@@ -726,7 +726,7 @@ mod tests {
         assert!(linked.lock().unwrap_err().to_string().contains("not a directory"));
     }
 
-    /// The pinchecker never creates the lock file, so a missing one is refused. A test can't make
+    /// The PIN checker never creates the lock file, so a missing one is refused. A test can't make
     /// files owned by someone else, so it plays the other side: the files are built for another
     /// uid, and the file the test creates stands in for a planted one.
     #[test]

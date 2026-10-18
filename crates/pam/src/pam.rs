@@ -6,8 +6,8 @@ use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
-use properpin_core::{Error, Log, Secret};
-use properpin_sys::FileLog;
+use screenlock_pin_core::{Error, Log, Secret};
+use screenlock_pin_sys::FileLog;
 
 use crate::run::{Transaction, run, run_unpause};
 use crate::{Args, Mode};
@@ -52,10 +52,9 @@ pub unsafe extern "C" fn pam_sm_authenticate(pamh: *mut PamHandle, _flags: c_int
                     None => pam.log(&line),
                 }
                 // Asked for all the same, as `run` does first: a line after this one may only read
-                // what was typed, as the `pam_unix.so use_first_pass` of versions before 2026-10-18
-                // does, and finding nothing it would refuse the password too. So a line this
-                // module can't read, such as an older version's after an upgrade, refuses the PIN
-                // alone.
+                // what was typed, as `pam_unix.so use_first_pass` does, and finding nothing it would
+                // refuse the password too. So a line this module can't read, such as another
+                // version's after an upgrade, refuses the PIN alone.
                 drop(pam.typed());
                 return PAM_IGNORE;
             }
@@ -79,11 +78,11 @@ pub unsafe extern "C" fn pam_sm_authenticate(pamh: *mut PamHandle, _flags: c_int
     .unwrap_or(PAM_IGNORE)
 }
 
-/// properpin sets no credentials, but a call here on the `after-password-auth` line is the sign that the
+/// screenlock-pin sets no credentials, but a call here on the `after-password-auth` line is the sign that the
 /// lock screen was unlocked through the stock password stack. libpam calls `pam_sm_setcred` only
 /// when the program calls `pam_setcred`, which kscreenlocker does only after a successful
 /// `pam_authenticate`, and it replays the path `pam_authenticate` took (docs/current-setcred.md).
-/// Any flag counts. The pinchecker then unpauses the PIN, and logs it. The `unpause`
+/// Any flag counts. The PIN checker then unpauses the PIN, and logs it. The `unpause`
 /// line answers `PAM_IGNORE`, which kscreenlocker ignores anyway.
 ///
 /// The `check` line answers `PAM_SUCCESS`, and must: that is what ends the replay there after a
@@ -118,7 +117,7 @@ pub unsafe extern "C" fn pam_sm_setcred(pamh: *mut PamHandle, _flags: c_int, arg
     .unwrap_or(PAM_IGNORE)
 }
 
-/// The pinchecker logs every answer itself; the module logs only what went wrong on its side.
+/// The PIN checker logs every answer itself; the module logs only what went wrong on its side.
 fn run_and_log(pam: &Pam, args: &Args, log: &dyn Log, run: fn(&Pam, &Args) -> Result<bool, Error>) -> bool {
     run(pam, args).unwrap_or_else(|error| {
         let what = match args.mode {
@@ -141,11 +140,11 @@ unsafe fn arguments(argc: c_int, argv: *const *const c_char) -> Vec<String> {
 }
 
 /// SIGCHLD set to its default action for as long as this lives, and then put back as it was. Like
-/// pam_unix around `unix_chkpwd`: a host that ignores SIGCHLD would have the pinchecker's exit status
+/// pam_unix around `unix_chkpwd`: a host that ignores SIGCHLD would have the PIN checker's exit status
 /// discarded by the kernel, and the module couldn't read the answer.
 ///
 /// The setting is process-wide. Two threads saving and restoring it at once can lose the host's
-/// setting for good (the second saves the first's default, and restores it last), so properpin's
+/// setting for good (the second saves the first's default, and restores it last), so screenlock-pin's
 /// own attempts on different threads take turns here. Another module doing the same on another
 /// thread at the same moment could still race with this, as it could with pam_unix; none in
 /// Fedora's fingerprint or smartcard stacks does (docs/chaos/harness-closer-to-kscreenlocker.md).

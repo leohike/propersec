@@ -22,20 +22,20 @@ A brief for adding GitHub Actions CI to propersec, written so an agent (or a per
 
 ## The repo
 
-- **Workspace:** a Cargo workspace at the root, edition 2024, `rust-version = "1.98"`, members `products/*/crates/*`, with `Cargo.lock` committed. The just recipes live in `products/pin/properpin.just`, imported into the root `justfile` both directly and as the `properpin` module (through `products/pin/module.just`).
+- **Workspace:** a Cargo workspace at the root, edition 2024, `rust-version = "1.98"`, members `products/*/crates/*`, with `Cargo.lock` committed. The just recipes live in `products/pin/screenlock-pin.just`, imported into the root `justfile` both directly and as the `screenlock-pin` module (through `products/pin/module.just`).
 - **Build needs:**
   - Rust 1.98 and a C linker (gcc);
   - libxcrypt with its development symlink `libcrypt.so` (Fedora `libxcrypt-devel`, Debian/Ubuntu `libcrypt-dev`);
   - `libpam.so.0` at run time; it is linked by its runtime name, so no PAM development package is needed.
 - **Tests:** the stack tests use the real libpam through `pam_start_confdir`, which needs Linux-PAM 1.4 or later, plus `pam_permit.so` and `pam_deny.so`. Hashing is yescrypt through libxcrypt. The stack tests build the module themselves with `cargo build`, which is expected. Fedora 44 ships Rust 1.98.1 and Linux-PAM 1.7.2, matching the local setup.
-- **The system test,** `just properpin podman`, which takes about a minute locally, is two commands:
-  - `podman build --quiet --ignorefile products/pin/testing/podman/Containerfile.containerignore -f products/pin/testing/podman/Containerfile -t properpin-systest .`
-  - `podman run --rm --init --network=none properpin-systest`
+- **The system test,** `just screenlock-pin podman`, which takes about a minute locally, is two commands:
+  - `podman build --quiet --ignorefile products/pin/testing/podman/Containerfile.containerignore -f products/pin/testing/podman/Containerfile -t screenlock-pin-systest .`
+  - `podman run --rm --init --network=none screenlock-pin-systest`
 
-  `just properpin podman-uninstall` then runs `products/pin/testing/podman/uninstall-cases.sh`, which starts a fresh container per uninstall case (13 so far), and CI runs it after the scenarios.
+  `just screenlock-pin podman-uninstall` then runs `products/pin/testing/podman/uninstall-cases.sh`, which starts a fresh container per uninstall case (13 so far), and CI runs it after the scenarios.
 
-  Inside the container it runs its scenarios (35 as of the harness closer to kscreenlocker) as root: it installs properpin with `install.sh`, listens on `/dev/log`, and runs attempts through the setuid `unix_chkpwd`. The Containerfile uses `RUN --mount=type=cache`, which needs a buildah/podman recent enough to support it.
-- **Read first:** `CLAUDE.md`, the root `Cargo.toml`, `products/pin/properpin.just`, `products/pin/docs/README.md`, `products/pin/testing/podman/Containerfile`, and `docs/chaos/plan.md`.
+  Inside the container it runs its scenarios (35 as of the harness closer to kscreenlocker) as root: it installs screenlock-pin with `install.sh`, listens on `/dev/log`, and runs attempts through the setuid `unix_chkpwd`. The Containerfile uses `RUN --mount=type=cache`, which needs a buildah/podman recent enough to support it.
+- **Read first:** `CLAUDE.md`, the root `Cargo.toml`, `products/pin/screenlock-pin.just`, `products/pin/docs/README.md`, `products/pin/testing/podman/Containerfile`, and `docs/chaos/plan.md`.
 
 ## What CI should do
 

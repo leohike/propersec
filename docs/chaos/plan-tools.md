@@ -1,8 +1,8 @@
 # Tools that check Rust code automatically
 
-A survey made on 2026-10-03 of linters, analysers and verifiers that could check properpin's code beyond what it used then, with a recommended order. The first three steps were built the same day as proofs of concept; `docs/chaos/tooling-remaining-ideas.md` says what each does and what was left for later. Everything would run in CI or in a podman container, so nothing gets installed on the development machine; trying a tool locally (each is one cargo crate) is to be agreed with the owner first.
+A survey made on 2026-10-03 of linters, analysers and verifiers that could check screenlock-pin's code beyond what it used then, with a recommended order. The first three steps were built the same day as proofs of concept; `docs/chaos/tooling-remaining-ideas.md` says what each does and what was left for later. Everything would run in CI or in a podman container, so nothing gets installed on the development machine; trying a tool locally (each is one cargo crate) is to be agreed with the owner first.
 
-## What properpin already has
+## What screenlock-pin already has
 
 - **Locally, through `just lint`:** clippy with warnings as errors, and rustfmt.
 - **In CI:** `cargo deny` and `cargo audit`, which check dependencies against known security advisories; `cargo deny`'s licence, ban and source checks only warn.
@@ -17,7 +17,7 @@ One gap: **clippy and rustfmt didn't run in CI,** so nothing stopped a commit th
   - `indexing_slicing`: flags `a[i]` and `&a[x..y]`, which panic when out of range. It would flag `decode_hash`, for example.
   - `arithmetic_side_effects`: flags arithmetic that can overflow.
   - `cast_possible_truncation`: flags casts that can silently lose bits, such as `bits as u8` in the decoder.
-  - `unwrap_used` and `expect_used`: flag calls that panic. A panic in the PAM module is caught, and in the pinchecker it aborts, but each one should be deliberate.
+  - `unwrap_used` and `expect_used`: flag calls that panic. A panic in the PAM module is caught, and in the PIN checker it aborts, but each one should be deliberate.
 - **`clippy::pedantic`:** a stricter style group, noisier, best turned on with a list of exceptions.
 - **Semgrep:** custom pattern rules across the code, such as "never log a variable named pin or password", which clippy can't express.
 
@@ -25,14 +25,14 @@ One gap: **clippy and rustfmt didn't run in CI,** so nothing stopped a commit th
 
 - **cargo-mutants (mutation testing):** breaks the code on purpose, one change at a time, and reports every change no test notices. Already a row in `docs/chaos/plan.md`, and the best single sign of how far the tests can be trusted.
 - **cargo-fuzz:** feeds random input to a function, millions of times. Good targets: the settings parser (`kv.rs`), the state, budget and hex parsers, and `decode_hash`. It needs the nightly toolchain, which is fine in CI.
-- **Miri:** an interpreter that catches undefined behaviour in `unsafe` code. It is of limited use here: it can't run calls into foreign C libraries such as libxcrypt and libpam, and that is where properpin's `unsafe` code is; the rest has no `unsafe` code at all.
+- **Miri:** an interpreter that catches undefined behaviour in `unsafe` code. It is of limited use here: it can't run calls into foreign C libraries such as libxcrypt and libpam, and that is where screenlock-pin's `unsafe` code is; the rest has no `unsafe` code at all.
 - **cargo-careful:** runs the tests against a standard library with extra internal checks turned on. Cheap, and it works around FFI. Nightly only.
 
 ## Proving properties
 
 - **Kani:** a model checker from AWS that proves a property for every possible input, not just the tested ones. AWS runs it in CI for Firecracker and s2n-quic. It suits small, critical functions: "`decode_hash` never panics and gives back exactly what libxcrypt encoded", "`xor` applied twice gives the input back", or the budget's invariants. Heavier to learn, but those functions are small.
 
-## Supply chain, beyond what properpin has
+## Supply chain, beyond what screenlock-pin has
 
 - **cargo-vet:** records that a person reviewed each dependency.
 - **cargo-geiger:** counts the `unsafe` code in the dependencies.
@@ -42,7 +42,7 @@ One gap: **clippy and rustfmt didn't run in CI,** so nothing stopped a commit th
 ## The recommended order
 
 - **First, clippy and rustfmt in CI.** Trivial, and it closes a real gap. Done.
-- **Then a handful of restriction lints:** `undocumented_unsafe_blocks`, `indexing_slicing` and `cast_possible_truncation`, at least for properpin-sys and the pinchecker. Expect a short round of fixes or justified exceptions. Done, for all the shipped crates.
+- **Then a handful of restriction lints:** `undocumented_unsafe_blocks`, `indexing_slicing` and `cast_possible_truncation`, at least for screenlock-pin-sys and the PIN checker. Expect a short round of fixes or justified exceptions. Done, for all the shipped crates.
 - **Then cargo-mutants in CI,** as `docs/chaos/plan.md` already plans. Done, weekly and report only.
 - **Then cargo-fuzz targets** for the parsers and `decode_hash`, in CI.
 - **Later, Kani proofs** for `decode_hash`, the hex and XOR functions, and perhaps the budget.

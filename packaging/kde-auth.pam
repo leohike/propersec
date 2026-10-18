@@ -1,4 +1,4 @@
-# properpin's two lines for /etc/pam.d/kde, shown around the stock "auth substack password-auth"
+# screenlock-pin's two lines for /etc/pam.d/kde, shown around the stock "auth substack password-auth"
 # line they go just above and just below; the stock line itself stays as it is. Only
 # packaging/integrate-into-pam.sh add puts them in (just integrate-into-pam), after a diff and a
 # question; install.sh never touches /etc/pam.d.
@@ -8,7 +8,7 @@
 # container test (just podman) puts them into a stock Fedora for real, through the same script.
 #
 #   check         the PIN: a match ends the stack with success, never sooner than the config's
-#                 min_milliseconds_before_pin_unlock after the pinchecker started (kscreenlocker 6.8
+#                 min_milliseconds_before_pin_unlock after the PIN checker started (kscreenlocker 6.8
 #                 takes a faster answer for a broken authenticator); anything else is ignored at
 #                 once, and the stock stack checks the same input as the password, faillock and all
 #   after-password-auth
@@ -17,6 +17,6 @@
 #                 only after the stock password-auth stack succeeded, never after a PIN unlock or a
 #                 failure. That is usually the password, but anything password-auth accepts
 #                 counts, a FIDO key with authselect's with-pam-u2f too. It never reads the password
-auth        sufficient    /usr/local/lib64/security/pam_properpin.so check
+auth        sufficient    /usr/local/lib64/security/pam_screenlock_pin.so check
 auth        substack      password-auth
-auth        optional      /usr/local/lib64/security/pam_properpin.so after-password-auth
+auth        optional      /usr/local/lib64/security/pam_screenlock_pin.so after-password-auth

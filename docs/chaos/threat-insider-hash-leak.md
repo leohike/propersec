@@ -1,14 +1,14 @@
 # Threat: an insider who leaks the PIN hash and comes back in person
 
-A worked threat scenario, written on 2026-10-02, in which properpin gives clearly less security than typing the full passphrase every time.
+A worked threat scenario, written on 2026-10-02, in which screenlock-pin gives clearly less security than typing the full passphrase every time.
 
 **Status, later on 2026-10-02:** the dedicated account and its helper are built (`README-BIG.md`, The helper section); since 2026-10-03 it is a dedicated group with no members instead of an account, which this document's "dedicated account" now means, which closes the copy at an unlocked desk and every other read-only leak that runs as the victim. Mixing the passphrase into the hash is not built; it is in `docs/chaos/plan.md`. The limit on failures this scenario assumes is built since 2026-10-03, as the failure budget: 10 a day, 20 a week, 100 per PIN, across reboots. The rest of this document describes the design as it was before the helper. Every step has a rough estimate, so the weak link is easy to see and the fixes can be judged by what they change.
 
-**Short version.** An insider with physical access copies the PIN hash once, in seconds and without leaving a trace. They crack a two-word PIN offline in a few days for tens of dollars, then unlock the machine in person whenever they like, on the first try. With the passphrase alone, the same insider gets nothing, because the copied hash would be useless. properpin turns a single brief read of one file into lasting, silent access. Against this attacker, the PIN is only as safe as that file is private, and today any program running as the user can read it.
+**Short version.** An insider with physical access copies the PIN hash once, in seconds and without leaving a trace. They crack a two-word PIN offline in a few days for tens of dollars, then unlock the machine in person whenever they like, on the first try. With the passphrase alone, the same insider gets nothing, because the copied hash would be useless. screenlock-pin turns a single brief read of one file into lasting, silent access. Against this attacker, the PIN is only as safe as that file is private, and today any program running as the user can read it.
 
 ## The scenario
 
-**The victim** uses a laptop or desktop that is locked when they step away and rarely switched off: it suspends at night and reboots for updates. They log in with a passphrase that can't be cracked, even from a leaked `/etc/shadow` hash. They unlock with properpin during the day, using a PIN of two random words from the EFF long word list, such as `glider panorama`.
+**The victim** uses a laptop or desktop that is locked when they step away and rarely switched off: it suspends at night and reboots for updates. They log in with a passphrase that can't be cracked, even from a leaked `/etc/shadow` hash. They unlock with screenlock-pin during the day, using a PIN of two random words from the EFF long word list, such as `glider panorama`.
 
 **The attacker** is an insider: a coworker, housemate, partner or ex who can get time alone with the locked machine. They have modest skills and a modest budget. Only an insider makes sense here: a stolen PIN hash is worth something only to someone who can later sit at the machine.
 
@@ -16,13 +16,13 @@ A worked threat scenario, written on 2026-10-02, in which properpin gives clearl
 
 **The leak is read-only, or effectively read-only.** If the attacker could write to the machine, they wouldn't bother with the hash: they would leave something behind that unlocks the session for them. So the leak gives them files and nothing else, or they deliberately take only a file because that leaves no trace.
 
-**properpin's settings** are the defaults, except `max_pin_length`, which has to be raised to about 20 for a two-word PIN (with a space, only about 14% of EFF word pairs fit in the default 12). Add the not-yet-built protection the user proposed: more than about 20 failed PIN attempts in a week disables the PIN. That makes slow, quiet guessing at the lock screen hopeless, so this scenario is about the stolen hash alone.
+**screenlock-pin's settings** are the defaults, except `max_pin_length`, which has to be raised to about 20 for a two-word PIN (with a space, only about 14% of EFF word pairs fit in the default 12). Add the not-yet-built protection the user proposed: more than about 20 failed PIN attempts in a week disables the PIN. That makes slow, quiet guessing at the lock screen hopeless, so this scenario is about the stolen hash alone.
 
 ## How the attack goes, step by step
 
 | Step | What it takes | Estimate | Confidence |
 |---|---|---|---|
-| Copy the hash | One read of `/etc/properpin/users/<victim>`, which is `0640` and readable by every program the victim runs | The weak link; see Getting the hash below | Low: depends on the victim's habits and setup |
+| Copy the hash | One read of `/etc/screenlock-pin/users/<victim>`, which is `0640` and readable by every program the victim runs | The weak link; see Getting the hash below | Low: depends on the victim's habits and setup |
 | Crack it | Every pair of words from the 7,776-word list, in a few spellings | 25 core-days on average at cost 5: about 3 days on an 8-core desktop, or $10 to $30 of rented cloud machines | Medium: the 18 ms per guess was measured on the development machine |
 | Find the PIN still valid | The victim hasn't changed the PIN since the leak | Close to certain: nobody changes a PIN without a reason, and nothing tells them to | High |
 | Find the PIN armed | The machine is on, locked, and was unlocked with the passphrase in the last 8 hours (`expiry_hours`) | Most working days, during working hours | High |
@@ -56,18 +56,18 @@ The cloud prices assume $0.02 to $0.04 per core-hour, a rough figure. yescrypt u
 
 The insider still gets the brief moment at the unlocked desk. But there is no PIN hash to copy, and the one hash that matters, the passphrase's in `/etc/shadow`, can't be read by programs running as the victim. Even a root-made backup that contains it doesn't help, since the passphrase can't be cracked. At the locked machine they can only guess the passphrase, which is hopeless. To come back later, they would have to plant something during that brief moment. That works too, but it leaves a file on the machine that can be found, so it's a different and riskier attack.
 
-The chain breaks at cracking: the probability is about zero, against about the chance of the leak with properpin.
+The chain breaks at cracking: the probability is about zero, against about the chance of the leak with screenlock-pin.
 
 ## Verdict
 
-In this scenario properpin is much weaker than the passphrase. Not because two words are easy to guess at the lock screen (they aren't: a few guesses a week against 60 million possibilities), but because the hash is easy to take and cheap to crack offline, and after that the failure limits protect nothing. The weak link is the first step: the hash is readable by everything the victim runs. The hash cost only changes the price of the second step, and at a cost the victim can live with, that price stays within an insider's budget.
+In this scenario screenlock-pin is much weaker than the passphrase. Not because two words are easy to guess at the lock screen (they aren't: a few guesses a week against 60 million possibilities), but because the hash is easy to take and cheap to crack offline, and after that the failure limits protect nothing. The weak link is the first step: the hash is readable by everything the victim runs. The hash cost only changes the price of the second step, and at a cost the victim can live with, that price stays within an insider's budget.
 
 ## What would change it
 
 | Change | Effect on this scenario | Price |
 |---|---|---|
-| Keep the hash and the counts in a dedicated `properpin` system account, checked by a small helper that answers yes or no, as `unix_chkpwd` does for the password | Closes the unlocked-desk copy and every read-only leak that runs as the victim. The remaining leak is a root-made backup or disk image, which exposes `/etc/shadow` in the same way, so the PIN hash becomes as private as the passphrase hash | Medium: a second, setuid program, a system user, and arming that requires the passphrase so code running as the user can't arm the PIN |
-| Show PIN unlocks to the victim, such as "unlocked with the PIN at 12:41" after the next passphrase unlock or in `properpin status` | Doesn't prevent the attack, but makes it detectable: an unlock at a time the victim was away is a strong signal | Small |
+| Keep the hash and the counts in a dedicated `screenlock-pin` system account, checked by a small helper that answers yes or no, as `unix_chkpwd` does for the password | Closes the unlocked-desk copy and every read-only leak that runs as the victim. The remaining leak is a root-made backup or disk image, which exposes `/etc/shadow` in the same way, so the PIN hash becomes as private as the passphrase hash | Medium: a second, setuid program, a system user, and arming that requires the passphrase so code running as the user can't arm the PIN |
+| Show PIN unlocks to the victim, such as "unlocked with the PIN at 12:41" after the next passphrase unlock or in `screenlock-pin status` | Doesn't prevent the attack, but makes it detectable: an unlock at a time the victim was away is a strong signal | Small |
 | A three-word PIN | Out of an insider's reach at today's cost, and still much shorter to type than the passphrase | None in code; `set` could recommend it, and `max_pin_length` would have to be about 27 |
 | Raise the hash cost | Two words: from days and tens of dollars to weeks and a few hundred at cost 8. Slows the attack down; doesn't stop it | Every PIN check gets slower, and memory use grows with each step (unmeasured so far) |
 | A TPM-held key with the TPM's own guess limit | A copied hash is useless away from the machine, as with Windows Hello PINs | Large |
@@ -97,7 +97,7 @@ An idea from 2026-10-02, recorded here because it closes this scenario together 
 
 **What it costs:**
 
-- **Changing the passphrase breaks the PIN.** It simply stops matching until `properpin set` runs again. That fails safe but needs a clear message. Warning ahead of time would take a stored check value, which is exactly the passphrase test the design avoids.
+- **Changing the passphrase breaks the PIN.** It simply stops matching until `screenlock-pin set` runs again. That fails safe but needs a clear message. Warning ahead of time would take a stored check value, which is exactly the passphrase test the design avoids.
 - **`set` needs the passphrase.** It runs as root, so it can check it against `/etc/shadow` first, so a typo never produces a pepper that matches nothing.
 - **One more slow hash on every passphrase unlock,** to compute the pepper. Passphrase unlocks are the rare ones, so this is fine.
 - **The arm step hands the passphrase to the helper,** over a pipe. `pam_unix` does the same with `unix_chkpwd`.
@@ -105,5 +105,5 @@ An idea from 2026-10-02, recorded here because it closes this scenario together 
 ## Outside this scenario
 
 - **Watching the victim type.** A PIN is typed many times a day and is short enough to catch at a glance or on a hidden camera, while the passphrase, now typed less often, is harder to catch. This needs no hash at all, and no change to how the hash is stored helps against it.
-- **Planting instead of copying.** An insider with a moment at the unlocked desk can also leave behind a program that unlocks the session on a trigger. That works with or without properpin. It leaves a trace, which is why this scenario assumes the careful insider doesn't do it.
+- **Planting instead of copying.** An insider with a moment at the unlocked desk can also leave behind a program that unlocks the session on a trigger. That works with or without screenlock-pin. It leaves a trace, which is why this scenario assumes the careful insider doesn't do it.
 - **Attacks on a running machine.** Cold-boot and DMA attacks skip the lock screen whatever unlocks it. Only shutting down closes them.

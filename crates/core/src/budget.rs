@@ -1,4 +1,4 @@
-//! One user's failures, the only state properpin keeps: the consecutive count that pauses the PIN,
+//! One user's failures, the only state screenlock-pin keeps: the consecutive count that pauses the PIN,
 //! and the limits that disable it. Kept on disk, so rebooting changes nothing.
 //!
 //! Every input typed at the lock screen while the PIN is enabled that doesn't unlock is a failure,
@@ -7,7 +7,7 @@
 //! `forgive_before_correct_pin` seconds, or the correct password within
 //! `forgive_before_correct_password`: that was the user, mistyping. A failure nothing forgave in
 //! time is *suspicious*. Too many suspicious failures within 24 hours, within 7 days, or since the
-//! PIN was set, and the PIN is disabled until root turns it back on (`properpin enable`) or sets a
+//! PIN was set, and the PIN is disabled until root turns it back on (`screenlock-pin enable`) or sets a
 //! new one.
 //!
 //! This bounds the slow attack the consecutive count can't: two wrong guesses, then waiting for
@@ -71,7 +71,7 @@ pub struct Budget {
     pub disabled: Option<Disabled>,
     /// When the PIN was set.
     pub set: u64,
-    /// When the PIN last became enabled or paused, for `properpin status`. Disabled has its own
+    /// When the PIN last became enabled or paused, for `screenlock-pin status`. Disabled has its own
     /// time, in [`Disabled::at`].
     pub since: u64,
 }
@@ -111,7 +111,7 @@ impl Judged {
             ));
         }
         if let (true, Some(limit)) = (self.disabled_now, self.disabled) {
-            notes.push(format!("PIN disabled after {limit}; sudo properpin enable or set turns it back on"));
+            notes.push(format!("PIN disabled after {limit}; sudo screenlock-pin enable or set turns it back on"));
         }
         notes
     }
@@ -177,7 +177,7 @@ impl Budget {
         Self { set: now, since: now, ..Self::default() }
     }
 
-    /// What `properpin enable` leaves behind at `now`: not disabled or paused, nothing pending or
+    /// What `screenlock-pin enable` leaves behind at `now`: not disabled or paused, nothing pending or
     /// suspicious, and the total kept, so the lifetime limit still holds for this PIN.
     pub fn enabled(&self, now: u64) -> Self {
         Self { total: self.total, set: self.set, since: now, ..Self::default() }

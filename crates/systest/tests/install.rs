@@ -59,7 +59,7 @@ impl FakeRoot {
             .arg(command)
             .arg("--root")
             .arg(self.dir.path())
-            .args(["--owner", &whoami(), "--pinchecker-group", &group()])
+            .args(["--owner", &whoami(), "--pin-checker-group", &group()])
             .arg("--from")
             .arg(built())
             .output()
@@ -110,7 +110,7 @@ impl FakeRoot {
     }
 
     fn copy(&self) -> PathBuf {
-        self.path("etc/properpin/kde.pam.without-properpin")
+        self.path("etc/screenlock-pin/kde.pam.without-screenlock-pin")
     }
 }
 
@@ -132,53 +132,43 @@ fn built() -> &'static Path {
     BUILT.get_or_init(|| {
         let manifest = concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml");
         let status = Command::new(env!("CARGO"))
-            .args(["build", "--quiet", "--package", "pam_properpin", "--package", "properpin-pinchecker", "--package", "properpin-cli"])
+            .args([
+                "build",
+                "--quiet",
+                "--package",
+                "pam_screenlock_pin",
+                "--package",
+                "screenlock-pin-checker",
+                "--package",
+                "screenlock-pin-cli",
+            ])
             .args(["--manifest-path", manifest])
             .status()
             .unwrap();
-        assert!(status.success(), "building the module, the pinchecker and the command failed");
+        assert!(status.success(), "building the module, the PIN checker and the command failed");
         std::env::current_exe().unwrap().parent().and_then(Path::parent).unwrap().to_path_buf()
     })
 }
 
-/// properpin's two lines, as `packaging/kde-auth.pam` ships them, and the stock line they go around.
-const CHECK_LINE: &str = "auth        sufficient    /usr/local/lib64/security/pam_properpin.so check\n";
+/// screenlock-pin's two lines, as `packaging/kde-auth.pam` ships them, and the stock line they go around.
+const CHECK_LINE: &str = "auth        sufficient    /usr/local/lib64/security/pam_screenlock_pin.so check\n";
 const STOCK_LINE: &str = "auth        substack      password-auth\n";
-const AFTER_PASSWORD_AUTH_LINE: &str = "auth        optional      /usr/local/lib64/security/pam_properpin.so after-password-auth\n";
+const AFTER_PASSWORD_AUTH_LINE: &str = "auth        optional      /usr/local/lib64/security/pam_screenlock_pin.so after-password-auth\n";
 
-/// `kde` with properpin's lines put in around its stock substack line.
+/// `kde` with screenlock-pin's lines put in around its stock substack line.
 fn integrated(kde: &str) -> String {
     kde.replacen(STOCK_LINE, &format!("{CHECK_LINE}{STOCK_LINE}{AFTER_PASSWORD_AUTH_LINE}"), 1)
 }
 
-/// properpin's lines as versions before 2026-10-18 wrote them, the latest first: between markers, with
-/// a pam_unix line of their own, and arguments the module now rejects.
-const OLD_BLOCKS: [&str; 2] = [
-    "\
-# properpin begin: added by install.sh install; install.sh uninstall removes everything down to the end marker
-auth  [success=done default=ignore]  /usr/local/lib64/security/pam_properpin.so check pinchecker=/usr/local/libexec/properpin/properpin-pinchecker config=/etc/properpin/config
-auth  [success=ok default=die]       pam_unix.so use_first_pass
-auth  optional                       /usr/local/lib64/security/pam_properpin.so housekeeping pinchecker=/usr/local/libexec/properpin/properpin-pinchecker
-# properpin end
-",
-    "\
-# properpin begin: added by install.sh enable; install.sh disable removes everything down to the end marker
-auth  [success=done default=ignore]  /usr/local/lib64/security/pam_properpin.so check helper=/usr/local/libexec/properpin/properpin-helper config=/etc/properpin/config
-auth  [success=ok default=die]       pam_unix.so use_first_pass
-auth  optional                       /usr/local/lib64/security/pam_properpin.so start-accepting-pin helper=/usr/local/libexec/properpin/properpin-helper
-# properpin end
-",
-];
-
-/// install never touches the PAM file, and says what to run to put properpin's lines in.
+/// install never touches the PAM file, and says what to run to put screenlock-pin's lines in.
 #[test]
 fn install_leaves_pam_alone_and_says_what_to_run() {
     let root = FakeRoot::new();
     let said = root.ok("install");
     assert_eq!(root.kde_text(), STOCK_KDE);
-    assert!(said.contains("has no properpin lines") && said.contains("just integrate-into-pam"), "{said}");
+    assert!(said.contains("has no screenlock-pin lines") && said.contains("just integrate-into-pam"), "{said}");
     let checked = root.ok("check");
-    assert!(checked.contains("all properpin files in place") && checked.contains("has no properpin lines"), "{checked}");
+    assert!(checked.contains("all screenlock-pin files in place") && checked.contains("has no screenlock-pin lines"), "{checked}");
     assert_eq!(root.pam("check").0, Some(3));
     assert!(!root.copy().exists(), "nothing saved, since nothing changed");
 }
@@ -187,20 +177,20 @@ fn install_leaves_pam_alone_and_says_what_to_run() {
 fn add_remove_and_uninstall_leave_pam_as_it_was() {
     let root = FakeRoot::new();
     root.ok("install");
-    assert!(root.pam_ok("add").contains("has properpin's lines"));
+    assert!(root.pam_ok("add").contains("has screenlock-pin's lines"));
     assert_eq!(root.kde_text(), integrated(STOCK_KDE));
-    assert_eq!(fs::read_to_string(root.copy()).unwrap(), STOCK_KDE, "the copy is the file without properpin's lines");
+    assert_eq!(fs::read_to_string(root.copy()).unwrap(), STOCK_KDE, "the copy is the file without screenlock-pin's lines");
     assert!(root.pam_ok("check").contains("has the lines this version ships"));
     assert!(root.ok("check").contains("has the lines this version ships"));
 
     // The fake root had only etc/pam.d: every directory install had to create goes again, except
     // those holding what is kept. Each is there now, or its absence afterwards would prove nothing.
     let installed = [
-        "usr/local/lib64/security/pam_properpin.so",
-        "usr/local/libexec/properpin",
-        "usr/local/bin/properpin",
-        "etc/sysusers.d/properpin.conf",
-        "etc/tmpfiles.d/properpin.conf",
+        "usr/local/lib64/security/pam_screenlock_pin.so",
+        "usr/local/libexec/screenlock-pin",
+        "usr/local/bin/screenlock-pin",
+        "etc/sysusers.d/screenlock-pin.conf",
+        "etc/tmpfiles.d/screenlock-pin.conf",
         "usr",
         "etc/sysusers.d",
         "etc/tmpfiles.d",
@@ -211,11 +201,11 @@ fn add_remove_and_uninstall_leave_pam_as_it_was() {
     // Lines naming a deleted module would lock the lock screen, so uninstall waits for remove.
     let said = root.refused("uninstall");
     assert!(
-        said.contains("still has properpin's lines") && said.contains("just remove-from-pam") && said.contains("nothing was removed"),
+        said.contains("still has screenlock-pin's lines") && said.contains("just remove-from-pam") && said.contains("nothing was removed"),
         "{said}"
     );
     assert!(installed.iter().all(|path| root.path(path).exists()), "uninstall refused, but removed something");
-    assert!(root.pam_ok("remove").contains("took properpin's lines out"));
+    assert!(root.pam_ok("remove").contains("took screenlock-pin's lines out"));
     assert_eq!(root.kde_text(), STOCK_KDE);
     assert_eq!(root.pam("check").0, Some(3));
     root.ok("uninstall");
@@ -223,9 +213,9 @@ fn add_remove_and_uninstall_leave_pam_as_it_was() {
     for gone in installed {
         assert!(!root.path(gone).exists(), "{gone} is still there");
     }
-    assert!(root.path("etc/properpin/users").is_dir(), "PINs are kept");
+    assert!(root.path("etc/screenlock-pin/users").is_dir(), "PINs are kept");
     assert!(root.copy().exists(), "the copy is kept, for whoever wants it");
-    assert!(root.path("var/lib/properpin").is_dir(), "budgets are kept");
+    assert!(root.path("var/lib/screenlock-pin").is_dir(), "budgets are kept");
     assert!(root.pam_ok("remove").contains("nothing to do"));
 }
 
@@ -240,45 +230,10 @@ fn adding_twice_is_harmless() {
     assert_eq!(root.kde_text(), integrated(STOCK_KDE), "installing again leaves them as they are");
 }
 
-/// The two lines as shipped until the `after-password-auth` line's argument was renamed on 2026-10-18, from
-/// `housekeeping`: check and install say they aren't this version's, and add replaces them.
 #[test]
-fn add_replaces_the_lines_with_the_old_argument_name() {
+fn add_refuses_until_screenlock_pin_is_installed() {
     let root = FakeRoot::new();
-    let old = integrated(STOCK_KDE).replace("pam_properpin.so after-password-auth\n", "pam_properpin.so housekeeping\n");
-    assert_ne!(old, integrated(STOCK_KDE));
-    fs::write(root.kde(), &old).unwrap();
-    let said = root.ok("install");
-    assert!(said.contains("not exactly the ones this version ships"), "{said}");
-    assert_eq!(root.pam("check").0, Some(1));
-    root.pam_ok("add");
-    assert_eq!(root.kde_text(), integrated(STOCK_KDE));
-    assert_eq!(fs::read_to_string(root.copy()).unwrap(), STOCK_KDE);
-}
-
-/// An older version's lines stay where they are through install, which says so, and add replaces
-/// them, markers and pam_unix line included.
-#[test]
-fn add_replaces_an_older_versions_lines() {
-    for old in OLD_BLOCKS {
-        let root = FakeRoot::new();
-        fs::write(root.kde(), format!("{old}{STOCK_KDE}")).unwrap();
-        let said = root.ok("install");
-        assert!(said.contains("not exactly the ones this version ships") && said.contains("just integrate-into-pam"), "{said}");
-        assert_eq!(root.kde_text(), format!("{old}{STOCK_KDE}"), "install left them alone");
-        assert!(root.refused("check").contains("not exactly the ones this version ships"));
-        assert_eq!(root.pam("check").0, Some(1));
-        root.pam_ok("add");
-        assert_eq!(root.kde_text(), integrated(STOCK_KDE));
-        assert_eq!(fs::read_to_string(root.copy()).unwrap(), STOCK_KDE);
-        root.ok("check");
-    }
-}
-
-#[test]
-fn add_refuses_until_properpin_is_installed() {
-    let root = FakeRoot::new();
-    assert!(root.pam_refused("add").contains("properpin isn't installed"));
+    assert!(root.pam_refused("add").contains("screenlock-pin isn't installed"));
     assert!(!root.copy().exists());
 }
 
@@ -309,14 +264,14 @@ fn add_refuses_an_unexpected_pam_file_and_changes_nothing() {
     assert!(root.kde().is_symlink(), "the link stays a link");
 }
 
-/// Whatever properpin's lines look like after hand edits, remove takes out exactly them.
+/// Whatever screenlock-pin's lines look like after hand edits, remove takes out exactly them.
 #[test]
-fn remove_takes_out_every_properpin_line_and_nothing_else() {
+fn remove_takes_out_every_screenlock_pin_line_and_nothing_else() {
     let root = FakeRoot::new();
     root.ok("install");
     let own = "auth        sufficient    pam_unix.so try_first_pass\n# an admin's note\n";
     let messy = format!(
-        "{AFTER_PASSWORD_AUTH_LINE}{CHECK_LINE}{own}{}{CHECK_LINE}auth   [success=ok default=die]   pam_unix.so use_first_pass\n# properpin end\n",
+        "{AFTER_PASSWORD_AUTH_LINE}{CHECK_LINE}{own}{}auth   sufficient   /usr/local/lib64/security/pam_screenlock_pin.so  check   log=/tmp/log\n",
         integrated(STOCK_KDE)
     );
     fs::write(root.kde(), &messy).unwrap();
@@ -334,13 +289,13 @@ fn add_keeps_changes_made_elsewhere() {
     fs::write(root.kde(), &edited).unwrap();
     assert!(root.pam_ok("add").contains("already has the lines this version ships"));
     assert_eq!(root.kde_text(), edited);
-    fs::write(root.kde(), format!("{}{STOCK_KDE}# added by an admin\n", OLD_BLOCKS[0])).unwrap();
+    fs::write(root.kde(), format!("{CHECK_LINE}{STOCK_KDE}# added by an admin\n")).unwrap();
     root.pam_ok("add");
     assert_eq!(root.kde_text(), integrated(&format!("{STOCK_KDE}# added by an admin\n")));
     assert_eq!(
         fs::read_to_string(root.copy()).unwrap(),
         format!("{STOCK_KDE}# added by an admin\n"),
-        "the copy is of the file as it is now, without properpin's lines"
+        "the copy is of the file as it is now, without screenlock-pin's lines"
     );
 }
 
@@ -350,60 +305,61 @@ fn install_puts_everything_in_place_and_twice_is_harmless() {
     root.ok("install");
     root.ok("install");
     let check = root.ok("check");
-    assert!(check.contains("all properpin files in place"), "{check}");
-    let command = fs::read_to_string(root.path("usr/local/bin/properpin")).unwrap();
+    assert!(check.contains("all screenlock-pin files in place"), "{check}");
+    let command = fs::read_to_string(root.path("usr/local/bin/screenlock-pin")).unwrap();
     assert!(
         command.contains(
-            "exec /usr/local/libexec/properpin/properpin --etc /etc/properpin --budget /var/lib/properpin --pinchecker /usr/local/libexec/properpin/properpin-pinchecker \"$@\""
+            "exec /usr/local/libexec/screenlock-pin/screenlock-pin --etc /etc/screenlock-pin --budget /var/lib/screenlock-pin --pin-checker /usr/local/libexec/screenlock-pin/screenlock-pin-checker \"$@\""
         ),
         "{command}"
     );
     let mode = |path: &str| fs::metadata(root.path(path)).unwrap().permissions().mode() & 0o7777;
-    assert_eq!(mode("usr/local/libexec/properpin/properpin-pinchecker"), 0o2755, "the pinchecker is setgid only");
-    assert_eq!(mode("etc/properpin/users"), 0o750);
+    assert_eq!(mode("usr/local/libexec/screenlock-pin/screenlock-pin-checker"), 0o2755, "the PIN checker is setgid only");
+    assert_eq!(mode("etc/screenlock-pin/users"), 0o750);
     assert!(!root.path("run").exists(), "nothing in /run any more");
-    assert_eq!(mode("var/lib/properpin"), 0o1770);
-    let sysusers = fs::read_to_string(root.path("etc/sysusers.d/properpin.conf")).unwrap();
+    assert_eq!(mode("var/lib/screenlock-pin"), 0o1770);
+    let sysusers = fs::read_to_string(root.path("etc/sysusers.d/screenlock-pin.conf")).unwrap();
     assert!(sysusers.lines().any(|line| line == format!("g {} -", group())), "{sysusers}");
     assert!(!sysusers.lines().any(|line| line.starts_with("u ")), "no account: {sysusers}");
-    let tmpfiles = fs::read_to_string(root.path("etc/tmpfiles.d/properpin.conf")).unwrap();
-    assert!(tmpfiles.contains(&format!("d /var/lib/properpin 1770 {} {} -", whoami(), group())), "{tmpfiles}");
+    let tmpfiles = fs::read_to_string(root.path("etc/tmpfiles.d/screenlock-pin.conf")).unwrap();
+    assert!(tmpfiles.contains(&format!("d /var/lib/screenlock-pin 1770 {} {} -", whoami(), group())), "{tmpfiles}");
     assert!(!tmpfiles.contains("/run"), "{tmpfiles}");
     assert_eq!(
-        fs::read(root.path("usr/local/lib64/security/pam_properpin.so")).unwrap(),
-        fs::read(built().join("libpam_properpin.so")).unwrap()
+        fs::read(root.path("usr/local/lib64/security/pam_screenlock_pin.so")).unwrap(),
+        fs::read(built().join("libpam_screenlock_pin.so")).unwrap()
     );
-    // What a version before the pinchecker's rename left: a setgid helper nothing uses any more.
-    fs::write(root.path("usr/local/libexec/properpin/properpin-helper"), "old").unwrap();
-    assert!(root.refused("check").contains("properpin-helper: not installed by this version"));
+    // What an earlier version could leave: a program nothing uses any more.
+    fs::write(root.path("usr/local/libexec/screenlock-pin/screenlock-pin-old"), "old").unwrap();
+    assert!(root.refused("check").contains("screenlock-pin-old: not installed by this version"));
     root.ok("install");
-    assert!(!root.path("usr/local/libexec/properpin/properpin-helper").exists());
-    assert!(root.path("usr/local/libexec/properpin/properpin-pinchecker").exists());
+    assert!(!root.path("usr/local/libexec/screenlock-pin/screenlock-pin-old").exists());
+    assert!(root.path("usr/local/libexec/screenlock-pin/screenlock-pin-checker").exists());
 }
 
 #[test]
 fn check_finds_what_is_wrong() {
     let root = FakeRoot::new();
     root.ok("install");
-    fs::set_permissions(root.path("usr/local/lib64/security/pam_properpin.so"), Permissions::from_mode(0o777)).unwrap();
-    fs::write(root.path("usr/local/libexec/properpin/properpin"), "not the build").unwrap();
-    fs::remove_dir(root.path("etc/properpin/users")).unwrap();
+    fs::set_permissions(root.path("usr/local/lib64/security/pam_screenlock_pin.so"), Permissions::from_mode(0o777)).unwrap();
+    fs::write(root.path("usr/local/libexec/screenlock-pin/screenlock-pin"), "not the build").unwrap();
+    fs::remove_dir(root.path("etc/screenlock-pin/users")).unwrap();
     let problems = root.refused("check");
-    assert!(problems.contains("pam_properpin.so: is 777"), "{problems}");
-    assert!(problems.contains("libexec/properpin/properpin: differs from"), "{problems}");
-    assert!(problems.contains("/etc/properpin/users: missing"), "{problems}");
+    assert!(problems.contains("pam_screenlock_pin.so: is 777"), "{problems}");
+    assert!(problems.contains("libexec/screenlock-pin/screenlock-pin: differs from"), "{problems}");
+    assert!(problems.contains("/etc/screenlock-pin/users: missing"), "{problems}");
 
-    for (pinchecker, budget_dir) in [(0o755, 0o755), (0o4755, 0o700), (0o6755, 0o1777)] {
+    for (pin_checker, budget_dir) in [(0o755, 0o755), (0o4755, 0o700), (0o6755, 0o1777)] {
         root.ok("install");
-        fs::set_permissions(root.path("usr/local/libexec/properpin/properpin-pinchecker"), Permissions::from_mode(pinchecker)).unwrap();
-        fs::set_permissions(root.path("var/lib/properpin"), Permissions::from_mode(budget_dir)).unwrap();
-        fs::write(root.path("etc/tmpfiles.d/properpin.conf"), "d /var/lib/properpin 0777 root root -\n").unwrap();
-        fs::write(root.path("etc/sysusers.d/properpin.conf"), "u properpin - \"an account\" - -\n").unwrap();
+        fs::set_permissions(root.path("usr/local/libexec/screenlock-pin/screenlock-pin-checker"), Permissions::from_mode(pin_checker))
+            .unwrap();
+        fs::set_permissions(root.path("var/lib/screenlock-pin"), Permissions::from_mode(budget_dir)).unwrap();
+        fs::write(root.path("etc/tmpfiles.d/screenlock-pin.conf"), "d /var/lib/screenlock-pin 0777 root root -\n").unwrap();
+        fs::write(root.path("etc/sysusers.d/screenlock-pin.conf"), "u screenlock-pin - \"an account\" - -\n").unwrap();
         let problems = root.refused("check");
-        assert!(problems.contains(&format!("properpin-pinchecker: is {pinchecker:o}")), "{problems}");
-        assert!(problems.contains(&format!("/var/lib/properpin: is {budget_dir:o}")), "{problems}");
-        assert!(problems.contains("tmpfiles.d/properpin.conf: not what install.sh writes"), "{problems}");
-        assert!(problems.contains("sysusers.d/properpin.conf: not what install.sh writes"), "{problems}");
+        assert!(problems.contains(&format!("screenlock-pin-checker: is {pin_checker:o}")), "{problems}");
+        assert!(problems.contains(&format!("/var/lib/screenlock-pin: is {budget_dir:o}")), "{problems}");
+        assert!(problems.contains("tmpfiles.d/screenlock-pin.conf: not what install.sh writes"), "{problems}");
+        assert!(problems.contains("sysusers.d/screenlock-pin.conf: not what install.sh writes"), "{problems}");
     }
 }
 
@@ -413,12 +369,12 @@ fn check_finds_what_is_wrong() {
 fn install_leaves_the_pins_and_the_config_to_doctor() {
     let root = FakeRoot::new();
     root.ok("install");
-    let user_file = root.path("etc/properpin/users").join(whoami());
+    let user_file = root.path("etc/screenlock-pin/users").join(whoami());
     fs::write(&user_file, "hash = $y$x\n").unwrap();
     fs::set_permissions(&user_file, Permissions::from_mode(0o644)).unwrap();
     let said = root.ok("install");
     assert!(said.contains(&format!("users/{}: readable by others", whoami())), "{said}");
-    assert!(said.contains(&format!("fix: sudo properpin remove --user {}, then a new PIN", whoami())), "{said}");
+    assert!(said.contains(&format!("fix: sudo screenlock-pin remove --user {}, then a new PIN", whoami())), "{said}");
     assert!(said.contains(&format!("1 problem; a PIN is set for {}", whoami())), "{said}");
     root.ok("check");
 
@@ -426,14 +382,12 @@ fn install_leaves_the_pins_and_the_config_to_doctor() {
     // settings that are gone. Both stay where they are, named by doctor.
     fs::write(&user_file, "hash = $y$x\nencrypted_pepper = 00\n").unwrap();
     fs::set_permissions(&user_file, Permissions::from_mode(0o640)).unwrap();
-    fs::write(root.path("etc/properpin/config"), "expiry_hours = 4\n").unwrap();
-    fs::set_permissions(root.path("etc/properpin/config"), Permissions::from_mode(0o644)).unwrap();
-    fs::create_dir_all(root.path("run/properpin")).unwrap();
+    fs::write(root.path("etc/screenlock-pin/config"), "expiry_hours = 4\n").unwrap();
+    fs::set_permissions(root.path("etc/screenlock-pin/config"), Permissions::from_mode(0o644)).unwrap();
     let said = root.ok("install");
     assert!(said.contains("unknown setting \"encrypted_pepper\"") && said.contains("unknown setting \"expiry_hours\""), "{said}");
     assert!(said.contains("restore-defaults"), "{said}");
-    assert!(user_file.exists() && root.path("etc/properpin/config").exists());
-    assert!(!root.path("run/properpin").exists(), "/run/properpin was install's own, so it goes");
+    assert!(user_file.exists() && root.path("etc/screenlock-pin/config").exists());
     assert_eq!(root.kde_text(), STOCK_KDE);
 }
 
@@ -445,11 +399,11 @@ fn check_wants_the_group() {
         .arg(INSTALL_SH)
         .args(["check", "--root"])
         .arg(root.dir.path())
-        .args(["--owner", &whoami(), "--pinchecker-group", "no-such-group-properpin"])
+        .args(["--owner", &whoami(), "--pin-checker-group", "no-such-group-screenlock-pin"])
         .output()
         .unwrap();
     assert!(!output.status.success());
-    assert!(says(&output).contains("no group named no-such-group-properpin"), "{}", says(&output));
+    assert!(says(&output).contains("no group named no-such-group-screenlock-pin"), "{}", says(&output));
 }
 
 /// An install that fails halfway leaves the PAM file as it was, lines and all, and the next good
@@ -460,7 +414,7 @@ fn a_failed_install_leaves_pam_alone() {
     root.ok("install");
     root.pam_ok("add");
     // Where install's directory must go, so install fails halfway.
-    let users = root.path("etc/properpin/users");
+    let users = root.path("etc/screenlock-pin/users");
     fs::remove_dir(&users).unwrap();
     fs::write(&users, "").unwrap();
     root.refused("install");
@@ -485,15 +439,15 @@ fn bad_arguments_change_nothing() {
     assert_eq!(root.kde_text(), STOCK_KDE);
 }
 
-/// Whatever else ended up in properpin's own directory, and whatever is already missing.
+/// Whatever else ended up in screenlock-pin's own directory, and whatever is already missing.
 #[test]
 fn uninstall_copes_with_extra_and_missing_files() {
     let root = FakeRoot::new();
     root.ok("install");
-    fs::write(root.path("usr/local/libexec/properpin/left-behind"), "junk").unwrap();
-    fs::remove_file(root.path("usr/local/bin/properpin")).unwrap();
-    fs::remove_file(root.path("usr/local/lib64/security/pam_properpin.so")).unwrap();
+    fs::write(root.path("usr/local/libexec/screenlock-pin/left-behind"), "junk").unwrap();
+    fs::remove_file(root.path("usr/local/bin/screenlock-pin")).unwrap();
+    fs::remove_file(root.path("usr/local/lib64/security/pam_screenlock_pin.so")).unwrap();
     root.ok("uninstall");
-    assert!(!root.path("usr/local/libexec/properpin").exists());
+    assert!(!root.path("usr/local/libexec/screenlock-pin").exists());
     root.ok("uninstall");
 }

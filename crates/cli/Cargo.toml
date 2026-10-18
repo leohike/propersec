@@ -1,6 +1,6 @@
 [package]
-name = "properpin-cli"
-description = "The properpin command: set, remove and check a lock-screen PIN."
+name = "screenlock-pin-cli"
+description = "The screenlock-pin command: set, remove and check a lock-screen PIN."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,14 +8,14 @@ publish.workspace = true
 license.workspace = true
 
 [[bin]]
-name = "properpin"
+name = "screenlock-pin"
 path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
-properpin-core.workspace = true
-properpin-sys.workspace = true
+screenlock-pin-core.workspace = true
+screenlock-pin-sys.workspace = true
 rpassword.workspace = true
 
 [dev-dependencies]

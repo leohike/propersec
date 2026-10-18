@@ -1,11 +1,11 @@
-//! properpin on a real machine. This crate implements `properpin-core`'s traits:
+//! screenlock-pin on a real machine. This crate implements `screenlock-pin-core`'s traits:
 //!
 //! - [`UserFiles`]: one user's settings, hash, budget and lock file, and the rules for trusting them;
-//! - [`AllUsers`]: every user's files at once, for `properpin doctor`, `remove --all` and `restore-defaults`;
+//! - [`AllUsers`]: every user's files at once, for `screenlock-pin doctor`, `remove --all` and `restore-defaults`;
 //! - [`Account`], [`group_by_name`] and [`shadow_hash`]: the passwd, group and shadow databases;
 //! - [`Yescrypt`]: hashing through the system's libxcrypt, the library `/etc/shadow` uses;
 //! - [`SystemClock`]: the wall clock, and [`local_time`] to show its times;
-//! - [`FileLog`]: log lines to a file, for tests and the pinchecker's `--dev-log`.
+//! - [`FileLog`]: log lines to a file, for tests and the PIN checker's `--dev-log`.
 //!
 //! Nothing here names `/etc` or `/var`: every location comes in through [`UserFiles::new`] and
 //! [`UserFiles::with_budget`].
@@ -26,7 +26,7 @@ pub use crypt::Yescrypt;
 pub use files::{AllUsers, UserFiles};
 pub use log::FileLog;
 
-use properpin_core::Error;
+use screenlock_pin_core::Error;
 
 /// An error from the machine, with what it was about.
 fn system(context: impl std::fmt::Display, error: impl std::fmt::Display) -> Error {

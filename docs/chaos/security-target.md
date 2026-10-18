@@ -1,13 +1,13 @@
-# properpin's security
+# screenlock-pin's security
 
-A short assessment of properpin as built, first written on 2026-10-03 and rewritten on 2026-10-16, when the pepper, the PIN's expiry and the password after every boot were dropped. The question it answers: how much weaker is unlocking with a PIN than typing the full password every time?
+A short assessment of screenlock-pin as built, first written on 2026-10-03 and rewritten on 2026-10-16, when the pepper, the PIN's expiry and the password after every boot were dropped. The question it answers: how much weaker is unlocking with a PIN than typing the full password every time?
 
-## What properpin is
+## What screenlock-pin is
 
-- **The setgid pinchecker** (`docs/chaos/spec-setgid-helper.md`): hashes `root:properpin 0640`, counts in `/var/lib/properpin`, a root-owned pinchecker setgid to a group with no members, in the style of `unix_chkpwd`. Nothing the user runs can read a hash or reset a count, except through the pinchecker's `unpause`, which since 2026-10-18 takes no password (docs/current-setcred.md): asking for it unpauses the PIN and forgives the failures of the last 90 seconds, which the reasoning in this file already concedes to code running as the user.
+- **The setgid PIN checker** (`docs/chaos/spec-setgid-helper.md`): hashes `root:screenlock-pin 0640`, counts in `/var/lib/screenlock-pin`, a root-owned PIN checker setgid to a group with no members, in the style of `unix_chkpwd`. Nothing the user runs can read a hash or reset a count, except through the PIN checker's `unpause`, which since 2026-10-18 takes no password (docs/current-setcred.md): asking for it unpauses the PIN and forgives the failures of the last 90 seconds, which the reasoning in this file already concedes to code running as the user.
 - **Three consecutive failures pause the PIN** until the next password unlock at the lock screen. The count is on disk, so a reboot doesn't reset it.
 - **The failure budget**: every failure nobody forgave counts across reboots, and 10 a day, 25 a week or 60 per PIN disable it until root turns it back on, after a warning, or sets a new one.
-- **PIN equal to the password refused** at `properpin set`, compared with the hash in `/etc/shadow`.
+- **PIN equal to the password refused** at `screenlock-pin set`, compared with the hash in `/etc/shadow`.
 - **Assumed about the system**: full-disk encryption (LUKS). The development machine has it.
 
 ## Against each attacker
@@ -27,10 +27,10 @@ Until 2026-10-16 the PIN was hashed with a pepper: a random secret kept in clear
 
 - To use the PIN at the lock screen, they also need to be at the keyboard later, with the screen locked: two separate attacks for a prize smaller than the disk they already read.
 - Anyone who can run code as root, from a USB stick or an exploit, installs a PAM module or a service of their own instead of cracking a PIN.
-- Code running as the user is already inside the session, and the pinchecker keeps the hash from it.
+- Code running as the user is already inside the session, and the PIN checker keeps the hash from it.
 - What is left is reuse: a cracked PIN that is also the phone's or the bank card's. The answer to that is not to reuse it.
 
-Against that, the pepper cost the password after every boot, since the pepper lived only in RAM; a PIN broken silently by every password change; a password-derived key and its cost setting; a warning when `/run` wasn't a memory filesystem; and three documents of design and open issues, which git history keeps. The setgid pinchecker, which is cheap, standard and protects the same hash from everything the user runs, stays. Excluding `/var/lib/properpin` and `/etc/properpin` from backups costs nothing, and does what the pepper did for backups.
+Against that, the pepper cost the password after every boot, since the pepper lived only in RAM; a PIN broken silently by every password change; a password-derived key and its cost setting; a warning when `/run` wasn't a memory filesystem; and three documents of design and open issues, which git history keeps. The setgid PIN checker, which is cheap, standard and protects the same hash from everything the user runs, stays. Excluding `/var/lib/screenlock-pin` and `/etc/screenlock-pin` from backups costs nothing, and does what the pepper did for backups.
 
 ## Why there is no expiry
 
@@ -38,12 +38,12 @@ The PIN used to work only for 8 hours after a password unlock. The consecutive c
 
 ## Conclusion
 
-Against anyone who already runs code on the machine, properpin is as strong as the password: the hash is out of reach of everything but root, and root wins either way. Against anyone who can read RAM it changes nothing, because such an attacker takes the disk key instead. Against someone holding a copy of the files, the PIN falls, and gives them almost nothing they didn't already have.
+Against anyone who already runs code on the machine, screenlock-pin is as strong as the password: the hash is out of reach of everything but root, and root wins either way. Against anyone who can read RAM it changes nothing, because such an attacker takes the disk key instead. Against someone holding a copy of the files, the PIN falls, and gives them almost nothing they didn't already have.
 
-What remains is the trade properpin was built to make: someone at the locked keyboard gets a few guesses at a shorter secret, and a short secret typed often is easier to watch. A longer PIN (two or three random words) shrinks the first to nearly nothing; nothing in software helps against the second.
+What remains is the trade screenlock-pin was built to make: someone at the locked keyboard gets a few guesses at a shorter secret, and a short secret typed often is easier to watch. A longer PIN (two or three random words) shrinks the first to nearly nothing; nothing in software helps against the second.
 
 ## What would weaken it
 
 - **A weak PIN**: digits fall to a few lucky guesses far sooner than words; the budget bounds it, it doesn't remove it.
-- **A bug in the pinchecker**: it reads every hash while it runs. That is why it is small, runs with a group that owns nothing else, and has its own review checklist (`docs/chaos/pinchecker-review.md`).
+- **A bug in the PIN checker**: it reads every hash while it runs. That is why it is small, runs with a group that owns nothing else, and has its own review checklist (`docs/chaos/pin-checker-review.md`).
 - **Reusing the PIN elsewhere**: a PIN watched at the lock screen, or cracked from a copy of the disk, then works on the phone or card that shares it.

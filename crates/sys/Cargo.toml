@@ -1,6 +1,6 @@
 [package]
-name = "properpin-sys"
-description = "properpin on a real machine: files, libxcrypt, the boot clock, accounts."
+name = "screenlock-pin-sys"
+description = "screenlock-pin on a real machine: files, libxcrypt, the boot clock, accounts."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,7 +8,7 @@ publish.workspace = true
 license.workspace = true
 
 [dependencies]
-properpin-core.workspace = true
+screenlock-pin-core.workspace = true
 nix.workspace = true
 subtle.workspace = true
 tempfile.workspace = true

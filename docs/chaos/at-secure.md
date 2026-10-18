@@ -1,10 +1,10 @@
 # The --dev options and AT_SECURE
 
-A short explainer, written on 2026-10-03, of what guards properpin-helper's `--dev-*` options and why that guard matters. The code is in `crates/helper`: `main.rs` (`Options`, `run`) and `secure.rs` (`elevated`).
+A short explainer, written on 2026-10-03, of what guards screenlock-pin-helper's `--dev-*` options and why that guard matters. The code is in `crates/helper`: `main.rs` (`Options`, `run`) and `secure.rs` (`elevated`).
 
 ## The --dev options
 
-The helper normally uses fixed places: hashes in `/etc/properpin`, counts in `/run/properpin`, the password checker `/usr/sbin/unix_chkpwd`, and syslog. The `--dev-*` options replace them:
+The helper normally uses fixed places: hashes in `/etc/screenlock-pin`, counts in `/run/screenlock-pin`, the password checker `/usr/sbin/unix_chkpwd`, and syslog. The `--dev-*` options replace them:
 
 | Option | Replaces |
 |---|---|
@@ -16,7 +16,7 @@ The helper normally uses fixed places: hashes in `/etc/properpin`, counts in `/r
 
 They exist so `cargo test` and `just demo` can run the real helper binary against a temporary sandbox, without root and without installing anything.
 
-**They are also the most dangerous thing in the helper.** If the installed helper accepted them, any user could run `properpin-helper arm --dev-chkpwd ~/fake-says-yes --dev-run ~/myrun`: a fake checker that always says yes arms the PIN without the password, and counts in a directory the user controls can be reset at will. So they must be refused whenever the helper runs with properpin's rights.
+**They are also the most dangerous thing in the helper.** If the installed helper accepted them, any user could run `screenlock-pin-helper arm --dev-chkpwd ~/fake-says-yes --dev-run ~/myrun`: a fake checker that always says yes arms the PIN without the password, and counts in a directory the user controls can be reset at will. So they must be refused whenever the helper runs with screenlock-pin's rights.
 
 ## AT_SECURE
 
@@ -42,6 +42,6 @@ The container scenario "--dev options are refused under setgid" fails when this 
 Since the setgid helper (`docs/chaos/spec-setgid-helper.md`, built 2026-10-03), that check has an independent partner: the `--dev` options are allowed only when the real and effective user ids are equal and the real and effective group ids are equal.
 
 - Run by tests: both pairs match, so the options are allowed.
-- Installed setgid: the real group is the caller's, the effective group is `properpin`, so they differ and the options are refused.
+- Installed setgid: the real group is the caller's, the effective group is `screenlock-pin`, so they differ and the options are refused.
 
 The two guards read the same fact from different places: `AT_SECURE` is the kernel's flag set at program start, the id comparison is what the process is right now. A bug has to break both to expose the options. The comparison lives in a pure function, `dev_options_allowed(at_secure, uid, euid, gid, egid)`, so a unit test covers every combination instantly, with no root and no container. Both halves were checked by breaking them on purpose: with the `AT_SECURE` half removed, the unit test fails while the container scenario still passes on the id comparison alone.

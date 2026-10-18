@@ -1,15 +1,15 @@
 # /etc/pam.d/kde is the lock screen's password service
 
-The question this note answers: what is `/etc/pam.d/kde` for, given that it isn't called "lockscreen", and what else could reach properpin's lines in it. The short answer: on this machine it is the KDE lock screen's password service and nothing else. An honest name would be `kde-lockscreen-password`; `kde` is history, from KDM, the login screen of KDE 3 and 4.
+The question this note answers: what is `/etc/pam.d/kde` for, given that it isn't called "lockscreen", and what else could reach screenlock-pin's lines in it. The short answer: on this machine it is the KDE lock screen's password service and nothing else. An honest name would be `kde-lockscreen-password`; `kde` is history, from KDM, the login screen of KDE 3 and 4.
 
-Written on 2026-10-18 on the Fedora 44 machine properpin is developed on (kscreenlocker 6.7.5, plasma-workspace 6.7.5, Plasma Login Manager). Claims are marked: "verified here" (observed on this machine), "verified in git" (the upstream kscreenlocker history in the reference clone at `/var/home/shared/projects/pam-related/kscreenlocker`, at `e77531ae`, 2026-10-09), "online" (the sources at the end), or "guessed" (reasoned, not checked). `docs/analysis/kscreenlocker-pam-service.md` covers how the lock screen opens its services in detail.
+Written on 2026-10-18 on the Fedora 44 machine screenlock-pin is developed on (kscreenlocker 6.7.5, plasma-workspace 6.7.5, Plasma Login Manager). Claims are marked: "verified here" (observed on this machine), "verified in git" (the upstream kscreenlocker history in the reference clone at `/var/home/shared/projects/pam-related/kscreenlocker`, at `e77531ae`, 2026-10-09), "online" (the sources at the end), or "guessed" (reasoned, not checked). `docs/analysis/kscreenlocker-pam-service.md` covers how the lock screen opens its services in detail.
 
 ## The short version
 
 - Only the lock screen opens `kde` on this machine, and only for the password (verified here). Fingerprint, smart card, and from Plasma 6.8 face and U2F each have a service of their own.
 - The first login after boot, `sudo`, polkit, SSH and the TTY use other files, so the PIN never reaches them (verified here).
 - The name comes from KDM, which used `kde` as KDE's common PAM service; the screen locker kept it when KDM was dropped in 2014 (online, and verified in git).
-- properpin's lines belong in `kde` and nowhere else. Putting them into `password-auth` would offer the PIN to SSH and Samba.
+- screenlock-pin's lines belong in `kde` and nowhere else. Putting them into `password-auth` would offer the PIN to SSH and Samba.
 
 ## Who opens kde on this machine
 
@@ -53,17 +53,17 @@ Two leftovers on this machine: `/etc/pam.d/kscreensaver` and `/etc/pam.d/kcheckp
 
 ## Login, sudo and the rest
 
-- **The first login after boot** goes through Plasma Login Manager's `plasmalogin`, not `kde`, so the PIN doesn't work there and the full password is needed (verified here as far as files go: the `plasmalogin` services are in place, and nothing but the lock screen names `kde`). Once logged in, every lock, the first after a reboot included, goes through `kde`, where the PIN works. With automatic login turned on (`plasmalogin-autologin`), no password is asked at login at all; properpin doesn't change that either way.
-- **`password-auth` is shared.** On this machine `cups`, `kde`, `ppp`, `vmtoolsd`, `remote`, `samba` and `sshd` pull it in; `sudo`, `su`, `login`, `passwd`, `chfn`, `chsh`, `vlock`, `kscreensaver`, `kcheckpass` and `config-util` pull in `system-auth` instead (verified here). properpin's lines in `password-auth` would offer a short PIN to SSH and Samba, over the network. Both files are also authselect's: symlinks into `/etc/authselect/`, which authselect regenerates, so lines added there could silently disappear.
+- **The first login after boot** goes through Plasma Login Manager's `plasmalogin`, not `kde`, so the PIN doesn't work there and the full password is needed (verified here as far as files go: the `plasmalogin` services are in place, and nothing but the lock screen names `kde`). Once logged in, every lock, the first after a reboot included, goes through `kde`, where the PIN works. With automatic login turned on (`plasmalogin-autologin`), no password is asked at login at all; screenlock-pin doesn't change that either way.
+- **`password-auth` is shared.** On this machine `cups`, `kde`, `ppp`, `vmtoolsd`, `remote`, `samba` and `sshd` pull it in; `sudo`, `su`, `login`, `passwd`, `chfn`, `chsh`, `vlock`, `kscreensaver`, `kcheckpass` and `config-util` pull in `system-auth` instead (verified here). screenlock-pin's lines in `password-auth` would offer a short PIN to SSH and Samba, over the network. Both files are also authselect's: symlinks into `/etc/authselect/`, which authselect regenerates, so lines added there could silently disappear.
 - **A second safety net.** The module refuses to run as root, and `sshd`, `sudo`, `su` and `login` check passwords as root, so even a line put into one of them by mistake would refuse the PIN. The container test checks the PIN refused by `sudo`, `su`, `login`, `system-auth`, `password-auth`, `passwd` and `other`.
 
-## What if properpin's lines went into plasmalogin
+## What if screenlock-pin's lines went into plasmalogin
 
-Checked on 2026-10-18; `docs/why-not-loginscreen.md` has the details and the reasons properpin stays off the login screen.
+Checked on 2026-10-18; `docs/why-not-loginscreen.md` has the details and the reasons screenlock-pin stays off the login screen.
 
 - **Only graphical login would be reached** (verified here). Among the programs that link libpam, only `/usr/libexec/plasmalogin-helper` names `plasmalogin`, and no PAM file pulls it in. `sudo`, `sshd`, polkit, `run0` and the text console (`agetty` → `/bin/login` → `login` → `system-auth`) read their own files.
-- **The PIN wouldn't work at login** (verified here). `plasmalogin-helper` checks the password as root, and both the module ("running as root; properpin belongs in the lock screen's stack only") and the pinchecker ("refused: root has no lock screen to unlock") refuse root. The PIN would always be refused, the password would still work, and each login would log an error.
-- **Making it work** would need the pinchecker to accept a user name from root, would leave the wallet locked (`pam_kwallet` needs the real password at login), and would mean an `/etc/pam.d/plasmalogin` that hides Fedora's `/usr/lib/pam.d/plasmalogin` (reasoned).
+- **The PIN wouldn't work at login** (verified here). `plasmalogin-helper` checks the password as root, and both the module ("running as root; screenlock-pin belongs in the lock screen's stack only") and the PIN checker ("refused: root has no lock screen to unlock") refuse root. The PIN would always be refused, the password would still work, and each login would log an error.
+- **Making it work** would need the PIN checker to accept a user name from root, would leave the wallet locked (`pam_kwallet` needs the real password at login), and would mean an `/etc/pam.d/plasmalogin` that hides Fedora's `/usr/lib/pam.d/plasmalogin` (reasoned).
 
 ## A possible hardening
 

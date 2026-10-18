@@ -1,4 +1,4 @@
-//! The real `properpin-pinchecker` binary, run as a subprocess without setgid, so its `--dev-*` options
+//! The real `screenlock-pin-checker` binary, run as a subprocess without setgid, so its `--dev-*` options
 //! point it at a sandbox owned by whoever runs the tests. What needs real setgid (the dev options
 //! refused, other users kept out) is in the container test.
 
@@ -7,17 +7,17 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use properpin_core::{Budget, MAX_INPUT_BYTES, exit};
-use properpin_sys::{Account, UserFiles, Yescrypt, current_egid, current_uid};
+use screenlock_pin_core::{Budget, MAX_INPUT_BYTES, exit};
+use screenlock_pin_sys::{Account, UserFiles, Yescrypt, current_egid, current_uid};
 
-const PINCHECKER: &str = env!("CARGO_BIN_EXE_properpin-pinchecker");
+const PIN_CHECKER: &str = env!("CARGO_BIN_EXE_screenlock-pin-checker");
 const PIN: &str = "4859";
 
 struct Sandbox {
     dir: tempfile::TempDir,
 }
 
-/// What one run of the pinchecker came to.
+/// What one run of the PIN checker came to.
 #[derive(Debug)]
 struct Run {
     code: Option<i32>,
@@ -35,7 +35,7 @@ impl Sandbox {
         fs::create_dir_all(user_file.parent().unwrap()).unwrap();
         fs::write(&user_file, format!("hash = {}\n", Yescrypt.hash(PIN, 4).unwrap())).unwrap();
         fs::set_permissions(&user_file, Permissions::from_mode(0o640)).unwrap();
-        // The budget and lock file properpin set creates.
+        // The budget and lock file screenlock-pin set creates.
         let uid = current_uid();
         let files = UserFiles::new(sandbox.path("etc"), uid, &user, uid).unwrap();
         files.with_budget(sandbox.path("var"), uid, current_egid()).start_budget(&Budget::default()).unwrap();
@@ -55,7 +55,7 @@ impl Sandbox {
     }
 
     fn command(&self, args: &[&str]) -> Command {
-        let mut command = Command::new(PINCHECKER);
+        let mut command = Command::new(PIN_CHECKER);
         command.args(args).args(self.dev_args());
         command
     }
@@ -83,7 +83,7 @@ impl Sandbox {
 
 fn run(mut command: Command, stdin: &[u8]) -> Run {
     let mut child = command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
-    // A pinchecker that refuses its arguments exits without reading, so the pipe may already be closed.
+    // A PIN checker that refuses its arguments exits without reading, so the pipe may already be closed.
     match std::io::Write::write_all(&mut child.stdin.take().unwrap(), stdin) {
         Err(error) if error.kind() != std::io::ErrorKind::BrokenPipe => panic!("{error}"),
         _ => {}
@@ -164,7 +164,7 @@ fn anything_unexpected_on_the_command_line_is_refused() {
         &["check", "--dev-etc", "/tmp", "--dev-run", "/tmp", "--dev-budget", "/tmp"],
         &["check", "--dev-everything", "/tmp"],
     ] {
-        let mut command = Command::new(PINCHECKER);
+        let mut command = Command::new(PIN_CHECKER);
         command.args(args);
         if args.first() == Some(&"frobnicate") {
             command.args(&dev);
@@ -192,11 +192,11 @@ fn a_poisoned_start_changes_nothing() {
 
     // Closed stdout and stderr, and an extra file left open, through the shell.
     let mut shell = Command::new("sh");
-    shell.args(["-c", "exec 7</dev/null; exec \"$0\" check \"$@\" >&- 2>&-", PINCHECKER]).args(sandbox.dev_args());
+    shell.args(["-c", "exec 7</dev/null; exec \"$0\" check \"$@\" >&- 2>&-", PIN_CHECKER]).args(sandbox.dev_args());
     assert_eq!(run(shell, PIN.as_bytes()).code, YES);
     // Closed stdin reads as nothing typed.
     let mut shell = Command::new("sh");
-    shell.args(["-c", "exec \"$0\" check \"$@\" <&-", PINCHECKER]).args(sandbox.dev_args());
+    shell.args(["-c", "exec \"$0\" check \"$@\" <&-", PIN_CHECKER]).args(sandbox.dev_args());
     assert_eq!(run(shell, b"").code, NO);
     // The wrong PIN was counted, the right one reset it, and nothing typed isn't counted.
     assert!(sandbox.status().contains("consecutive failures  0/3"), "{}", sandbox.status());

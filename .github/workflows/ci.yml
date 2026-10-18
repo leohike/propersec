@@ -37,7 +37,7 @@ jobs:
           persist-credentials: false
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: Add an unprivileged user
-        # pam_properpin refuses to run as root, as the lock screen never does, so the stack tests
+        # pam_screenlock_pin refuses to run as root, as the lock screen never does, so the stack tests
         # run as a plain user.
         run: |
           useradd --create-home tester
@@ -79,7 +79,7 @@ jobs:
           persist-credentials: false
       - name: podman version
         # The container shares these with the runner's kernel; protected_regular=2 limits what even
-        # root may open in /var/lib/properpin, which the scenarios have to respect.
+        # root may open in /var/lib/screenlock-pin, which the scenarios have to respect.
         run: |
           podman version
           sysctl fs.protected_regular fs.protected_symlinks
@@ -88,17 +88,17 @@ jobs:
       # it ("check pass; user unknown"), so the real password never unlocks. Storage is kernel
       # overlay without nosuid there, so the cause is something else; not yet pinned down.
       - name: Build the test image
-        run: sudo podman build --quiet --ignorefile testing/podman/Containerfile.containerignore -f testing/podman/Containerfile -t properpin-systest .
+        run: sudo podman build --quiet --ignorefile testing/podman/Containerfile.containerignore -f testing/podman/Containerfile -t screenlock-pin-systest .
       - name: Run the scenarios
-        run: sudo podman run --rm --init --network=none properpin-systest
+        run: sudo podman run --rm --init --network=none screenlock-pin-systest
       # The same as `just release`: the build install.sh installs by default, checked to load only
       # the system's libraries. Checked in a fresh Fedora 44, with only what check-build needs added
       # (readelf from binutils): the runner is Ubuntu, whose libcrypt.so.1 isn't the libcrypt.so.2
-      # the build needs, and podman leaves target/properpin root's and 0700 under sudo anyway.
+      # the build needs, and podman leaves target/screenlock-pin root's and 0700 under sudo anyway.
       - name: Release build
         run: |
-          sudo podman build --quiet --ignorefile testing/podman/Containerfile.containerignore -f packaging/Containerfile -o target/properpin .
-          sudo podman run --rm --security-opt label=disable -v "$PWD/target/properpin:/build:ro" -v "$PWD/packaging:/packaging:ro" \
+          sudo podman build --quiet --ignorefile testing/podman/Containerfile.containerignore -f packaging/Containerfile -o target/screenlock-pin .
+          sudo podman run --rm --security-opt label=disable -v "$PWD/target/screenlock-pin:/build:ro" -v "$PWD/packaging:/packaging:ro" \
             registry.fedoraproject.org/fedora:44 \
             bash -c 'dnf -y -q install --setopt=install_weak_deps=False binutils diffutils && /packaging/install.sh check-build --from /build'
       # install.sh uninstall against deliberately broken installs, a fresh container per case.

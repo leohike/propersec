@@ -1,6 +1,6 @@
 [package]
-name = "properpin-core"
-description = "properpin's rules: when a PIN may unlock the lock screen. No I/O, no unsafe."
+name = "screenlock-pin-core"
+description = "screenlock-pin's rules: when a PIN may unlock the lock screen. No I/O, no unsafe."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

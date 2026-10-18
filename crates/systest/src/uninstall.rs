@@ -1,22 +1,22 @@
 //! The uninstall cases: what is under test is the way out, `integrate-into-pam.sh remove` and then
-//! `install.sh uninstall`, not properpin. Each case, in a fresh container of its own:
+//! `install.sh uninstall`, not screenlock-pin. Each case, in a fresh container of its own:
 //!
 //! - records the stock system: what the lock screen, `sudo`, `su` and `login` answer to the right
-//!   and a wrong password, every file in `/etc/pam.d` byte for byte, the files properpin's paths
+//!   and a wrong password, every file in `/etc/pam.d` byte for byte, the files screenlock-pin's paths
 //!   hold, and the groups;
-//! - installs a deliberately broken properpin, through `install.sh` and under exactly the real
+//! - installs a deliberately broken screenlock-pin, through `install.sh` and under exactly the real
 //!   names (the variants come from `crates/brokenpin`, built by `testing/podman/build-broken.sh`),
 //!   or a real one broken afterwards, and puts its lines in with `integrate-into-pam.sh add`;
 //! - checks that it really broke the lock screen the way the case says, and that `sudo`, the way
 //!   in for a repair, still works;
 //! - checks that `install.sh uninstall` refuses while the lines are in, then runs
 //!   `integrate-into-pam.sh remove --yes` and `install.sh uninstall`, and checks that the record
-//!   matches again, apart from what uninstall keeps on purpose (`/etc/properpin`,
-//!   `/var/lib/properpin`, the `properpin` group);
-//! - runs both again, which must change nothing, then installs the real properpin and checks that
+//!   matches again, apart from what uninstall keeps on purpose (`/etc/screenlock-pin`,
+//!   `/var/lib/screenlock-pin`, the `screenlock-pin` group);
+//! - runs both again, which must change nothing, then installs the real screenlock-pin and checks that
 //!   the PIN works and that taking it out again also leaves the record.
 //!
-//! docs/chaos/install-uninstall-with-a-broken-properpin.md has the reasoning.
+//! docs/chaos/install-uninstall-with-a-broken-screenlock-pin.md has the reasoning.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::os::unix::fs::MetadataExt;
@@ -24,17 +24,17 @@ use std::os::unix::fs::MetadataExt;
 use super::*;
 
 /// Where the Containerfile puts the broken variants, one directory each.
-const BROKEN: &str = "/opt/properpin/broken";
+const BROKEN: &str = "/opt/screenlock-pin/broken";
 /// An attempt still running after this is dead: the lock screen would hang on it.
 const DEAD_AFTER: Duration = Duration::from_secs(30);
-/// The module waits ten seconds for a pinchecker before killing it.
-const PINCHECKER_TIMEOUT: Duration = Duration::from_secs(10);
+/// The module waits ten seconds for a PIN checker before killing it.
+const PIN_CHECKER_TIMEOUT: Duration = Duration::from_secs(10);
 /// Kept by uninstall on purpose, with the PINs and the budgets.
-const KEPT: [&str; 2] = ["/etc/properpin", "/var/lib/properpin"];
-/// Where anything of properpin's could be; recorded before and after.
-const WATCHED: [&str; 6] = ["/usr/local", "/etc/sysusers.d", "/etc/tmpfiles.d", "/etc/properpin", OLD_RUN_DIR, BUDGET_DIR];
+const KEPT: [&str; 2] = ["/etc/screenlock-pin", "/var/lib/screenlock-pin"];
+/// Where anything of screenlock-pin's could be; recorded before and after.
+const WATCHED: [&str; 5] = ["/usr/local", "/etc/sysusers.d", "/etc/tmpfiles.d", "/etc/screenlock-pin", BUDGET_DIR];
 
-/// What a broken properpin does to the lock screen.
+/// What a broken screenlock-pin does to the lock screen.
 #[derive(Debug, Clone, Copy)]
 enum Breaks {
     /// The right password kills the lock screen's process.
@@ -43,7 +43,7 @@ enum Breaks {
     Hangs,
     /// A wrong password unlocks the lock screen.
     LetsAnyoneIn,
-    /// The right password unlocks, but only after the module's pinchecker timeout, twice over.
+    /// The right password unlocks, but only after the module's PIN checker timeout, twice over.
     Slows,
     /// The PIN never unlocks, while the right password still does: the stock stack prompts for
     /// it when the module can't, and libpam skips a module it can't load or call.
@@ -71,8 +71,8 @@ const CASES: &[Case] = &[
     Case { name: "module-missing-symbol", variant: Some("module-missing-symbol"), damage: no_damage, breaks: &[Breaks::PinOnly] },
     Case { name: "module-garbage", variant: None, damage: garbage_the_module, breaks: &[Breaks::PinOnly] },
     Case { name: "module-deleted", variant: None, damage: delete_the_module, breaks: &[Breaks::PinOnly] },
-    Case { name: "pinchecker-says-yes", variant: Some("pinchecker-says-yes"), damage: no_damage, breaks: &[Breaks::LetsAnyoneIn] },
-    Case { name: "pinchecker-sleeps", variant: Some("pinchecker-sleeps"), damage: no_damage, breaks: &[Breaks::Slows] },
+    Case { name: "pin-checker-says-yes", variant: Some("pin-checker-says-yes"), damage: no_damage, breaks: &[Breaks::LetsAnyoneIn] },
+    Case { name: "pin-checker-sleeps", variant: Some("pin-checker-sleeps"), damage: no_damage, breaks: &[Breaks::Slows] },
 ];
 
 fn delete_the_module() -> Outcome {
@@ -163,33 +163,33 @@ impl Bench {
         let from = case.variant.map_or(format!("{PRODUCT}/build"), |variant| format!("{BROKEN}/{variant}"));
         install_sh_from(&from, &["install"])?;
         integrate(&["add", "--yes"])?;
-        properpin_as_root(&["set", "--user", USER], &format!("{PIN}\n{PIN}\n"))?;
+        screenlock_pin_as_root(&["set", "--user", USER], &format!("{PIN}\n{PIN}\n"))?;
         (case.damage)()?;
         self.is_broken(case).map_err(|error| format!("the broken install didn't break as expected: {error}"))?;
 
         match install_sh(&["uninstall"]) {
-            Err(said) if said.contains("still has properpin's lines") => {}
-            other => return Err(format!("uninstall didn't wait for properpin's lines to come out: {other:?}")),
+            Err(said) if said.contains("still has screenlock-pin's lines") => {}
+            other => return Err(format!("uninstall didn't wait for screenlock-pin's lines to come out: {other:?}")),
         }
-        let said = Self::take_out().map_err(|error| format!("taking properpin out failed: {error}"))?;
-        no_pinchecker_left()?;
+        let said = Self::take_out().map_err(|error| format!("taking screenlock-pin out failed: {error}"))?;
+        no_pin_checker_left()?;
         self.matches(&before, "after uninstall").map_err(|error| format!("{error}\nremove and uninstall said:\n{said}"))?;
 
-        Self::take_out().map_err(|error| format!("taking properpin out again failed: {error}"))?;
+        Self::take_out().map_err(|error| format!("taking screenlock-pin out again failed: {error}"))?;
         self.matches(&before, "after a second uninstall")?;
 
-        // properpin itself still installs and works afterwards, and goes again just as cleanly.
+        // screenlock-pin itself still installs and works afterwards, and goes again just as cleanly.
         install_sh(&["install"])?;
         integrate(&["add", "--yes"])?;
         // The PIN file was kept, so this is the PIN already set, which set asks about first.
-        properpin_as_root(&["set", "--user", USER, "--yes"], &format!("{PIN}\n{PIN}\n"))?;
+        screenlock_pin_as_root(&["set", "--user", USER, "--yes"], &format!("{PIN}\n{PIN}\n"))?;
         self.expect("kde", PASSWORD, &Ran::Unlocked, "the password, reinstalled")?;
         self.expect("kde", PIN, &Ran::Unlocked, "the PIN, reinstalled")?;
         Self::take_out()?;
-        self.matches(&before, "after installing the real properpin and uninstalling it")
+        self.matches(&before, "after installing the real screenlock-pin and uninstalling it")
     }
 
-    /// The way out: properpin's lines out of `/etc/pam.d/kde`, then its files.
+    /// The way out: screenlock-pin's lines out of `/etc/pam.d/kde`, then its files.
     fn take_out() -> Outcome<String> {
         Ok(integrate(&["remove", "--yes"])? + &install_sh(&["uninstall"])?)
     }
@@ -213,8 +213,8 @@ impl Bench {
                 Breaks::LetsAnyoneIn => self.expect("kde", "not the password", &Ran::Unlocked, "a wrong password")?,
                 Breaks::Slows => {
                     let probe = self.probe("kde", PASSWORD)?;
-                    if probe.ran != Ran::Unlocked || probe.took < PINCHECKER_TIMEOUT * 2 {
-                        return Err(format!("the right password should unlock after two pinchecker timeouts: {probe:?}"));
+                    if probe.ran != Ran::Unlocked || probe.took < PIN_CHECKER_TIMEOUT * 2 {
+                        return Err(format!("the right password should unlock after two PIN checker timeouts: {probe:?}"));
                     }
                 }
                 Breaks::PinOnly => {
@@ -259,7 +259,7 @@ impl Bench {
             }
         }
         for group in before.groups.symmetric_difference(&after.groups) {
-            if group != PINCHECKER_GROUP {
+            if group != PIN_CHECKER_GROUP {
                 differences.push(format!("group {group}: there only before or only {when}"));
             }
         }

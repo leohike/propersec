@@ -1,7 +1,7 @@
 # Mutation testing: cargo-mutants changes the code one small way at a time (a comparison flipped, a
 # function body replaced by a default value) and runs the tests; a change no test notices is a
 # "missed" mutant, a line nothing really tests. Too slow for every push, so it runs weekly and on
-# demand. Mutants in core and sys are tested against the pinchecker's tests too, which drive much of
+# demand. Mutants in core and sys are tested against the PIN checker's tests too, which drive much of
 # core (the log lines, the status text). Report only: missed mutants don't fail the job, but the
 # list lands in the job summary and in the artifact. What is left to decide is in
 # docs/chaos/tooling-remaining-ideas.md.
@@ -53,8 +53,8 @@ jobs:
         # as tests failing on the unmutated tree, fails the job.
         run: |
           set +e
-          runuser -u tester -- cargo mutants --package properpin-core --package properpin-sys \
-            --test-package properpin-core --test-package properpin-sys --test-package properpin-pinchecker \
+          runuser -u tester -- cargo mutants --package screenlock-pin-core --package screenlock-pin-sys \
+            --test-package screenlock-pin-core --test-package screenlock-pin-sys --test-package screenlock-pin-checker \
             --jobs 2 --no-shuffle --output .
           code=$?
           echo "cargo mutants exited $code"

@@ -1,29 +1,29 @@
-//! `properpin-pinchecker`: the only program that reads PIN hashes and keeps the failure counts.
+//! `screenlock-pin-checker`: the only program that reads PIN hashes and keeps the failure counts.
 //!
 //! It is a setgid helper in the style of `unix_chkpwd`: installed owned by root and setgid to the
-//! `properpin` group, like Debian's `unix_chkpwd` is setgid to `shadow`, so the hash files and the
-//! counts can be readable by that group alone and stay out of reach of everything the user runs. The group has no members: running the pinchecker is the
-//! only way to get it. The pinchecker keeps its caller's user id, so the caller can't change the pinchecker,
+//! `screenlock-pin` group, like Debian's `unix_chkpwd` is setgid to `shadow`, so the hash files and the
+//! counts can be readable by that group alone and stay out of reach of everything the user runs. The group has no members: running the PIN checker is the
+//! only way to get it. The PIN checker keeps its caller's user id, so the caller can't change the PIN checker,
 //! and each user's counts file is that user's own. The PAM module and the CLI start it, write what
-//! was typed to its stdin for `check`, and read its exit code (`properpin_core::exit`); only
+//! was typed to its stdin for `check`, and read its exit code (`screenlock_pin_core::exit`); only
 //! `status` prints anything.
 //!
 //! ```text
-//! properpin-pinchecker check         stdin: what was typed. Exit 0 if it is the PIN and the PIN is
+//! screenlock-pin-checker check         stdin: what was typed. Exit 0 if it is the PIN and the PIN is
 //!                                    enabled, no sooner than min_milliseconds_before_pin_unlock
 //!                                    after the start
-//! properpin-pinchecker unpause       stdin: nothing. The lock screen was just unlocked with the
+//! screenlock-pin-checker unpause       stdin: nothing. The lock screen was just unlocked with the
 //!                                    password, as the module's pam_sm_setcred tells it: the
 //!                                    failures of the last moments are forgiven and the consecutive
 //!                                    count starts over, which unpauses the PIN. No password is
 //!                                    read or checked
-//! properpin-pinchecker status        prints the caller's PIN settings, and whether the PIN is
+//! screenlock-pin-checker status        prints the caller's PIN settings, and whether the PIN is
 //!                                    enabled, paused, disabled or refused, and why
 //! ```
 //!
-//! The caller is always the real user id the kernel reports. The pinchecker never takes a user name or
+//! The caller is always the real user id the kernel reports. The PIN checker never takes a user name or
 //! a path from its caller, except through the `--dev-*` options, which `main.rs` accepts only when
-//! [`dev_options_allowed`] says the pinchecker runs without elevated rights, and then it has no more
+//! [`dev_options_allowed`] says the PIN checker runs without elevated rights, and then it has no more
 //! rights than its caller.
 //!
 //! This library is the decision part, with every location and outside check passed in, so the tests
@@ -39,11 +39,11 @@ use std::io::Read;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use properpin_core::{
+use screenlock_pin_core::{
     Clock, Error, Hasher, Judged, Log, MAX_INPUT_BYTES, Secret, Settings, Store, exit, try_unlock_with_pin,
     unpause_pin_after_password_unlock,
 };
-use properpin_sys::{Account, UserFiles, local_time};
+use screenlock_pin_sys::{Account, UserFiles, local_time};
 
 /// What the caller asks for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,15 +72,15 @@ impl Request {
 /// Where the files are, and who must own them.
 #[derive(Debug, Clone)]
 pub struct Places {
-    /// `/etc/properpin` once installed.
+    /// `/etc/screenlock-pin` once installed.
     pub etc: PathBuf,
     /// Who must own the files under `etc`: root once installed.
     pub etc_owner: u32,
-    /// `/var/lib/properpin` once installed: every user's budget, in one directory on disk.
+    /// `/var/lib/screenlock-pin` once installed: every user's budget, in one directory on disk.
     pub budget_dir: PathBuf,
     /// Who must own `budget_dir`: root once installed.
     pub budget_owner: u32,
-    /// The group `budget_dir` must have: the one the pinchecker runs with, so a pinchecker installed
+    /// The group `budget_dir` must have: the one the PIN checker runs with, so a PIN checker installed
     /// without its setgid bit runs with the caller's group and refuses.
     pub budget_group: u32,
 }
@@ -92,24 +92,24 @@ impl Places {
     }
 }
 
-/// Whether the `--dev-*` options may be used: only when the pinchecker runs with no more rights than
+/// Whether the `--dev-*` options may be used: only when the PIN checker runs with no more rights than
 /// its caller. Two independent signs must agree: the kernel didn't flag the start as elevated
 /// (`AT_SECURE`), and the real and effective ids are the same, user and group both. A bug has to
-/// defeat both before a caller could point the installed pinchecker at files or a checker of their own.
+/// defeat both before a caller could point the installed PIN checker at files or a checker of their own.
 pub fn dev_options_allowed(at_secure: bool, uid: u32, euid: u32, gid: u32, egid: u32) -> bool {
     !at_secure && uid == euid && gid == egid
 }
 
-/// What the pinchecker answers: an exit code from `properpin_core::exit`, for `status` some text,
+/// What the PIN checker answers: an exit code from `screenlock_pin_core::exit`, for `status` some text,
 /// and for a correct PIN how soon it may answer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Reply {
     pub code: u8,
     pub output: String,
-    /// How long after the pinchecker started the answer may come at the earliest:
+    /// How long after the PIN checker started the answer may come at the earliest:
     /// `min_milliseconds_before_pin_unlock` for a correct PIN, and nothing for anything else, which
     /// goes on to the password at once. kscreenlocker 6.8 takes an answer within 50 ms for a broken
-    /// authenticator, and a correct PIN is the one answer that ends the stack with properpin's time
+    /// authenticator, and a correct PIN is the one answer that ends the stack with screenlock-pin's time
     /// alone. Waiting leaks nothing, since the unlock shows anyway. `main.rs` waits it out, once the
     /// budget is saved and its lock released.
     pub not_before: Duration,
@@ -205,7 +205,7 @@ fn unpause_pin<H, C: Clock, L: Log + ?Sized>(files: &UserFiles, caller: &Account
     log_judged(&judged, caller, context.log);
     match judged.disabled {
         Some(limit) => context.log.log(&format!(
-            "{}: unlocked with the password, but the PIN stays disabled after {limit}; sudo properpin enable or set turns it back on",
+            "{}: unlocked with the password, but the PIN stays disabled after {limit}; sudo screenlock-pin enable or set turns it back on",
             caller.name
         )),
         None => context.log.log(&format!("{}: unlocked with the password, PIN enabled", caller.name)),
@@ -217,7 +217,7 @@ fn unpause_pin<H, C: Clock, L: Log + ?Sized>(files: &UserFiles, caller: &Account
 /// and since when, or refused whatever is typed, and why: every file an attempt reads, checked the
 /// way it checks them.
 fn status(files: &UserFiles, hasher: &impl Hasher, clock: &impl Clock) -> Result<String, Error> {
-    const FIX: &str = "sudo properpin doctor says how to fix it";
+    const FIX: &str = "sudo screenlock-pin doctor says how to fix it";
     let line = |label: &str, value: &str| format!("{label:<22}{value}\n");
     let since = |at: u64| format!("since {}", local_time(at));
     let mut out = line("user", files.user());
@@ -237,7 +237,7 @@ fn status(files: &UserFiles, hasher: &impl Hasher, clock: &impl Clock) -> Result
     let judged = budget.judge(clock.now()?, &settings);
     let state = match (judged.disabled, budget.disabled) {
         (Some(limit), Some(disabled)) => {
-            format!("disabled {}, after {limit}; sudo properpin enable or set turns it back on", since(disabled.at))
+            format!("disabled {}, after {limit}; sudo screenlock-pin enable or set turns it back on", since(disabled.at))
         }
         _ if budget.paused(&settings) => format!(
             "paused {}, after {} consecutive failures; unlocking with the password resumes it",
@@ -259,7 +259,7 @@ fn status(files: &UserFiles, hasher: &impl Hasher, clock: &impl Clock) -> Result
     out += &of(counts.pending.to_string(), "waiting to be forgiven");
     out += "policy\n";
     out += &format!("    {} consecutive failures pause the PIN, until a password unlock\n", settings.max_failures);
-    out += "    too many suspicious failures, as above, disable it, until sudo properpin enable or set\n";
+    out += "    too many suspicious failures, as above, disable it, until sudo screenlock-pin enable or set\n";
     Ok(out)
 }
 
@@ -291,7 +291,7 @@ mod tests {
     use std::fs::{self, Permissions};
     use std::os::unix::fs::PermissionsExt;
 
-    use properpin_sys::{SystemClock, Yescrypt, current_egid, current_uid};
+    use screenlock_pin_sys::{SystemClock, Yescrypt, current_egid, current_uid};
 
     use super::*;
 
@@ -322,8 +322,8 @@ mod tests {
         let caller = Account { name: "alice".into(), uid, gid: current_egid() };
         let sandbox = Sandbox { _dir: dir, places, caller };
         sandbox.write_user_file(&format!("hash = {}\n", Yescrypt.hash(PIN, 4).unwrap()));
-        // The budget and lock file properpin set creates.
-        sandbox.places.files(&sandbox.caller).unwrap().start_budget(&properpin_core::Budget::fresh(SET_AT)).unwrap();
+        // The budget and lock file screenlock-pin set creates.
+        sandbox.places.files(&sandbox.caller).unwrap().start_budget(&screenlock_pin_core::Budget::fresh(SET_AT)).unwrap();
         sandbox
     }
 
@@ -509,7 +509,7 @@ suspicious failures
     0      waiting to be forgiven
 policy
     3 consecutive failures pause the PIN, until a password unlock
-    too many suspicious failures, as above, disable it, until sudo properpin enable or set
+    too many suspicious failures, as above, disable it, until sudo screenlock-pin enable or set
 ",
             path.display()
         );
@@ -534,14 +534,14 @@ policy
         let (code, output, _) = sandbox.ask(Request::Status, "");
         assert_eq!(code, exit::YES);
         assert!(output.contains("PIN                   refused whatever is typed: "), "{output}");
-        assert!(output.contains(".budget: missing; sudo properpin doctor says how to fix it"), "{output}");
+        assert!(output.contains(".budget: missing; sudo screenlock-pin doctor says how to fix it"), "{output}");
         sandbox.write_user_file("hash = not a hash\n");
-        assert!(sandbox.ask(Request::Status, "").1.contains("not a yescrypt hash; sudo properpin doctor"));
+        assert!(sandbox.ask(Request::Status, "").1.contains("not a yescrypt hash; sudo screenlock-pin doctor"));
         fs::set_permissions(sandbox.places.etc.join("users/alice"), Permissions::from_mode(0o644)).unwrap();
         let output = sandbox.ask(Request::Status, "").1;
         assert!(
             output.contains("PIN                   refused whatever is typed: ")
-                && output.contains("readable by others; sudo properpin doctor"),
+                && output.contains("readable by others; sudo screenlock-pin doctor"),
             "{output}"
         );
         let sneaky = Account { name: "../alice".into(), ..sandbox.caller.clone() };
@@ -573,14 +573,14 @@ policy
         sandbox.ask_with(&Later { ahead: 120 }, alice, Request::Check, "3333");
         let (code, _, log) = sandbox.ask_with(&Later { ahead: 300 }, alice, Request::Check, PIN);
         assert_eq!(code, exit::NO);
-        assert!(log.contains("PIN disabled after 4 suspicious failures within 24 hours; sudo properpin enable or set"), "{log}");
+        assert!(log.contains("PIN disabled after 4 suspicious failures within 24 hours; sudo screenlock-pin enable or set"), "{log}");
         assert!(log.contains("alice: PIN disabled after 4 suspicious failures within 24 hours, password required"), "{log}");
         let (code, _, log) = sandbox.ask_with(&Later { ahead: 300 }, alice, Request::Unpause, "");
         assert_eq!((code, log.contains("unlocked with the password, but the PIN stays disabled after")), (exit::YES, true), "{log}");
         let output = sandbox.ask_with(&Later { ahead: 300 }, alice, Request::Status, "").1;
         assert!(
             output.contains("PIN                   disabled since ")
-                && output.contains(", after 4 suspicious failures within 24 hours; sudo properpin enable"),
+                && output.contains(", after 4 suspicious failures within 24 hours; sudo screenlock-pin enable"),
             "{output}"
         );
     }
@@ -614,7 +614,7 @@ policy
         let long = vec![b'1'; MAX_INPUT_BYTES * 3];
         let typed = read_input(&mut &long[..]).unwrap();
         assert_eq!(typed.as_bytes().len(), MAX_INPUT_BYTES + 1);
-        assert_eq!(properpin_core::input_that_could_be_a_pin(typed.as_bytes()), None);
+        assert_eq!(screenlock_pin_core::input_that_could_be_a_pin(typed.as_bytes()), None);
     }
 
     #[test]

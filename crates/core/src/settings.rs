@@ -35,8 +35,8 @@ pub struct Settings {
     pub max_suspicious_7d: u32,
     /// Suspicious failures since the PIN was set that disable it.
     pub max_suspicious_total: u64,
-    /// The shortest time a correct PIN takes to unlock, counted from when the pinchecker starts;
-    /// the pinchecker waits out the rest before it answers. kscreenlocker 6.8 takes an answer
+    /// The shortest time a correct PIN takes to unlock, counted from when the PIN checker starts;
+    /// the PIN checker waits out the rest before it answers. kscreenlocker 6.8 takes an answer
     /// within 50 ms for a broken authenticator, so below that the PIN stops unlocking. Only a
     /// correct PIN waits: anything else goes on to the password stack, which is slow anyway.
     pub min_milliseconds_before_pin_unlock: u64,

@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use nix::unistd::{Group, Uid, User, getegid, geteuid, getgid, getuid};
-use properpin_core::Error;
+use screenlock_pin_core::Error;
 
 use crate::system;
 
@@ -76,14 +76,14 @@ mod tests {
     fn finds_the_current_user_both_ways() {
         let me = Account::by_uid(current_uid()).unwrap();
         assert_eq!(Account::by_name(&me.name).unwrap(), me);
-        assert!(Account::by_name("no-such-user-properpin").is_err());
+        assert!(Account::by_name("no-such-user-screenlock-pin").is_err());
     }
 
     #[test]
     fn finds_groups_by_name_or_number() {
         assert_eq!(group_by_name("root").unwrap(), 0);
         assert_eq!(group_by_name("4242").unwrap(), 4242);
-        assert!(group_by_name("no-such-group-properpin").is_err());
+        assert!(group_by_name("no-such-group-screenlock-pin").is_err());
     }
 
     #[test]

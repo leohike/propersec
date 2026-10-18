@@ -1,11 +1,11 @@
-//! `pam_properpin.so`: properpin's PAM module, for the lock screen's `auth` stack only.
+//! `pam_screenlock_pin.so`: screenlock-pin's PAM module, for the lock screen's `auth` stack only.
 //!
 //! Two lines of `/etc/pam.d/kde` call it, around the stock `auth substack password-auth` line,
 //! which stays as it is (see `packaging/kde-auth.pam`):
 //!
 //! ```text
 //! check         Is the typed input the PIN, and is the PIN enabled? Success unlocks, but never
-//!               sooner than min_milliseconds_before_pin_unlock after the pinchecker started;
+//!               sooner than min_milliseconds_before_pin_unlock after the PIN checker started;
 //!               anything else returns PAM_IGNORE at once, so the stock stack checks the same input
 //!               as the password.
 //! after-password-auth
@@ -16,21 +16,21 @@
 //!               failure; no password is read.
 //! ```
 //!
-//! It decides nothing itself. The hashes and the counts belong to the `properpin` group, out of
-//! the user's reach, and only the setgid pinchecker `properpin-pinchecker` reads them: the module hands it
+//! It decides nothing itself. The hashes and the counts belong to the `screenlock-pin` group, out of
+//! the user's reach, and only the setgid PIN checker `screenlock-pin-checker` reads them: the module hands it
 //! what was typed through a pipe and reads its exit code, the way pam_unix uses `unix_chkpwd`.
 //!
 //! Arguments, none of them in the shipped lines:
 //!
 //! ```text
-//! pinchecker=PATH  the pinchecker, instead of /usr/local/libexec/properpin/properpin-pinchecker (tests)
+//! pin_checker=PATH  the PIN checker, instead of /usr/local/libexec/screenlock-pin/screenlock-pin-checker (tests)
 //! log=FILE         append the module's own log lines here instead of syslog (tests)
 //! test_panic       panic on purpose while SIGCHLD is changed, to prove a panic becomes PAM_IGNORE
 //!                  and puts SIGCHLD back (tests)
 //! ```
 //!
 //! It runs inside the lock screen, as the locked user, never as root. Refusal is the default:
-//! every error, panic or refusal ends in PAM_IGNORE, and only the pinchecker's yes returns success.
+//! every error, panic or refusal ends in PAM_IGNORE, and only the PIN checker's yes returns success.
 
 // Stricter checks for shipped code (docs/chaos/plan-tools.md): every unsafe block explains why it is
 // sound, nothing indexes or slices without a bounds check, and no cast silently drops bits.

@@ -1,26 +1,24 @@
 #!/usr/bin/env bash
-# properpin's lines in the lock screen's PAM file, /etc/pam.d/kde. install.sh never touches it;
+# screenlock-pin's lines in the lock screen's PAM file, /etc/pam.d/kde. install.sh never touches it;
 # this is the only thing that does, and only when you run it.
 #
-#   integrate-into-pam.sh add     after a diff and a yes: properpin's two lines into /etc/pam.d/kde,
+#   integrate-into-pam.sh add     after a diff and a yes: screenlock-pin's two lines into /etc/pam.d/kde,
 #                                 just above and just below its "auth substack password-auth" line,
-#                                 replacing any properpin lines already there, an older version's
-#                                 included. First saves the file as it is without them, as
-#                                 /etc/properpin/kde.pam.without-properpin, for you to go back to by
-#                                 hand; nothing reads it back. Refuses unless properpin is installed
-#   integrate-into-pam.sh remove  after a diff and a yes: every properpin line out of /etc/pam.d/kde.
+#                                 replacing any screenlock-pin lines already there. First saves the file as it is without them, as
+#                                 /etc/screenlock-pin/kde.pam.without-screenlock-pin, for you to go back to by
+#                                 hand; nothing reads it back. Refuses unless screenlock-pin is installed
+#   integrate-into-pam.sh remove  after a diff and a yes: every screenlock-pin line out of /etc/pam.d/kde.
 #                                 install.sh uninstall refuses until this is done
 #   integrate-into-pam.sh check   whether /etc/pam.d/kde has exactly this version's lines (exit 0),
-#                                 no properpin lines at all (exit 3), or anything else (exit 1);
+#                                 no screenlock-pin lines at all (exit 3), or anything else (exit 1);
 #                                 changes nothing and needs no root
 #
 # Options:
 #   --yes        add, remove: don't ask (for scripted tests in a container)
-#   --root DIR   tests only: the PAM file and properpin's files under DIR instead of /
+#   --root DIR   tests only: the PAM file and screenlock-pin's files under DIR instead of /
 #
-# properpin's lines are every line naming pam_properpin.so, and what versions before 2026-10-18 put
-# around theirs: the "# properpin" marker lines and the pam_unix.so line between their two. Nothing
-# else in the file ever changes, and nothing ever deletes it. (Deleting /etc/pam.d/kde would hand
+# screenlock-pin's lines are every line naming pam_screenlock_pin.so. Nothing else in the file ever
+# changes, and nothing ever deletes it. (Deleting /etc/pam.d/kde would hand
 # the lock screen to the "other" service, which denies everyone.)
 
 set -euo pipefail
@@ -57,20 +55,19 @@ real=$([[ -z $root ]] && echo 1 || echo 0)
 
 pam_file=/etc/pam.d/kde
 file=$root$pam_file
-copy=/etc/properpin/kde.pam.without-properpin
-module_path=/usr/local/lib64/security/pam_properpin.so
+copy=/etc/screenlock-pin/kde.pam.without-screenlock-pin
+module_path=/usr/local/lib64/security/pam_screenlock_pin.so
 pam_lines=$here/kde-auth.pam
 stock_auth='^auth[[:space:]]+substack[[:space:]]+password-auth([[:space:]]|$)'
-# A line naming the module, and what versions before 2026-10-18 put around theirs: the marker
-# lines, and a pam_unix line no stock file has.
-properpin_line='pam_properpin|^# properpin|^auth[[:space:]]+\[success=ok default=die\][[:space:]]+pam_unix\.so[[:space:]]+use_first_pass[[:space:]]*$'
+# A line naming the module.
+screenlock_pin_line='pam_screenlock_pin'
 how_to_add="just integrate-into-pam, or: sudo packaging/integrate-into-pam.sh add"
 how_to_remove="just remove-from-pam, or: sudo packaging/integrate-into-pam.sh remove"
 
 # The two lines from packaging/kde-auth.pam, without its comments, and the stock line between them.
 mapfile -t shipped < <(grep -v -e '^#' -e '^[[:space:]]*$' "$pam_lines")
 if [[ ${#shipped[@]} != 3 || ! ${shipped[1]} =~ $stock_auth || ${shipped[0]} != *"$module_path check" || ${shipped[2]} != *"$module_path after-password-auth" ]]; then
-    fail "$pam_lines isn't properpin's check and after-password-auth lines around the stock auth substack line"
+    fail "$pam_lines isn't screenlock-pin's check and after-password-auth lines around the stock auth substack line"
 fi
 above=${shipped[0]} below=${shipped[2]}
 
@@ -79,17 +76,17 @@ trap 'rm -rf "$scratch"' EXIT
 
 # --- helpers
 
-# Whether the PAM file has anything of properpin's.
-has_properpin() {
-    [[ -f $file ]] && grep -qE "$properpin_line" "$file"
+# Whether the PAM file has anything of screenlock-pin's.
+has_screenlock_pin() {
+    [[ -f $file ]] && grep -qE "$screenlock_pin_line" "$file"
 }
 
-# Into $scratch/without, the PAM file without anything of properpin's, and into $scratch/with, that
+# Into $scratch/without, the PAM file without anything of screenlock-pin's, and into $scratch/with, that
 # with this version's lines around the stock auth line. Fails when that line isn't there exactly
 # once, leaving in $stock how many times it is.
 stock=0
 wanted() {
-    grep -vE "$properpin_line" "$file" >"$scratch/without" || true
+    grep -vE "$screenlock_pin_line" "$file" >"$scratch/without" || true
     stock=$(grep -cE "$stock_auth" "$scratch/without" || true)
     [[ $stock == 1 ]] || return 1
     awk -v above="$above" -v below="$below" -v stock="$stock_auth" \
@@ -119,7 +116,7 @@ confirm() {
 put() {
     local dest=$root$1
     local temporary
-    temporary="$(dirname "$dest")/.$(basename "$dest").properpin-new"
+    temporary="$(dirname "$dest")/.$(basename "$dest").screenlock-pin-new"
     rm -f "$temporary"
     cat >"$temporary"
     chmod 0644 "$temporary"
@@ -132,15 +129,15 @@ put() {
 # --- commands
 
 do_check() {
-    if ! has_properpin; then
-        echo "$pam_file has no properpin lines, so the lock screen takes the password only; to offer the PIN: $how_to_add"
+    if ! has_screenlock_pin; then
+        echo "$pam_file has no screenlock-pin lines, so the lock screen takes the password only; to offer the PIN: $how_to_add"
         exit 3
     fi
     if wanted && cmp -s "$scratch/with" "$file"; then
         echo "$pam_file has the lines this version ships"
         return 0
     fi
-    echo "$pam_file has properpin lines, but not exactly the ones this version ships around its auth substack password-auth line (an older version's, or edited by hand), so the PIN may be refused, while the password still works; $how_to_add replaces them, and $how_to_remove takes them out"
+    echo "$pam_file has screenlock-pin lines, but not exactly the ones this version ships around its auth substack password-auth line (another version's, or edited by hand), so the PIN may be refused, while the password still works; $how_to_add replaces them, and $how_to_remove takes them out"
     exit 1
 }
 
@@ -150,9 +147,9 @@ do_add() {
     [[ -f $file ]] || fail "$pam_file is missing; nothing was changed"
     # A PAM line naming a module that isn't there locks the lock screen.
     [[ -f $root$module_path && ! -L $root$module_path && -d $root$(dirname "$copy") ]] ||
-        fail "properpin isn't installed ($module_path is missing), and lines naming a missing module would lock the lock screen; install it first, with just install; nothing was changed"
+        fail "screenlock-pin isn't installed ($module_path is missing), and lines naming a missing module would lock the lock screen; install it first, with just install; nothing was changed"
     if ! wanted; then
-        echo "$pam_file has $stock 'auth substack password-auth' lines, not 1, so this script can't tell where properpin's lines go. To put them in by hand, the first goes just above the line that checks the password, and the second just below it:" >&2
+        echo "$pam_file has $stock 'auth substack password-auth' lines, not 1, so this script can't tell where screenlock-pin's lines go. To put them in by hand, the first goes just above the line that checks the password, and the second just below it:" >&2
         printf '%s\n' "$above" "$below" >&2
         fail "nothing was changed"
     fi
@@ -163,21 +160,21 @@ do_add() {
     confirm "$scratch/with"
     put "$copy" <"$scratch/without"
     put "$pam_file" <"$scratch/with"
-    echo "$pam_file has properpin's lines, and was saved without them as $copy"
+    echo "$pam_file has screenlock-pin's lines, and was saved without them as $copy"
     echo "test the lock screen before you close a root shell: the PIN, a wrong PIN, and the password"
 }
 
 do_remove() {
     require_root
-    if ! has_properpin; then
-        echo "$pam_file has no properpin lines; nothing to do"
+    if ! has_screenlock_pin; then
+        echo "$pam_file has no screenlock-pin lines; nothing to do"
         return 0
     fi
     [[ ! -L $file ]] || fail "$pam_file is a symbolic link; nothing was changed"
-    grep -vE "$properpin_line" "$file" >"$scratch/without" || true
+    grep -vE "$screenlock_pin_line" "$file" >"$scratch/without" || true
     confirm "$scratch/without"
     put "$pam_file" <"$scratch/without"
-    echo "took properpin's lines out of $pam_file, so the lock screen takes the password only"
+    echo "took screenlock-pin's lines out of $pam_file, so the lock screen takes the password only"
 }
 
 "do_$command"

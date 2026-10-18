@@ -1,6 +1,6 @@
-//! Test-only: a deliberately broken `pam_properpin.so`, so the container can check that
-//! `install.sh uninstall` repairs a lock screen that a broken properpin has wrecked
-//! (docs/chaos/install-uninstall-with-a-broken-properpin.md). One feature picks how it breaks:
+//! Test-only: a deliberately broken `pam_screenlock_pin.so`, so the container can check that
+//! `install.sh uninstall` repairs a lock screen that a broken screenlock-pin has wrecked
+//! (docs/chaos/install-uninstall-with-a-broken-screenlock-pin.md). One feature picks how it breaks:
 //!
 //! ```text
 //! (none)      no pam_sm_authenticate at all, as a build missing a symbol would be

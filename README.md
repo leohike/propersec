@@ -1,4 +1,4 @@
-# ProperPin (prototype stage)
+# screenlock-pin (prototype stage)
 
 Here, a PIN means a short alphanumeric password. On its own it has too little entropy to resist brute force, but it is faster to type and easier to remember than a long random password, and it still has more entropy than a traditional 4–6 digit PIN.
 
@@ -8,7 +8,7 @@ At the KDE lock screen, you can unlock your Linux session with your PIN. Three c
 
 ## Why
 
-Without ProperPin, or something like it, people in practice either rarely lock their screens or settle for short, non-random account passwords which are essentially PINs as defined above, just without any of the protections that make a low-entropy PIN safe to use.
+Without screenlock-pin, or something like it, people in practice either rarely lock their screens or settle for short, non-random account passwords which are essentially PINs as defined above, just without any of the protections that make a low-entropy PIN safe to use.
 
 ## Threat model
 
@@ -18,13 +18,13 @@ The same as for a lock screen in general. It protects your account/data from:
 - a thief who steals your powered-on laptop while the screen is locked
 - anyone who copies the PIN's files: they are useless without your password
 
-ProperPin doesn't protect from someone watching you type, malware running as you, root on the running machine, anyone who can read machine's memory, or coercion (a strong account password doesn't protect from these either). ProperPin also assumes full-disk encryption.
+screenlock-pin doesn't protect from someone watching you type, malware running as you, root on the running machine, anyone who can read machine's memory, or coercion (a strong account password doesn't protect from these either). screenlock-pin also assumes full-disk encryption.
 
 ## Scope
 
 Now: the lock screen only, KDE only, with extensive security analysis and testing, and no TPM functionality.
 
-Planned: make ProperPin usable and secure for `sudo`, and add TPM support in a systemic way such that more complex code does not simply increase the attack surface (also, TPMs aren't infallible anyway and should not be relied upon completely).
+Planned, probably as a separate product next to this one: a PIN usable and secure for `sudo`, with TPM support in a systemic way such that more complex code does not simply increase the attack surface (also, TPMs aren't infallible anyway and should not be relied upon completely).
 
 ## Status
 

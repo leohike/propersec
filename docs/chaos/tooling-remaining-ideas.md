@@ -24,7 +24,7 @@ The first three items of `docs/chaos/plan-tools.md` were built on 2026-10-03 as 
 
 ## Mutation testing
 
-**In:** `.github/workflows/mutants.yml`, every Monday and on demand, runs cargo-mutants 27.1 on properpin-core and properpin-sys in Fedora 44, as an unprivileged user. Each mutant is tested against the core, sys and helper tests, since the helper's tests drive much of core. It only reports: missed mutants and timeouts keep the job green, and their list goes into the job summary and an artifact. `just mutants` runs the same locally, on half the CPUs. cargo-mutants is installed on the development machine with `cargo install`, with the owner's agreement.
+**In:** `.github/workflows/mutants.yml`, every Monday and on demand, runs cargo-mutants 27.1 on screenlock-pin-core and screenlock-pin-sys in Fedora 44, as an unprivileged user. Each mutant is tested against the core, sys and helper tests, since the helper's tests drive much of core. It only reports: missed mutants and timeouts keep the job green, and their list goes into the job summary and an artifact. `just mutants` runs the same locally, on half the CPUs. cargo-mutants is installed on the development machine with `cargo install`, with the owner's agreement.
 
 **The first run** (local, the same settings as CI, 425 mutants in 13 minutes): 322 caught, 49 missed, 1 timeout, 53 unviable. The timeout is `lock` never giving up (its deadline guard replaced by `false`), which the held-lock test is there to catch, so it counts as caught. Of the 49 missed, 20 now fail a new test, since each was a real behaviour nothing pinned down:
 

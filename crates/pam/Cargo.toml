@@ -1,6 +1,6 @@
 [package]
-name = "pam_properpin"
-description = "properpin's PAM module, pam_properpin.so: a PIN for the KDE lock screen, within limits."
+name = "pam_screenlock_pin"
+description = "screenlock-pin's PAM module, pam_screenlock_pin.so: a PIN for the KDE lock screen, within limits."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,18 +8,18 @@ publish.workspace = true
 license.workspace = true
 
 [lib]
-# cdylib is the module libpam loads. Cargo names it libpam_properpin.so; installing renames it
-# to pam_properpin.so. rlib lets the tests in tests/ build against it.
+# cdylib is the module libpam loads. Cargo names it libpam_screenlock_pin.so; installing renames it
+# to pam_screenlock_pin.so. rlib lets the tests in tests/ build against it.
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 libc.workspace = true
-properpin-core.workspace = true
-properpin-sys.workspace = true
+screenlock-pin-core.workspace = true
+screenlock-pin-sys.workspace = true
 
 [dev-dependencies]
 pamharness.workspace = true
-properpin-sys.workspace = true
+screenlock-pin-sys.workspace = true
 tempfile.workspace = true
 
 [lints]

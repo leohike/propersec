@@ -25,18 +25,18 @@ If failed PIN attempts were not followed by a successful unlock within a time li
 
 Two possible shapes, which can coexist:
 
-- **A button in the notification, "Disable PIN".** The helper can disarm the PIN until the next password unlock. Anything the user runs could call that too, but it only locks the user out of their own PIN. Removing the PIN for good needs root, so the button could run `pkexec properpin remove`, which asks for the password.
+- **A button in the notification, "Disable PIN".** The helper can disarm the PIN until the next password unlock. Anything the user runs could call that too, but it only locks the user out of their own PIN. Removing the PIN for good needs root, so the button could run `pkexec screenlock-pin remove`, which asks for the password.
 - **Automatic, with no UI at all.** Suspicious failures disarm the PIN by themselves: if an unresolved failure is older than 60 seconds at the next attempt, the PIN is refused and the password required. This is pure helper logic, works without the agent, and the notification, where there is one, then explains why the password was needed.
 
 ## Caveats
 
-- **A reboot erases the evidence.** The state lives in `/run/properpin`, so a reboot wipes the record of the failures. The PIN is disarmed after a reboot anyway, but the user would never learn about the attempts. Keeping events across reboots needs a persistent place the helper's group can write, such as `/var/lib/properpin`, or the agent reading the journal.
+- **A reboot erases the evidence.** The state lives in `/run/screenlock-pin`, so a reboot wipes the record of the failures. The PIN is disarmed after a reboot anyway, but the user would never learn about the attempts. Keeping events across reboots needs a persistent place the helper's group can write, such as `/var/lib/screenlock-pin`, or the agent reading the journal.
 - **A lucky guess looks like a typo.** An attacker who gets the PIN right within 60 seconds of their first miss isn't flagged. With the failure limit, that is 3 in 60 million for two random words, 3 in 10,000 for 4 digits.
 - **Suspend can raise false alarms.** A typo, then closing the lid, flags the attempt when the machine resumes hours later. Measuring the 60 seconds on a clock that stops during suspend (`CLOCK_MONOTONIC` rather than `CLOCK_BOOTTIME`) would avoid it.
-- **The agent is new territory.** It would be properpin's first component in the user's session, with D-Bus, notifications and autostart. It is the bigger part of the work, and only the real desktop can test it.
+- **The agent is new territory.** It would be screenlock-pin's first component in the user's session, with D-Bus, notifications and autostart. It is the bigger part of the work, and only the real desktop can test it.
 - **Code running as the user can hide the alert.** It can stop the agent or dismiss the notification. Such code can unlock the session directly anyway, so this changes nothing for the walk-up attacker the alert is for.
 
 ## Where it fits
 
-- **The helper side** is built as the failure budget: suspicious failures are recorded, logged and shown by `properpin status`, and disable the PIN past a limit. What remains is an `events` request for the agent.
+- **The helper side** is built as the failure budget: suspicious failures are recorded, logged and shown by `screenlock-pin status`, and disable the PIN past a limit. What remains is an `events` request for the agent.
 - **The notification agent and its button** would be a separate, later item, tested on the real system.
