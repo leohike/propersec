@@ -91,15 +91,16 @@ jobs:
         run: sudo podman build --quiet --ignorefile testing/podman/Containerfile.containerignore -f testing/podman/Containerfile -t properpin-systest .
       - name: Run the scenarios
         run: sudo podman run --rm --init --network=none properpin-systest
-      # The same as `just release`: the build install.sh installs by default, checked to
-      # load only the system's libraries. podman build --output leaves target/properpin root's and
-      # 0700 under sudo, which the runner's own user can't look into ("no build in
-      # target/properpin"), so it is handed to that user first, as just release gives it target's mode.
+      # The same as `just release`: the build install.sh installs by default, checked to load only
+      # the system's libraries. Checked in a fresh Fedora 44, with only what check-build needs added
+      # (readelf from binutils): the runner is Ubuntu, whose libcrypt.so.1 isn't the libcrypt.so.2
+      # the build needs, and podman leaves target/properpin root's and 0700 under sudo anyway.
       - name: Release build
         run: |
           sudo podman build --quiet --ignorefile testing/podman/Containerfile.containerignore -f packaging/Containerfile -o target/properpin .
-          sudo chown -R "$(id -u):$(id -g)" target
-          packaging/install.sh check-build --from target/properpin
+          sudo podman run --rm --security-opt label=disable -v "$PWD/target/properpin:/build:ro" -v "$PWD/packaging:/packaging:ro" \
+            registry.fedoraproject.org/fedora:44 \
+            bash -c 'dnf -y -q install --setopt=install_weak_deps=False binutils diffutils && /packaging/install.sh check-build --from /build'
       # install.sh uninstall against deliberately broken installs, a fresh container per case.
       - name: Run the uninstall cases
         run: sudo testing/podman/uninstall-cases.sh
