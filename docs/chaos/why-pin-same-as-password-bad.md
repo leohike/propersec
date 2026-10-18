@@ -4,7 +4,7 @@ Written on 2026-10-17. `set` refuses a PIN that is exactly the password, but the
 
 ## The lock screen loses its password path
 
-properpin's PIN line comes first in `/etc/pam.d/kde`, and a match ends the stack. While the PIN is enabled, the password is always taken as the PIN, so `pam_unix`, the housekeeping and the stock `password-auth` lines never run at the lock screen. Anything that needs to see the password there never gets it, such as `pam_systemd_home` unlocking a home directory again. With a different PIN, the user can type the password instead; here they can't.
+properpin's PIN line comes first in `/etc/pam.d/kde`, and a match ends the stack. While the PIN is enabled, the password is always taken as the PIN, so `pam_unix`, the PIN unpause and the stock `password-auth` lines never run at the lock screen. Anything that needs to see the password there never gets it, such as `pam_systemd_home` unlocking a home directory again. With a different PIN, the user can type the password instead; here they can't.
 
 ## A leaked password survives the password change
 

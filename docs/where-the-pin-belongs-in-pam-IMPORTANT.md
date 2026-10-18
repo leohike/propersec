@@ -1,6 +1,6 @@
 # Where the PIN belongs in PAM
 
-Written on 2026-10-18. A design direction, not built yet: today properpin's `check` line sits directly in `/etc/pam.d/kde`, just above `auth substack password-auth` (`packaging/kde-auth.pam`). This doc says why the PIN should instead live in a small file of properpin's own, pulled into `kde` with `substack`, with the same gates and after-login hooks as every other way to unlock, and why that matters even on a machine where it changes nothing today. `docs/current-setcred.md` holds a related idea, moving the housekeeping into `pam_sm_setcred`, which fits this layout. Claims are marked "verified" (read in code or seen on the development machine) or "reasoned" (thought through, not tested).
+Written on 2026-10-18. A design direction, not built yet: today properpin's `check` line sits directly in `/etc/pam.d/kde`, just above `auth substack password-auth` (`packaging/kde-auth.pam`). This doc says why the PIN should instead live in a small file of properpin's own, pulled into `kde` with `substack`, with the same gates and after-login hooks as every other way to unlock, and why that matters even on a machine where it changes nothing today. `docs/current-setcred.md` holds a related idea, moving the PIN unpause into `pam_sm_setcred`, which fits this layout. Claims are marked "verified" (read in code or seen on the development machine) or "reasoned" (thought through, not tested).
 
 ## A few terms first
 
@@ -37,7 +37,7 @@ auth  include                       postlogin
 # /etc/pam.d/kde
 auth  sufficient  substack /usr/local/share/properpin/pin-auth
 auth  substack    password-auth
-auth  optional    /usr/local/lib64/security/pam_properpin.so housekeeping
+auth  optional    /usr/local/lib64/security/pam_properpin.so after-password-auth
 auth  include     postlogin
 ```
 
@@ -68,7 +68,7 @@ The PIN gets the same gates and the same after-login hooks as every other way to
 ## Open points
 
 - A test in `crates/pam/tests/stack.rs` for the trap described in the section on the proper shape: with faillock's `preauth` succeeding and the PIN wrong, properpin's file must fail, and so must a `postlogin` with an `optional` line that succeeds.
-- That `sufficient` works on a `substack` line as on a module line, and that the setcred replay after a PIN unlock stops after the first `kde` line, so the housekeeping idea in `docs/current-setcred.md` still holds.
+- That `sufficient` works on a `substack` line as on a module line, and that the setcred replay after a PIN unlock stops after the first `kde` line, so unpausing the PIN in `pam_sm_setcred`, as `docs/current-setcred.md` describes, still holds.
 - That `pam_faillock preauth` really lets everything through when no stack records failures, and what it does when another service, set up by hand, does record them.
 - That clearing `PAM_AUTHTOK` after a correct PIN changes nothing for the real kscreenlocker, which never reads it (shown only with the test harness so far).
 - The sets of `password-auth` lines `add` and `doctor` accept, and their message when they refuse.

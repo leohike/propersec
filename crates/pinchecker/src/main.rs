@@ -1,7 +1,7 @@
 //! `properpin-pinchecker`, the setgid program. See the library (`lib.rs`) for what it answers.
 //!
 //! ```text
-//! properpin-pinchecker check|housekeeping|status
+//! properpin-pinchecker check|unpause|status
 //! ```
 //!
 //! Installed `root:properpin 2755`, setgid to the `properpin` group, with fixed locations: the
@@ -157,7 +157,7 @@ impl Options {
                 return Err(format!("unexpected argument {word:?}"));
             }
         }
-        let request = request.ok_or("no request: expected check, housekeeping or status")?;
+        let request = request.ok_or("no request: expected check, unpause or status")?;
         let dev = match (any_dev, etc, budget) {
             (false, ..) => None,
             (true, Some(etc), Some(budget)) => Some(Dev { etc, budget, owner, log }),

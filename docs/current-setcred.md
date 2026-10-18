@@ -1,10 +1,10 @@
-# Housekeeping through pam_setcred
+# Unpausing the PIN through pam_setcred
 
-Written on 2026-10-18, from a conversation about how to stop the housekeeping from handling the password. Claims are marked "verified" (in this repo's analysis docs or code) or "reasoned" (thought through, not tested). Built the same day, first next to the password check behind a setting, then, once tested on a real lock screen, as the only way: the password check is gone. The sections below the next one are the idea as first written, kept for the reasoning.
+Written on 2026-10-18, from a conversation about how to stop the PIN unpause from handling the password. Claims are marked "verified" (in this repo's analysis docs or code) or "reasoned" (thought through, not tested). Built the same day, first next to the password check behind a setting, then, once tested on a real lock screen, as the only way: the password check is gone. The sections below the next one are the idea as first written, kept for the reasoning.
 
 ## What is built now
 
-The housekeeping line's `pam_sm_authenticate` answers `PAM_IGNORE` at once and never reads `PAM_AUTHTOK`. Its `pam_sm_setcred` asks the pinchecker for `housekeeping`, which now reads nothing on stdin and runs `housekeeping_after_password_unlock`, logging `unlocked with the password, PIN enabled`. Any flag counts. `unix_chkpwd`, the `PasswordCheck` trait, `crates/sys/src/chkpwd.rs`, `--dev-chkpwd` and the stand-in `unix_chkpwd` scripts in the tests are gone. The PAM lines are unchanged, so nobody's `/etc/pam.d/kde` needs editing.
+The `after-password-auth` line's `pam_sm_authenticate` answers `PAM_IGNORE` at once and never reads `PAM_AUTHTOK`. Its `pam_sm_setcred` asks the pinchecker for `unpause`, which now reads nothing on stdin and runs `unpause_pin_after_password_unlock`, logging `unlocked with the password, PIN enabled`. Any flag counts. `unix_chkpwd`, the `PasswordCheck` trait, `crates/sys/src/chkpwd.rs`, `--dev-chkpwd` and the stand-in `unix_chkpwd` scripts in the tests are gone. The PAM lines are unchanged, so nobody's `/etc/pam.d/kde` needs editing.
 
 On the way there, from commit `6c9b21d` to the tag `both-setcred-and-password`, a setting `pin_unpause_by` (`password-check`, `setcred` or `both`) chose between the two ways, with a recipe to install each; the tests and the VM runs below used it. It is gone too, and a config that still holds it is refused like any unknown setting: the PIN is refused until the line is removed (`properpin doctor` names it).
 
@@ -18,7 +18,7 @@ Then with `just install-setcred`, the same day and VM: no `password correct` or 
 
 ## The problem
 
-Today the `housekeeping` line in `/etc/pam.d/kde` runs after the stock `password-auth` substack whatever it answered, since a failed substack doesn't stop the stack. So it runs after a wrong password too, and to tell a right password from a wrong one it reads `PAM_AUTHTOK`, passes it to the pinchecker, and the pinchecker checks it through `unix_chkpwd`. That makes properpin take the password, check it as the password, and so know that it holds the right one.
+Today the `after-password-auth` line in `/etc/pam.d/kde` runs after the stock `password-auth` substack whatever it answered, since a failed substack doesn't stop the stack. So it runs after a wrong password too, and to tell a right password from a wrong one it reads `PAM_AUTHTOK`, passes it to the pinchecker, and the pinchecker checks it through `unix_chkpwd`. That makes properpin take the password, check it as the password, and so know that it holds the right one.
 
 The `check` line sees every input too, but only as a PIN candidate: it never learns which input was the password. Holding a password we know is right is a bigger risk than that, and is what this idea removes.
 
@@ -50,23 +50,23 @@ There is no `setcred` line type in `/etc/pam.d`. A module on an `auth` line prov
 
 It doesn't call every one. When kscreenlocker starts PAM, libpam reads `/etc/pam.d/kde` once and keeps the list of `auth` lines. `pam_authenticate` goes down the list and remembers each line's answer. `pam_setcred` goes down the same list, calls each module's `pam_sm_setcred`, and decides whether to go on using the answers remembered from `pam_authenticate`, not the new ones (verified from `linux-pam/libpam/pam_dispatch.c` in `docs/analysis/debian-pam-auth-update-and-linux-pam.md`, the setcred replay).
 
-There is one exception, which the first stack test found: it stops where `pam_authenticate` stopped only if the module there doesn't answer `PAM_IGNORE` to `pam_sm_setcred`. `sufficient` means "done" on success, and libpam's "done" in the replay takes a new `PAM_IGNORE` as "no opinion" and goes on down the lines. With the `check` line's `pam_sm_setcred` answering `PAM_IGNORE`, as it did, libpam called the housekeeping line's `pam_sm_setcred` after a PIN unlock too. With `PAM_SUCCESS` the replay ends at the `check` line after a PIN unlock. After a password unlock the `check` line's remembered answer is `PAM_IGNORE`, whose action is to go on whatever it answers now. Verified by `crates/pam/tests/stack.rs` against the system's libpam and by the container test on Fedora 44; the explanation of the code path is reasoned from memory of `pam_dispatch.c` (`_PAM_ACTION_DONE`, `retval != PAM_IGNORE || cached_retval == retval`), not re-read.
+There is one exception, which the first stack test found: it stops where `pam_authenticate` stopped only if the module there doesn't answer `PAM_IGNORE` to `pam_sm_setcred`. `sufficient` means "done" on success, and libpam's "done" in the replay takes a new `PAM_IGNORE` as "no opinion" and goes on down the lines. With the `check` line's `pam_sm_setcred` answering `PAM_IGNORE`, as it did, libpam called the `after-password-auth` line's `pam_sm_setcred` after a PIN unlock too. With `PAM_SUCCESS` the replay ends at the `check` line after a PIN unlock. After a password unlock the `check` line's remembered answer is `PAM_IGNORE`, whose action is to go on whatever it answers now. Verified by `crates/pam/tests/stack.rs` against the system's libpam and by the container test on Fedora 44; the explanation of the code path is reasoned from memory of `pam_dispatch.c` (`_PAM_ACTION_DONE`, `retval != PAM_IGNORE || cached_retval == retval`), not re-read.
 
-`pam_sm_setcred` gets the same four arguments as `pam_sm_authenticate`: the PAM session (`pamh`, through which a module can ask for the user name and the service), the flags (`PAM_REFRESH_CRED` from kscreenlocker), and the words after the module's path on that line (`housekeeping`), so the module knows which line it was called for. The password is not among them; a module could ask libpam for it through `pamh`, and ours wouldn't.
+`pam_sm_setcred` gets the same four arguments as `pam_sm_authenticate`: the PAM session (`pamh`, through which a module can ask for the user name and the service), the flags (`PAM_REFRESH_CRED` from kscreenlocker), and the words after the module's path on that line (`unpause`), so the module knows which line it was called for. The password is not among them; a module could ask libpam for it through `pamh`, and ours wouldn't.
 
 ## The idea
 
-Move the housekeeping's work from `pam_sm_authenticate` of the `housekeeping` line, which runs after a wrong password too, to its `pam_sm_setcred`, which runs only after a real unlock. With properpin's shipped lines (`packaging/kde-auth.pam`):
+Move the PIN unpause's work from `pam_sm_authenticate` of the `after-password-auth` line, which runs after a wrong password too, to its `pam_sm_setcred`, which runs only after a real unlock. With properpin's shipped lines (`packaging/kde-auth.pam`):
 
 ```
 auth  sufficient  pam_properpin.so check          ← line 1
 auth  substack    password-auth                   ← line 2 (pam_env, pam_faildelay, pam_unix, pam_deny)
-auth  optional    pam_properpin.so housekeeping   ← line 3
+auth  optional    pam_properpin.so after-password-auth   ← line 3
 auth  include     postlogin                       ← line 4
 ```
 
 - **After a PIN unlock:** `pam_authenticate` stopped at line 1 (`sufficient` with success means done), so `pam_setcred` calls line 1 and, since line 1 answers `PAM_SUCCESS`, stops. Line 3 is never called.
-- **After a password unlock:** line 1 answered "ignore", line 2 succeeded, lines 3 and 4 ran. `pam_setcred` calls all four, and line 3's `pam_sm_setcred` does the housekeeping.
+- **After a password unlock:** line 1 answered "ignore", line 2 succeeded, lines 3 and 4 ran. `pam_setcred` calls all four, and line 3's `pam_sm_setcred` does the PIN unpause.
 - **After a wrong input:** kscreenlocker doesn't call `pam_setcred`, so nothing happens.
 
 No daemon: the module is already loaded in the lock screen's process and libpam calls it directly.
@@ -74,9 +74,9 @@ No daemon: the module is already loaded in the lock screen's process and libpam 
 ## What would change
 
 - **`packaging/kde-auth.pam`:** the lines stay exactly as they are; only the comment changes. Nothing to edit in anyone's `/etc/pam.d/kde`, and no need to run `integrate-into-pam.sh` again.
-- **`crates/pam/src/pam.rs`:** `pam_sm_authenticate` on the `housekeeping` line answers `PAM_IGNORE` and does nothing. `pam_sm_setcred`, which now always answers `PAM_IGNORE`, does the housekeeping when its argument is `housekeeping`, and never reads `PAM_AUTHTOK`. It should keep answering `PAM_IGNORE` either way.
-- **`crates/pinchecker/src/lib.rs`:** the `housekeeping` request takes no input and checks no password. `unix_chkpwd`, the `PasswordCheck` trait (`crates/core/src/attempt.rs`), `crates/sys/src/chkpwd.rs` and `--dev-chkpwd` go, along with the stand-in `unix_chkpwd` scripts in the tests.
-- **Docs:** the sentence "Nothing the user runs can read a hash or reset a count" in `docs/chaos/security-target.md`, and the parts of `README-BIG.md` that describe the housekeeping, its password check and the tests for it.
+- **`crates/pam/src/pam.rs`:** `pam_sm_authenticate` on the `after-password-auth` line answers `PAM_IGNORE` and does nothing. `pam_sm_setcred`, which now always answers `PAM_IGNORE`, does the PIN unpause when its argument is `after-password-auth`, and never reads `PAM_AUTHTOK`. It should keep answering `PAM_IGNORE` either way.
+- **`crates/pinchecker/src/lib.rs`:** the `unpause` request takes no input and checks no password. `unix_chkpwd`, the `PasswordCheck` trait (`crates/core/src/attempt.rs`), `crates/sys/src/chkpwd.rs` and `--dev-chkpwd` go, along with the stand-in `unix_chkpwd` scripts in the tests.
+- **Docs:** the sentence "Nothing the user runs can read a hash or reset a count" in `docs/chaos/security-target.md`, and the parts of `README-BIG.md` that describe the PIN unpause, its password check and the tests for it.
 
 ## What it would fix
 
@@ -86,15 +86,15 @@ No daemon: the module is already loaded in the lock screen's process and libpam 
 
 ## What we would accept
 
-- Anything the user runs can unpause the PIN and forgive the failures of the last 90 seconds, by asking the pinchecker for `housekeeping` directly, and probably also by running `pam_setcred` on the `kde` service itself (reasoned, not tried). The section on why the password check buys no security, above, is why that is fine.
-- A disabled PIN still stays disabled until `properpin enable` or `set`; the housekeeping never lifts it.
+- Anything the user runs can unpause the PIN and forgive the failures of the last 90 seconds, by asking the pinchecker for `unpause` directly, and probably also by running `pam_setcred` on the `kde` service itself (reasoned, not tried). The section on why the password check buys no security, above, is why that is fine.
+- A disabled PIN still stays disabled until `properpin enable` or `set`; the PIN unpause never lifts it.
 - A fingerprint or smartcard unlock still doesn't unpause the PIN, as now.
 
 ## One line instead of two
 
-It is possible to drop the `housekeeping` line and keep only `check`, but not for free. The `check` line's `pam_sm_setcred` is called after both a PIN unlock and a password unlock, and libpam doesn't tell a module what it answered earlier. So `pam_sm_authenticate` on the `check` line would have to leave a note on the PAM session with `pam_set_data` ("this attempt was the PIN" or "was not"), and `pam_sm_setcred` would read it with `pam_get_data` and do the housekeeping only for "was not".
+It is possible to drop the `after-password-auth` line and keep only `check`, but not for free. The `check` line's `pam_sm_setcred` is called after both a PIN unlock and a password unlock, and libpam doesn't tell a module what it answered earlier. So `pam_sm_authenticate` on the `check` line would have to leave a note on the PAM session with `pam_set_data` ("this attempt was the PIN" or "was not"), and `pam_sm_setcred` would read it with `pam_get_data` and do the PIN unpause only for "was not".
 
-It has to know: a correct PIN forgives only the failures of the 45 seconds before it (`forgive_before_correct_pin`), the password those of the 90 seconds before it (`forgive_before_correct_password`). Running the housekeeping after a PIN unlock would make the PIN forgive 90 seconds too.
+It has to know: a correct PIN forgives only the failures of the 45 seconds before it (`forgive_before_correct_pin`), the password those of the 90 seconds before it (`forgive_before_correct_password`). Running the PIN unpause after a PIN unlock would make the PIN forgive 90 seconds too.
 
 The costs: kscreenlocker keeps one PAM session for many attempts, so the note must be overwritten on every attempt or an old one could be read; it is new `unsafe` code in `crates/pam/src/pam.rs`; and existing installs have the second line, which would have to be removed or left harmless.
 
@@ -106,4 +106,4 @@ Done on 2026-10-18 for the two-line variant, except faillock; the section on wha
 
 - A test in `crates/pam/tests/stack.rs` for the three paths: after a PIN unlock line 3's `pam_sm_setcred` isn't called, after a password unlock it is and the PIN is unpaused, after a wrong input nothing changes. `crates/pamharness` already calls `pam_setcred(PAM_REFRESH_CRED)` after every success, as kscreenlocker does.
 - That libpam calls `pam_sm_setcred` on a line whose remembered answer was "ignore" (line 1 after a password unlock), and on the lines inside the substack, as the setcred replay suggests. Only matters for the one-line variant and for understanding; the test above covers what the two-line variant needs.
-- The container test (`just podman`) on a stock Fedora, and the scenarios in `crates/systest`, which still test the housekeeping through the real `unix_chkpwd`.
+- The container test (`just podman`) on a stock Fedora, and the scenarios in `crates/systest`, which still test the PIN unpause through the real `unix_chkpwd`.

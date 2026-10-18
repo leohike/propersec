@@ -1,4 +1,4 @@
-//! One unlock attempt, and the housekeeping after a password unlock. Refusal is the default: the
+//! One unlock attempt, and unpausing the PIN after a password unlock. Refusal is the default: the
 //! only [`Verdict::Unlock`] comes from a matching PIN while the PIN is enabled.
 
 use std::fmt;
@@ -141,7 +141,7 @@ pub fn try_unlock_with_pin(
     // consecutive failure, both saved before the hash is checked, and taken back on a match. An
     // attempt abandoned halfway (Plasma 6.8 cancels authenticators it switches away from) still
     // counts. A correct password forgives it moments later, through
-    // [`housekeeping_after_password_unlock`].
+    // [`unpause_pin_after_password_unlock`].
     budget.record_failure(now);
     if pin.is_ok() {
         budget.consecutive = budget.consecutive.saturating_add(1);
@@ -172,7 +172,7 @@ pub fn try_unlock_with_pin(
 /// After a password unlock: forgive the recent failures as the user's own (the password itself
 /// among them, when it was short enough to be checked as a PIN), and start the consecutive count
 /// over, which unpauses the PIN. A disabled PIN stays disabled; `judged.disabled` says so.
-pub fn housekeeping_after_password_unlock(store: &impl Store, clock: &impl Clock) -> Result<Judged, Error> {
+pub fn unpause_pin_after_password_unlock(store: &impl Store, clock: &impl Clock) -> Result<Judged, Error> {
     let settings = store.settings()?;
     let _lock = store.lock()?;
     let now = clock.now()?;
@@ -323,7 +323,7 @@ mod tests {
         try_pin(&store, &clock, "correct horse battery stapl");
         clock.advance(60);
         try_pin(&store, &clock, "correct horse battery staple");
-        housekeeping_after_password_unlock(&store, &clock).unwrap();
+        unpause_pin_after_password_unlock(&store, &clock).unwrap();
         assert_eq!(store.pending(), 0);
         clock.advance(3600);
         assert_eq!(try_pin(&store, &clock, PIN), Verdict::Unlock);
@@ -338,7 +338,7 @@ mod tests {
         try_pin(&store, &clock, "1111");
         try_pin(&store, &clock, "2222");
         assert_eq!(try_pin(&store, &clock, "hunter2"), Verdict::WrongPin { consecutive: 3, max: 3 });
-        housekeeping_after_password_unlock(&store, &clock).unwrap();
+        unpause_pin_after_password_unlock(&store, &clock).unwrap();
         assert_eq!((store.consecutive(), store.pending()), (0, 0));
         assert_eq!(try_pin(&store, &clock, PIN), Verdict::Unlock);
     }
@@ -359,7 +359,7 @@ mod tests {
         assert_eq!(rounds, 5);
         assert_eq!(try_pin(&store, &clock, PIN), Verdict::Refused(Refusal::Disabled(crate::Limit::Day(10))));
         // The password doesn't bring it back.
-        assert_eq!(housekeeping_after_password_unlock(&store, &clock).unwrap().disabled, Some(crate::Limit::Day(10)));
+        assert_eq!(unpause_pin_after_password_unlock(&store, &clock).unwrap().disabled, Some(crate::Limit::Day(10)));
         assert_eq!(try_pin(&store, &clock, PIN), Verdict::Refused(Refusal::Disabled(crate::Limit::Day(10))));
         // Root turning it back on: the same PIN works again at once.
         let enabled = store.budget.borrow().enabled(clock.now().unwrap());
@@ -387,7 +387,7 @@ mod tests {
         }
         let store = Damaged(MemoryStore::with_pin());
         let clock = FakeClock::new();
-        assert!(housekeeping_after_password_unlock(&store, &clock).is_err());
+        assert!(unpause_pin_after_password_unlock(&store, &clock).is_err());
         assert!(try_unlock_with_pin(&store, &PlainHasher, &clock, PIN.as_bytes()).is_err());
     }
 
@@ -410,7 +410,7 @@ mod tests {
         // A reboot changes nothing: the count is in the budget, on disk. Only the password helps.
         clock.advance(7 * 24 * 3600);
         assert_eq!(try_pin(&store, &clock, PIN), Verdict::Refused(Refusal::Paused { consecutive: 3 }));
-        housekeeping_after_password_unlock(&store, &clock).unwrap();
+        unpause_pin_after_password_unlock(&store, &clock).unwrap();
         assert_eq!(try_pin(&store, &clock, PIN), Verdict::Unlock);
     }
 
@@ -425,7 +425,7 @@ mod tests {
         clock.advance(10);
         try_pin(&store, &clock, PIN);
         assert_eq!(since(), 0);
-        housekeeping_after_password_unlock(&store, &clock).unwrap();
+        unpause_pin_after_password_unlock(&store, &clock).unwrap();
         assert_eq!(since(), 0, "the password only moves it when it resumes a paused PIN");
         for wrong in ["1111", "2222"] {
             try_pin(&store, &clock, wrong);
@@ -437,7 +437,7 @@ mod tests {
         try_pin(&store, &clock, PIN);
         assert_eq!(since(), paused_at, "a refused attempt changes nothing");
         clock.advance(10);
-        housekeeping_after_password_unlock(&store, &clock).unwrap();
+        unpause_pin_after_password_unlock(&store, &clock).unwrap();
         assert_eq!(since(), clock.now().unwrap());
     }
 
@@ -547,7 +547,7 @@ mod tests {
 
     proptest! {
         /// A tiny model of the rules, run against the real `try_unlock_with_pin` and
-        /// `housekeeping_after_password_unlock`: the right PIN unlocks exactly when the model says
+        /// `unpause_pin_after_password_unlock`: the right PIN unlocks exactly when the model says
         /// the PIN isn't paused, and a wrong PIN never does.
         #[test]
         fn the_pin_unlocks_exactly_when_the_model_says_so(events in prop::collection::vec(event(), 0..60)) {
@@ -561,7 +561,7 @@ mod tests {
                 let allowed = consecutive < limit;
                 match event {
                     Event::PasswordUnlock => {
-                        housekeeping_after_password_unlock(&store, &clock).unwrap();
+                        unpause_pin_after_password_unlock(&store, &clock).unwrap();
                         consecutive = 0;
                     }
                     Event::RightPin => {

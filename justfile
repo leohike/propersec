@@ -108,8 +108,8 @@ demo:
     lock_screen cat4859
     for wrong in 1111 2222 3333; do lock_screen "$wrong"; done
     lock_screen cat4859
-    step "lock screen: the correct password, so pam_setcred runs the housekeeping line"
-    "$root/pinchecker" housekeeping </dev/null; said
+    step "lock screen: the correct password, so pam_setcred runs the after-password-auth line"
+    "$root/pinchecker" unpause </dev/null; said
     lock_screen cat4859
     step "properpin status"; properpin status
 

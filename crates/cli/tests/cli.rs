@@ -47,14 +47,14 @@ impl Sandbox {
             .assert()
     }
 
-    /// What the lock screen's housekeeping line does after a password unlock. It must succeed.
-    fn housekeeping(&self) {
+    /// What the lock screen's `after-password-auth` line has the pinchecker do after a password unlock. It must succeed.
+    fn unpause(&self) {
         let status = std::process::Command::new(self.0.path().join("pinchecker"))
-            .arg("housekeeping")
+            .arg("unpause")
             .stdin(std::process::Stdio::null())
             .status()
             .unwrap();
-        assert!(status.success(), "the housekeeping after the password failed");
+        assert!(status.success(), "unpausing the PIN after the password failed");
     }
 
     /// Replace the user's budget with `budget`, the way the pinchecker would have written it.
@@ -207,7 +207,7 @@ fn a_reboot_changes_nothing() {
     }
     // Paused, and still paused whatever happens to memory; the password unpauses it.
     assert!(!unlocks(&sandbox, "cat4859"));
-    sandbox.housekeeping();
+    sandbox.unpause();
     assert!(unlocks(&sandbox, "cat4859"));
 }
 
@@ -245,7 +245,7 @@ fn enable_and_set_bring_a_disabled_pin_back() {
     let disabled = Some(Disabled { limit: Limit::Day(10), at: 1_800_000_000 });
     sandbox.write_budget(&Budget { suspicious: vec![1_800_000_000], total: 10, disabled, ..Budget::default() });
     assert!(!unlocks(&sandbox, "cat4859"), "a disabled PIN never unlocks");
-    sandbox.housekeeping();
+    sandbox.unpause();
     assert!(!unlocks(&sandbox, "cat4859"), "the password doesn't bring a disabled PIN back");
     says(&sandbox.properpin(&["status"], "").success(), ", after 10 suspicious failures within 24 hours");
 

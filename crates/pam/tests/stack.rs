@@ -196,10 +196,10 @@ fn the_pin_unlocks_from_the_start() {
 }
 
 #[test]
-fn the_password_unlocks_and_does_the_housekeeping() {
+fn the_password_unlocks_and_unpauses_the_pin() {
     let sandbox = Sandbox::new();
     sandbox.unlock_with_password();
-    // The password is checked as a PIN first, whatever its length, and the housekeeping forgives it.
+    // The password is checked as a PIN first, whatever its length, and unpausing the PIN forgives it.
     assert!(sandbox.log().contains("not the PIN, consecutive failure 1 of 3"), "{}", sandbox.log());
     assert!(sandbox.log().contains("unlocked with the password, PIN enabled"), "{}", sandbox.log());
 }
@@ -211,8 +211,12 @@ fn a_wrong_password_never_unpauses_the_pin() {
         assert!(!sandbox.attempt(Password::Wrong, wrong).unlocked());
     }
     assert!(!sandbox.attempt(Password::Wrong, "a wrong password, long enough").unlocked());
-    // A failed stack gets no pam_setcred, so the housekeeping never runs, and nothing is logged.
-    assert!(!sandbox.log().contains("unlocked with the password") && !sandbox.log().contains("housekeeping failed"), "{}", sandbox.log());
+    // A failed stack gets no pam_setcred, so the PIN is never unpaused, and nothing is logged.
+    assert!(
+        !sandbox.log().contains("unlocked with the password") && !sandbox.log().contains("unpausing the PIN failed"),
+        "{}",
+        sandbox.log()
+    );
     assert!(!sandbox.attempt(Password::Wrong, PIN).unlocked());
     // The positive control: the right password logs what the wrong ones mustn't, found by the same matcher.
     sandbox.unlock_with_password();
@@ -221,11 +225,11 @@ fn a_wrong_password_never_unpauses_the_pin() {
 
 const UNPAUSED: &str = "unlocked with the password, PIN enabled";
 
-/// libpam calls the housekeeping line's `pam_sm_setcred` after a password unlock only: the replay
-/// of a PIN unlock ends at the `check` line, which answers `PAM_SUCCESS` for that, and a failed
-/// attempt gets no `pam_setcred` at all.
+/// libpam calls the `after-password-auth` line's `pam_sm_setcred` after a password unlock only:
+/// the replay of a PIN unlock ends at the `check` line, which answers `PAM_SUCCESS` for that, and a
+/// failed attempt gets no `pam_setcred` at all.
 #[test]
-fn setcred_reaches_the_housekeeping_line_after_a_password_unlock_only() {
+fn setcred_reaches_the_after_password_auth_line_after_a_password_unlock_only() {
     let sandbox = Sandbox::new();
     let mut password = sandbox.session(Password::Right);
     let mut pin = sandbox.session(Password::Wrong);
@@ -421,7 +425,7 @@ fn in_own_process(test: &str) -> Option<String> {
     Some(said)
 }
 
-/// What every host must still get: the password unlocks and does the housekeeping, the PIN unlocks and a wrong one doesn't.
+/// What every host must still get: the password unlocks and unpauses the PIN, the PIN unlocks and a wrong one doesn't.
 fn the_usual_answers(sandbox: &Sandbox) {
     let mut password = sandbox.session(Password::Right);
     let mut pin = sandbox.session(Password::Wrong);

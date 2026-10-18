@@ -69,8 +69,8 @@ how_to_remove="just remove-from-pam, or: sudo packaging/integrate-into-pam.sh re
 
 # The two lines from packaging/kde-auth.pam, without its comments, and the stock line between them.
 mapfile -t shipped < <(grep -v -e '^#' -e '^[[:space:]]*$' "$pam_lines")
-if [[ ${#shipped[@]} != 3 || ! ${shipped[1]} =~ $stock_auth || ${shipped[0]} != *"$module_path check" || ${shipped[2]} != *"$module_path housekeeping" ]]; then
-    fail "$pam_lines isn't properpin's check and housekeeping lines around the stock auth substack line"
+if [[ ${#shipped[@]} != 3 || ! ${shipped[1]} =~ $stock_auth || ${shipped[0]} != *"$module_path check" || ${shipped[2]} != *"$module_path after-password-auth" ]]; then
+    fail "$pam_lines isn't properpin's check and after-password-auth lines around the stock auth substack line"
 fi
 above=${shipped[0]} below=${shipped[2]}
 

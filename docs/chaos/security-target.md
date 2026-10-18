@@ -4,7 +4,7 @@ A short assessment of properpin as built, first written on 2026-10-03 and rewrit
 
 ## What properpin is
 
-- **The setgid pinchecker** (`docs/chaos/spec-setgid-helper.md`): hashes `root:properpin 0640`, counts in `/var/lib/properpin`, a root-owned pinchecker setgid to a group with no members, in the style of `unix_chkpwd`. Nothing the user runs can read a hash or reset a count, except through the pinchecker's `housekeeping`, which since 2026-10-18 takes no password (docs/current-setcred.md): asking for it unpauses the PIN and forgives the failures of the last 90 seconds, which the reasoning in this file already concedes to code running as the user.
+- **The setgid pinchecker** (`docs/chaos/spec-setgid-helper.md`): hashes `root:properpin 0640`, counts in `/var/lib/properpin`, a root-owned pinchecker setgid to a group with no members, in the style of `unix_chkpwd`. Nothing the user runs can read a hash or reset a count, except through the pinchecker's `unpause`, which since 2026-10-18 takes no password (docs/current-setcred.md): asking for it unpauses the PIN and forgives the failures of the last 90 seconds, which the reasoning in this file already concedes to code running as the user.
 - **Three consecutive failures pause the PIN** until the next password unlock at the lock screen. The count is on disk, so a reboot doesn't reset it.
 - **The failure budget**: every failure nobody forgave counts across reboots, and 10 a day, 25 a week or 60 per PIN disable it until root turns it back on, after a warning, or sets a new one.
 - **PIN equal to the password refused** at `properpin set`, compared with the hash in `/etc/shadow`.

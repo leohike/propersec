@@ -9,7 +9,7 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use properpin_core::{Error, Log, Secret};
 use properpin_sys::FileLog;
 
-use crate::run::{Transaction, run, run_housekeeping};
+use crate::run::{Transaction, run, run_unpause};
 use crate::{Args, Mode};
 
 const PAM_SUCCESS: c_int = 0;
@@ -60,9 +60,9 @@ pub unsafe extern "C" fn pam_sm_authenticate(pamh: *mut PamHandle, _flags: c_int
                 return PAM_IGNORE;
             }
         };
-        // The housekeeping is pam_sm_setcred's, after a password unlock only; here, after the stock
+        // Unpausing the PIN is pam_sm_setcred's, after a password unlock only; here, after the stock
         // stack whatever it answered, what was typed is never read.
-        if args.mode == Mode::Housekeeping {
+        if args.mode == Mode::AfterPasswordAuth {
             return PAM_IGNORE;
         }
         let file_log = args.log.clone().map(FileLog);
@@ -79,17 +79,17 @@ pub unsafe extern "C" fn pam_sm_authenticate(pamh: *mut PamHandle, _flags: c_int
     .unwrap_or(PAM_IGNORE)
 }
 
-/// properpin sets no credentials, but a call here on the `housekeeping` line is the sign that the
+/// properpin sets no credentials, but a call here on the `after-password-auth` line is the sign that the
 /// lock screen was unlocked through the stock password stack. libpam calls `pam_sm_setcred` only
 /// when the program calls `pam_setcred`, which kscreenlocker does only after a successful
 /// `pam_authenticate`, and it replays the path `pam_authenticate` took (docs/current-setcred.md).
-/// Any flag counts. The pinchecker then does the housekeeping, and logs it. The `housekeeping`
+/// Any flag counts. The pinchecker then unpauses the PIN, and logs it. The `unpause`
 /// line answers `PAM_IGNORE`, which kscreenlocker ignores anyway.
 ///
 /// The `check` line answers `PAM_SUCCESS`, and must: that is what ends the replay there after a
 /// PIN unlock. libpam's `done` action, which `sufficient` takes on success, ends the replay only
 /// if the module's new answer is not `PAM_IGNORE`; with `PAM_IGNORE` it goes on down the lines
-/// and would reach the `housekeeping` line after a PIN unlock too. After a password unlock the
+/// and would reach the `after-password-auth` line after a PIN unlock too. After a password unlock the
 /// `check` line's remembered answer was `PAM_IGNORE`, whose action is to go on, whatever is
 /// answered here. crates/pam/tests/stack.rs shows both.
 ///
@@ -112,7 +112,7 @@ pub unsafe extern "C" fn pam_sm_setcred(pamh: *mut PamHandle, _flags: c_int, arg
             Some(file) => file,
             None => &pam,
         };
-        run_and_log(&pam, &args, log, run_housekeeping);
+        run_and_log(&pam, &args, log, run_unpause);
         PAM_IGNORE
     }))
     .unwrap_or(PAM_IGNORE)
@@ -123,7 +123,7 @@ fn run_and_log(pam: &Pam, args: &Args, log: &dyn Log, run: fn(&Pam, &Args) -> Re
     run(pam, args).unwrap_or_else(|error| {
         let what = match args.mode {
             Mode::Check => "PIN refused",
-            Mode::Housekeeping => "housekeeping failed",
+            Mode::AfterPasswordAuth => "unpausing the PIN failed",
         };
         log.log(&format!("{what}: {error}"));
         false

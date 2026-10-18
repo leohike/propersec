@@ -68,8 +68,8 @@ impl Sandbox {
         self.run(&["check"], typed.as_bytes()).code
     }
 
-    fn housekeeping(&self) {
-        assert_eq!(self.run(&["housekeeping"], b"").code, Some(exit::YES.into()));
+    fn unpause(&self) {
+        assert_eq!(self.run(&["unpause"], b"").code, Some(exit::YES.into()));
     }
 
     fn log(&self) -> String {
@@ -110,20 +110,20 @@ fn the_whole_cycle_through_the_binary() {
         "{}",
         sandbox.status()
     );
-    sandbox.housekeeping();
+    sandbox.unpause();
     assert_eq!(sandbox.check(PIN), YES);
 }
 
-/// `housekeeping` takes no password and reads nothing: whatever is on stdin, it unpauses the PIN.
+/// `unpause` takes no password and reads nothing: whatever is on stdin, it unpauses the PIN.
 /// Anything the user runs can ask for it, which docs/chaos/security-target.md accepts.
 #[test]
-fn housekeeping_reads_nothing_and_unpauses() {
+fn unpause_reads_nothing_and_unpauses() {
     let sandbox = Sandbox::new();
     for wrong in ["1111", "2222", "3333"] {
         sandbox.check(wrong);
     }
     assert_eq!(sandbox.check(PIN), NO);
-    assert_eq!(sandbox.run(&["housekeeping"], b"anything at all").code, YES, "{}", sandbox.log());
+    assert_eq!(sandbox.run(&["unpause"], b"anything at all").code, YES, "{}", sandbox.log());
     assert_eq!(sandbox.check(PIN), YES);
     assert!(sandbox.log().contains("unlocked with the password, PIN enabled"), "{}", sandbox.log());
 }
@@ -132,7 +132,7 @@ fn housekeeping_reads_nothing_and_unpauses() {
 #[test]
 fn dev_chkpwd_is_refused() {
     let sandbox = Sandbox::new();
-    let mut command = sandbox.command(&["housekeeping"]);
+    let mut command = sandbox.command(&["unpause"]);
     command.args(["--dev-chkpwd", "/usr/sbin/unix_chkpwd"]);
     assert_eq!(run(command, b"").code, USAGE);
 }

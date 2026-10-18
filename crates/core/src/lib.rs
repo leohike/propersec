@@ -30,8 +30,8 @@ mod secret;
 mod settings;
 
 pub use attempt::{
-    Clock, Hasher, Log, Store, UnlockAttemptOutcome, Verdict, housekeeping_after_password_unlock, input_that_could_be_a_pin,
-    try_unlock_with_pin,
+    Clock, Hasher, Log, Store, UnlockAttemptOutcome, Verdict, input_that_could_be_a_pin, try_unlock_with_pin,
+    unpause_pin_after_password_unlock,
 };
 pub use budget::{Budget, Counts, DAY, Disabled, Judged, Limit, WEEK};
 pub use error::Error;
@@ -58,9 +58,9 @@ pub const HASH_SETTING: &str = "hash";
 
 /// The setgid pinchecker's exit codes, which are all it answers: the PAM module and the CLI read them.
 pub mod exit {
-    /// `check`: the PIN unlocks. `housekeeping`: done. `status`: printed.
+    /// `check`: the PIN unlocks. `unpause`: done. `status`: printed.
     pub const YES: u8 = 0;
-    /// `check`: not unlocked. `housekeeping`: no PIN set. A clean "no", logged by the pinchecker.
+    /// `check`: not unlocked. `unpause`: no PIN set. A clean "no", logged by the pinchecker.
     pub const NO: u8 = 1;
     /// Bad arguments, or a refused environment: run as root, a terminal on stdin, `--dev-*` options
     /// under setgid.

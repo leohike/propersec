@@ -18,9 +18,10 @@ pub struct Args {
 pub enum Mode {
     /// Before the password stack: is the typed input the PIN, and is the PIN enabled?
     Check,
-    /// After a password unlock, which `pam_sm_setcred` on this line is the sign of: forgive the
-    /// user's own recent failures, and unpause the PIN. `pam_sm_authenticate` does nothing here.
-    Housekeeping,
+    /// After the stock `password-auth` stack, named after it: `pam_sm_setcred` on this line is the
+    /// sign that it unlocked the screen. Asks the pinchecker to unpause the PIN, which also forgives
+    /// the user's own recent failures. `pam_sm_authenticate` does nothing here.
+    AfterPasswordAuth,
 }
 
 impl Mode {
@@ -28,7 +29,7 @@ impl Mode {
     pub fn request(self) -> &'static str {
         match self {
             Self::Check => "check",
-            Self::Housekeeping => "housekeeping",
+            Self::AfterPasswordAuth => "unpause",
         }
     }
 }
@@ -41,7 +42,7 @@ impl Args {
         for word in words {
             match word.split_once('=') {
                 None if word == "check" => mode = Some(Mode::Check),
-                None if word == "housekeeping" => mode = Some(Mode::Housekeeping),
+                None if word == "after-password-auth" => mode = Some(Mode::AfterPasswordAuth),
                 None if word == "test_panic" => test_panic = true,
                 Some(("pinchecker", path)) if path.starts_with('/') => pinchecker = Some(PathBuf::from(path)),
                 Some(("pinchecker", path)) => return Err(format!("pinchecker={path} is not an absolute path")),
@@ -49,7 +50,7 @@ impl Args {
                 _ => return Err(format!("unknown argument {word:?}")),
             }
         }
-        let mode = mode.ok_or("no mode: expected check or housekeeping")?;
+        let mode = mode.ok_or("no mode: expected check or after-password-auth")?;
         Ok(Self { mode, pinchecker: pinchecker.unwrap_or_else(|| INSTALLED_PINCHECKER.into()), log, test_panic })
     }
 }
@@ -62,8 +63,8 @@ mod tests {
     fn parses_the_shipped_lines() {
         let args = Args::parse(["check"]).unwrap();
         assert_eq!(args, Args { mode: Mode::Check, pinchecker: INSTALLED_PINCHECKER.into(), log: None, test_panic: false });
-        let args = Args::parse(["housekeeping"]).unwrap();
-        assert_eq!((args.mode, args.pinchecker), (Mode::Housekeeping, INSTALLED_PINCHECKER.into()));
+        let args = Args::parse(["after-password-auth"]).unwrap();
+        assert_eq!((args.mode, args.pinchecker), (Mode::AfterPasswordAuth, INSTALLED_PINCHECKER.into()));
     }
 
     #[test]
@@ -85,6 +86,10 @@ mod tests {
             // What the lines of versions before 2026-10-18 passed, which the pinchecker now reads itself.
             "check config=/etc/properpin/config",
             "start-accepting-pin",
+            // The after-password-auth line's argument until 2026-10-18.
+            "housekeeping",
+            // The pinchecker request that line makes, which is not a PAM line's mode.
+            "unpause",
         ] {
             assert!(Args::parse(line.split(' ').filter(|word| !word.is_empty())).is_err(), "{line}");
         }

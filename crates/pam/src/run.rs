@@ -40,10 +40,10 @@ pub fn run(transaction: &impl Transaction, args: &Args) -> Result<bool, Error> {
     answer(args, code)
 }
 
-/// After a password unlock (`pam_sm_setcred` on the `housekeeping` line): ask the pinchecker to
+/// After a password unlock (`pam_sm_setcred` on the `after-password-auth` line): ask the pinchecker to
 /// unpause the PIN, sending it nothing. `Ok(true)` when it did.
-pub fn run_housekeeping(transaction: &impl Transaction, args: &Args) -> Result<bool, Error> {
-    debug_assert_eq!(args.mode, Mode::Housekeeping);
+pub fn run_unpause(transaction: &impl Transaction, args: &Args) -> Result<bool, Error> {
+    debug_assert_eq!(args.mode, Mode::AfterPasswordAuth);
     calling_account(transaction)?;
     let code = ask_pinchecker(&args.pinchecker, args.mode.request(), &Secret::new(Vec::new()), args.test_panic)?;
     answer(args, code)

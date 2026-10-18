@@ -64,7 +64,7 @@ const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(60);
 /// A pinchecker whose attempt was killed finishes on its own: at most a second waiting for the lock,
 /// then a hash. Still running after this, it is a bug.
 const PINCHECKER_LINGER: Duration = Duration::from_secs(5);
-/// What the housekeeping logs after a password unlock, through the housekeeping line's
+/// What unpausing the PIN logs after a password unlock, through the `after-password-auth` line's
 /// `pam_sm_setcred`, and never after a PIN unlock or a failure.
 const UNPAUSED: &str = "unlocked with the password";
 
@@ -159,7 +159,7 @@ fn run() -> ExitCode {
     let scenarios: &[(&str, Scenario)] = &[
         ("the check for leftover pincheckers sees one running", the_leftover_check_sees_a_running_pinchecker),
         ("the PIN unlocks from the start, with no password first", the_pin_unlocks_from_the_start),
-        ("the password unlocks and does the housekeeping", the_password_does_the_housekeeping),
+        ("the password unlocks and unpauses the PIN", the_password_unpauses_the_pin),
         ("three wrong PINs pause the PIN until the password, on disk", three_wrong_pins_pause_the_pin),
         ("a wrong password never unpauses the PIN", a_wrong_password_never_unpauses_the_pin),
         ("set refuses the password as a PIN, and the PIN works at once", set_refuses_the_password_and_the_pin_works_at_once),
@@ -178,8 +178,8 @@ fn run() -> ExitCode {
         ("another user can't use or spend someone's PIN", another_user_gets_nothing),
         ("--dev options are refused under setgid", dev_options_are_refused_under_setgid),
         ("a poisoned start changes nothing", a_poisoned_start_changes_nothing),
-        ("the housekeeping asked for directly unpauses the PIN, as accepted", the_housekeeping_needs_no_password),
-        ("pam_setcred reaches the housekeeping line after a password unlock only", setcred_follows_a_password_unlock_only),
+        ("unpause asked for directly unpauses the PIN, as accepted", unpausing_needs_no_password),
+        ("pam_setcred reaches the after-password-auth line after a password unlock only", setcred_follows_a_password_unlock_only),
         ("a missing pinchecker fails closed", a_missing_pinchecker_fails_closed),
         ("an older version's lines keep the password working until add replaces them", an_older_versions_lines_keep_the_password),
         ("status shows your own PIN only", status_shows_your_own_pin),
@@ -220,7 +220,7 @@ fn the_pin_unlocks_from_the_start(world: &World) -> Outcome {
     world.password_unlocks()
 }
 
-fn the_password_does_the_housekeeping(world: &World) -> Outcome {
+fn the_password_unpauses_the_pin(world: &World) -> Outcome {
     world.unlock_with_password()?;
     world.pin_unlocks()
 }
@@ -241,7 +241,7 @@ fn three_wrong_pins_pause_the_pin(world: &World) -> Outcome {
 }
 
 /// The stock stack fails a wrong password, so the lock screen calls no `pam_setcred`, and the
-/// housekeeping never runs.
+/// PIN is never unpaused.
 fn a_wrong_password_never_unpauses_the_pin(world: &World) -> Outcome {
     for wrong in ["1111", "2222", "3333"] {
         world.pin_refused(wrong, "not the PIN")?;
@@ -411,8 +411,8 @@ fn dev_options_are_refused_under_setgid(world: &World) -> Outcome {
         fs::set_permissions(&dir, Permissions::from_mode(0o700)).map_err(message)?;
     }
     let dev = ["--dev-etc", &format!("{SCRATCH}/etc"), "--dev-budget", &format!("{SCRATCH}/var"), "--dev-owner", &user.uid.to_string()];
-    let started = world.as_user(USER, &[&[PINCHECKER, "housekeeping"][..], &dev].concat(), b"anything")?;
-    expect_code(&started, exit::USAGE, "housekeeping with --dev options under setgid")?;
+    let started = world.as_user(USER, &[&[PINCHECKER, "unpause"][..], &dev].concat(), b"anything")?;
+    expect_code(&started, exit::USAGE, "unpause with --dev options under setgid")?;
     let check = world.as_user(USER, &[&[PINCHECKER, "check"][..], &dev].concat(), b"0000")?;
     expect_code(&check, exit::USAGE, "check with --dev options under setgid")?;
     let log = world.syslog.take();
@@ -441,34 +441,35 @@ fn a_poisoned_start_changes_nothing(world: &World) -> Outcome {
     Ok(())
 }
 
-/// Anything the user runs can ask the pinchecker for its housekeeping, with no password, and it
+/// Anything the user runs can ask the pinchecker to unpause the PIN, with no password, and it
 /// unpauses the PIN: docs/chaos/security-target.md accepts that, since code running as the user can
 /// unlock the session and keylog the PIN anyway.
-fn the_housekeeping_needs_no_password(world: &World) -> Outcome {
+fn unpausing_needs_no_password(world: &World) -> Outcome {
     for wrong in ["1111", "2222", "3333"] {
         world.pin_refused(wrong, "not the PIN")?;
     }
     world.pin_refused(PIN, "PIN paused after 3 consecutive failures")?;
-    let done = world.as_user(USER, &[PINCHECKER, "housekeeping"], b"")?;
-    expect_code(&done, exit::YES, "housekeeping asked for directly")?;
+    let done = world.as_user(USER, &[PINCHECKER, "unpause"], b"")?;
+    expect_code(&done, exit::YES, "unpause asked for directly")?;
     world.pin_unlocks()
 }
 
-/// libpam calls the housekeeping line's `pam_sm_setcred` after a password unlock through the real
+/// libpam calls the `after-password-auth` line's `pam_sm_setcred` after a password unlock through the real
 /// pam_unix, and never after a PIN unlock or a wrong input.
 fn setcred_follows_a_password_unlock_only(world: &World) -> Outcome {
     let pin = world.kde(PIN)?;
-    expect(pin.unlocked && !pin.log.contains(UNPAUSED), "the housekeeping ran after the PIN", &pin)?;
+    expect(pin.unlocked && !pin.log.contains(UNPAUSED), "the PIN was unpaused after a PIN unlock", &pin)?;
     let wrong = world.kde("a wrong password, long enough")?;
-    expect(!wrong.unlocked && !wrong.log.contains(UNPAUSED), "the housekeeping ran after a wrong password", &wrong)?;
+    expect(!wrong.unlocked && !wrong.log.contains(UNPAUSED), "the PIN was unpaused after a wrong password", &wrong)?;
     // The positive control, with the same matcher.
     world.unlock_with_password()
 }
 
 /// What this machine had before 2026-10-18: properpin's lines between markers, with a pam_unix line of
-/// their own that only reads what the module asked for, and an argument the module now rejects. A
-/// new install leaves them in place, and they must refuse the PIN alone, never the password, until
-/// integrate-into-pam.sh add replaces them.
+/// their own that only reads what the module asked for, and arguments the module now rejects,
+/// `housekeeping` among them, the `after-password-auth` line's old name. A new install leaves them in place, and
+/// they must refuse the PIN alone, never the password, until integrate-into-pam.sh add replaces
+/// them; the password then doesn't unpause the PIN either.
 fn an_older_versions_lines_keep_the_password(world: &World) -> Outcome {
     let old = "\
 # properpin begin: added by install.sh install; install.sh uninstall removes everything down to the end marker
@@ -480,7 +481,12 @@ auth  optional                       /usr/local/lib64/security/pam_properpin.so 
     fs::write(KDE, format!("{old}{}", world.stock_kde)).map_err(message)?;
     let pin = world.kde(PIN)?;
     expect(!pin.unlocked && pin.log.contains("bad PAM line: unknown argument"), "the old lines didn't refuse the PIN", &pin)?;
-    world.unlock_with_password()?;
+    let password = world.kde(PASSWORD)?;
+    expect(
+        password.unlocked && password.log.contains("bad PAM line: unknown argument \"housekeeping\"") && !password.log.contains(UNPAUSED),
+        "the password didn't unlock, or the old housekeeping line was taken",
+        &password,
+    )?;
     let wrong = world.kde("a wrong password, long enough")?;
     expect(!wrong.unlocked, "a wrong password unlocked", &wrong)?;
     match install_sh(&["check"]) {
@@ -501,7 +507,7 @@ fn a_missing_pinchecker_fails_closed(world: &World) -> Outcome {
     fs::rename(format!("{PINCHECKER}.away"), PINCHECKER).map_err(message)?;
     let (pin, password) = (pin?, password?);
     expect(!pin.unlocked && pin.log.contains("PIN refused:"), "the PIN worked without the pinchecker", &pin)?;
-    expect(password.unlocked && password.log.contains("housekeeping failed:"), "the password didn't unlock", &password)
+    expect(password.unlocked && password.log.contains("unpausing the PIN failed:"), "the password didn't unlock", &password)
 }
 
 fn status_shows_your_own_pin(world: &World) -> Outcome {
@@ -781,7 +787,7 @@ fn one_session_serves_many_attempts(world: &World) -> Outcome {
         || log.matches("unlocked with the PIN").count() != 2
         || !log.contains("consecutive failure 1 of 3")
     {
-        return Err(format!("the log doesn't show the housekeeping, two PIN unlocks and one failure: {}", said()));
+        return Err(format!("the log doesn't show the unpause, two PIN unlocks and one failure: {}", said()));
     }
     // kscreenlocker 6.8 takes an answer within 50 ms for a broken authenticator; the pinchecker makes
     // a correct PIN wait out min_milliseconds_before_pin_unlock, 75 ms with no config.
@@ -1212,7 +1218,7 @@ impl World {
         expect(!fresh.unlocked, "the fresh wrong PIN unlocked", &fresh)?;
         no_pinchecker_left()?;
         let log = fresh.log + &self.syslog.take();
-        if log.contains("PIN refused:") || log.contains("housekeeping failed") {
+        if log.contains("PIN refused:") || log.contains("unpausing the PIN failed") {
             return Err(format!("an attempt got no answer from the pinchecker:\n{log}"));
         }
         let counted = log.matches("not the PIN, consecutive failure").count();
@@ -1238,12 +1244,12 @@ impl World {
         Ok(attempt)
     }
 
-    /// Unlock the lock screen with the password, whose housekeeping unpauses the PIN.
+    /// Unlock the lock screen with the password, which unpauses the PIN.
     fn unlock_with_password(&self) -> Outcome {
         let attempt = self.kde(PASSWORD)?;
         expect(
             attempt.unlocked && attempt.log.contains(&format!("{UNPAUSED}, PIN enabled")),
-            "the password didn't do the housekeeping",
+            "the password didn't unpause the PIN",
             &attempt,
         )
     }

@@ -144,11 +144,11 @@ fn built() -> &'static Path {
 /// properpin's two lines, as `packaging/kde-auth.pam` ships them, and the stock line they go around.
 const CHECK_LINE: &str = "auth        sufficient    /usr/local/lib64/security/pam_properpin.so check\n";
 const STOCK_LINE: &str = "auth        substack      password-auth\n";
-const HOUSEKEEPING_LINE: &str = "auth        optional      /usr/local/lib64/security/pam_properpin.so housekeeping\n";
+const AFTER_PASSWORD_AUTH_LINE: &str = "auth        optional      /usr/local/lib64/security/pam_properpin.so after-password-auth\n";
 
 /// `kde` with properpin's lines put in around its stock substack line.
 fn integrated(kde: &str) -> String {
-    kde.replacen(STOCK_LINE, &format!("{CHECK_LINE}{STOCK_LINE}{HOUSEKEEPING_LINE}"), 1)
+    kde.replacen(STOCK_LINE, &format!("{CHECK_LINE}{STOCK_LINE}{AFTER_PASSWORD_AUTH_LINE}"), 1)
 }
 
 /// properpin's lines as versions before 2026-10-18 wrote them, the latest first: between markers, with
@@ -240,6 +240,22 @@ fn adding_twice_is_harmless() {
     assert_eq!(root.kde_text(), integrated(STOCK_KDE), "installing again leaves them as they are");
 }
 
+/// The two lines as shipped until the `after-password-auth` line's argument was renamed on 2026-10-18, from
+/// `housekeeping`: check and install say they aren't this version's, and add replaces them.
+#[test]
+fn add_replaces_the_lines_with_the_old_argument_name() {
+    let root = FakeRoot::new();
+    let old = integrated(STOCK_KDE).replace("pam_properpin.so after-password-auth\n", "pam_properpin.so housekeeping\n");
+    assert_ne!(old, integrated(STOCK_KDE));
+    fs::write(root.kde(), &old).unwrap();
+    let said = root.ok("install");
+    assert!(said.contains("not exactly the ones this version ships"), "{said}");
+    assert_eq!(root.pam("check").0, Some(1));
+    root.pam_ok("add");
+    assert_eq!(root.kde_text(), integrated(STOCK_KDE));
+    assert_eq!(fs::read_to_string(root.copy()).unwrap(), STOCK_KDE);
+}
+
 /// An older version's lines stay where they are through install, which says so, and add replaces
 /// them, markers and pam_unix line included.
 #[test]
@@ -278,7 +294,7 @@ fn add_refuses_an_unexpected_pam_file_and_changes_nothing() {
         let said = root.pam_refused("add");
         assert!(said.contains(why), "{said}");
         // The lines, for whoever puts them in by hand.
-        assert!(said.contains(CHECK_LINE) && said.contains(HOUSEKEEPING_LINE), "{said}");
+        assert!(said.contains(CHECK_LINE) && said.contains(AFTER_PASSWORD_AUTH_LINE), "{said}");
         assert!(!root.copy().exists());
     }
     let root = FakeRoot::new();
@@ -300,7 +316,7 @@ fn remove_takes_out_every_properpin_line_and_nothing_else() {
     root.ok("install");
     let own = "auth        sufficient    pam_unix.so try_first_pass\n# an admin's note\n";
     let messy = format!(
-        "{HOUSEKEEPING_LINE}{CHECK_LINE}{own}{}{CHECK_LINE}auth   [success=ok default=die]   pam_unix.so use_first_pass\n# properpin end\n",
+        "{AFTER_PASSWORD_AUTH_LINE}{CHECK_LINE}{own}{}{CHECK_LINE}auth   [success=ok default=die]   pam_unix.so use_first_pass\n# properpin end\n",
         integrated(STOCK_KDE)
     );
     fs::write(root.kde(), &messy).unwrap();
