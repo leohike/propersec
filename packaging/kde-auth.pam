@@ -11,10 +11,12 @@
 #                 min_milliseconds_before_pin_unlock after the pinchecker started (kscreenlocker 6.8
 #                 takes a faster answer for a broken authenticator); anything else is ignored at
 #                 once, and the stock stack checks the same input as the password, faillock and all
-#   housekeeping  runs after the stock stack whatever it answered, since a failed substack doesn't
-#                 stop the stack: the pinchecker checks the password again through unix_chkpwd, and
-#                 only if it is right forgives the user's own recent failures, the password among
-#                 them, and unpauses the PIN
+#   housekeeping  forgives the user's own recent failures, the password among them, and unpauses
+#                 the PIN, after a password unlock. pin_unpause_by in /etc/properpin/config says
+#                 how it knows: password-check (the default) runs after the stock stack whatever it
+#                 answered, since a failed substack doesn't stop the stack, and the pinchecker
+#                 checks the password again through unix_chkpwd; setcred waits for pam_setcred,
+#                 which libpam replays down to this line only after the stock stack succeeded
 auth        sufficient    /usr/local/lib64/security/pam_properpin.so check
 auth        substack      password-auth
 auth        optional      /usr/local/lib64/security/pam_properpin.so housekeeping

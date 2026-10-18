@@ -4,6 +4,7 @@
 //! `packaging/kde-auth.pam` with only two things swapped: the module path points at the freshly built
 //! `.so`, given `pinchecker=` with a script that runs the freshly built `properpin-pinchecker` against
 //! the sandbox (through its `--dev-*` options, which it accepts here because it isn't setgid), and
+//! `settings=` with the sandbox's config, which the module reads `pin_unpause_by` from, and
 //! the stock `password-auth` substack becomes one of two stand-ins, `pam_permit` (the password was
 //! right) or `pam_deny` (it was wrong). The control columns are the shipped ones.
 //!
@@ -106,6 +107,24 @@ impl Sandbox {
         fs::read_to_string(self.path("log")).unwrap_or_default()
     }
 
+    /// What was logged since `before`, the length of the log then.
+    fn log_since(&self, before: usize) -> String {
+        self.log().get(before..).unwrap_or_default().to_owned()
+    }
+
+    /// The global config, as root would write it.
+    fn config(&self, text: &str) {
+        fs::write(self.path("etc/config"), text).unwrap();
+        fs::set_permissions(self.path("etc/config"), Permissions::from_mode(0o644)).unwrap();
+    }
+
+    /// A `unix_chkpwd` that leaves a mark when run, and refuses everything.
+    fn chkpwd_that_must_not_run(&self) -> PathBuf {
+        let mark = self.path("chkpwd-ran");
+        self.script("unix_chkpwd", &format!("#!/bin/sh\ntouch {}\nexit 1\n", mark.display()));
+        mark
+    }
+
     /// Write the `kde` service: the shipped lines, sandboxed, with `extra` added to both module lines.
     fn stack(&self, password: Password, extra: &str) {
         self.stack_as("kde", password, extra);
@@ -113,9 +132,10 @@ impl Sandbox {
 
     fn stack_as(&self, service: &str, password: Password, extra: &str) {
         let module = format!(
-            "{} pinchecker={} log={} {extra} ",
+            "{} pinchecker={} settings={} log={} {extra} ",
             built().join("libpam_properpin.so").display(),
             self.path("pinchecker").display(),
+            self.path("etc/config").display(),
             self.path("log").display()
         );
         let substack = match password {
@@ -218,6 +238,79 @@ fn a_wrong_password_never_unpauses_the_pin() {
     // The positive control: the right password logs what the wrong ones mustn't, found by the same matcher.
     sandbox.unlock_with_password();
     assert!(sandbox.log().contains("password correct"), "{}", sandbox.log());
+}
+
+const SETCRED_LINE: &str = "pam_setcred(PAM_REFRESH_CRED) after a password unlock";
+const BY_SETCRED: &str = "unlocked through the password stack (setcred), PIN enabled";
+
+/// libpam calls the housekeeping line's `pam_sm_setcred` after a password unlock only: the replay
+/// of a PIN unlock ends at the `check` line, and a failed attempt gets no `pam_setcred` at all. In
+/// the default mode it only logs, and the password check still does the housekeeping.
+#[test]
+fn setcred_reaches_the_housekeeping_line_after_a_password_unlock_only() {
+    let sandbox = Sandbox::new();
+    let mut password = sandbox.session(Password::Right);
+    let mut pin = sandbox.session(Password::Wrong);
+    for (right, typed, unlocks, reaches) in
+        [(false, PIN, true, false), (false, "1111", false, false), (true, PASSWORD, true, true), (true, PIN, true, false)]
+    {
+        let before = sandbox.log().len();
+        let attempt = if right { password.authenticate(typed) } else { pin.authenticate(typed) };
+        let said = sandbox.log_since(before);
+        assert_eq!(attempt.unlocked(), unlocks, "{typed}: {said}");
+        assert_eq!(said.contains(SETCRED_LINE), reaches, "{typed}: {said}");
+    }
+    assert!(sandbox.log().contains(&format!("{SETCRED_LINE}; pin_unpause_by is password-check")), "{}", sandbox.log());
+    assert!(sandbox.log().contains("password correct, PIN enabled") && !sandbox.log().contains(BY_SETCRED), "{}", sandbox.log());
+}
+
+/// With `pin_unpause_by = setcred` the housekeeping line never reads or checks the password: a wrong
+/// one changes nothing, and the right one unpauses the PIN through `pam_sm_setcred`.
+#[test]
+fn with_setcred_the_password_is_never_checked() {
+    let sandbox = Sandbox::new();
+    sandbox.config("pin_unpause_by = setcred\n");
+    let mark = sandbox.chkpwd_that_must_not_run();
+    for wrong in ["1111", "2222", "3333"] {
+        assert!(!sandbox.attempt(Password::Wrong, wrong).unlocked());
+    }
+    assert!(!sandbox.attempt(Password::Wrong, "a wrong password, long enough").unlocked());
+    assert!(!sandbox.attempt(Password::Wrong, PIN).unlocked(), "a wrong password unpaused the PIN: {}", sandbox.log());
+    let before = sandbox.log().len();
+    assert!(sandbox.attempt(Password::Right, PASSWORD).unlocked());
+    let said = sandbox.log_since(before);
+    assert!(said.contains(&format!("{SETCRED_LINE}; pin_unpause_by is setcred")) && said.contains(BY_SETCRED), "{said}");
+    assert!(sandbox.attempt(Password::Wrong, PIN).unlocked(), "{}", sandbox.log());
+    let log = sandbox.log();
+    assert!(!log.contains("password correct") && !log.contains("wrong password") && !log.contains("housekeeping failed"), "{log}");
+    assert!(!mark.exists(), "unix_chkpwd ran");
+}
+
+/// With `both`, each path does the housekeeping, the password check first.
+#[test]
+fn with_both_each_path_does_the_housekeeping() {
+    let sandbox = Sandbox::new();
+    sandbox.config("pin_unpause_by = both\n");
+    for wrong in ["1111", "2222", "3333"] {
+        assert!(!sandbox.attempt(Password::Wrong, wrong).unlocked());
+    }
+    sandbox.unlock_with_password();
+    let log = sandbox.log();
+    let (checked, setcred) = (log.find("password correct, PIN enabled"), log.find(BY_SETCRED));
+    assert!(checked.is_some() && setcred.is_some() && checked < setcred, "{log}");
+    assert!(sandbox.attempt(Password::Wrong, PIN).unlocked());
+}
+
+/// A config the module can't use means the password check, today's behaviour, and says why. The
+/// pinchecker refuses the PIN for the same config, and the password still unlocks.
+#[test]
+fn a_bad_pin_unpause_by_means_the_password_check() {
+    let sandbox = Sandbox::new();
+    sandbox.config("pin_unpause_by = pam\n");
+    assert!(sandbox.attempt(Password::Right, PASSWORD).unlocked());
+    let log = sandbox.log();
+    assert!(log.contains("pin_unpause_by taken as password-check: ") && log.contains("must be password-check, setcred or both"), "{log}");
+    assert!(log.contains(&format!("{SETCRED_LINE}; pin_unpause_by is password-check")), "{log}");
 }
 
 #[test]

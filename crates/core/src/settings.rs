@@ -40,6 +40,47 @@ pub struct Settings {
     /// within 50 ms for a broken authenticator, so below that the PIN stops unlocking. Only a
     /// correct PIN waits: anything else goes on to the password stack, which is slow anyway.
     pub min_milliseconds_before_pin_unlock: u64,
+    /// What unpauses the PIN after a password unlock, and forgives the failures before it.
+    pub pin_unpause_by: UnpauseBy,
+}
+
+/// What tells properpin that the lock screen was unlocked with the password: the `pin_unpause_by`
+/// setting. The setcred path is meant to replace the password check one day
+/// (docs/current-setcred.md); until then both stay, and the password check is the default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum UnpauseBy {
+    /// `password-check`: the housekeeping line, after the stock stack whatever it answered, hands
+    /// what was typed to the pinchecker, which checks it as the password through `unix_chkpwd`.
+    #[default]
+    PasswordCheck,
+    /// `setcred`: libpam calls the housekeeping line's `pam_sm_setcred` only when the lock screen
+    /// calls `pam_setcred`, which kscreenlocker does after a successful unlock alone, and only when
+    /// the stack got past the `check` line, so only after the stock stack took the password. No
+    /// password is read or checked.
+    Setcred,
+    /// `both`: each of the two does the housekeeping, the password check first. For comparing them.
+    Both,
+}
+
+impl UnpauseBy {
+    const NAMES: [(&str, Self); 3] = [("password-check", Self::PasswordCheck), ("setcred", Self::Setcred), ("both", Self::Both)];
+
+    /// Whether the housekeeping line checks what was typed as the password.
+    pub fn by_password_check(self) -> bool {
+        self != Self::Setcred
+    }
+
+    /// Whether the housekeeping line's `pam_sm_setcred` does the housekeeping.
+    pub fn by_setcred(self) -> bool {
+        self != Self::PasswordCheck
+    }
+}
+
+impl fmt::Display for UnpauseBy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let (name, _) = Self::NAMES.iter().find(|(_, value)| value == self).expect("every value has a name");
+        f.write_str(name)
+    }
 }
 
 impl Default for Settings {
@@ -56,6 +97,7 @@ impl Default for Settings {
             max_suspicious_7d: 25,
             max_suspicious_total: 60,
             min_milliseconds_before_pin_unlock: 75,
+            pin_unpause_by: UnpauseBy::PasswordCheck,
         }
     }
 }
@@ -75,6 +117,7 @@ impl fmt::Debug for Settings {
             .field("max_suspicious_7d", &self.max_suspicious_7d)
             .field("max_suspicious_total", &self.max_suspicious_total)
             .field("min_milliseconds_before_pin_unlock", &self.min_milliseconds_before_pin_unlock)
+            .field("pin_unpause_by", &self.pin_unpause_by)
             .finish()
     }
 }
@@ -114,6 +157,7 @@ impl Settings {
                 "max_suspicious_total" => self.max_suspicious_total = in_range(source, key, raw, 1, 100_000)?,
                 // Under 50 ms breaks the PIN on kscreenlocker 6.8; allowed, for other lock screens.
                 "min_milliseconds_before_pin_unlock" => self.min_milliseconds_before_pin_unlock = in_range(source, key, raw, 0, 1000)?,
+                "pin_unpause_by" => self.pin_unpause_by = unpause_by(source, key, raw)?,
                 _ => return Err(Error::UnknownSetting { file: source.into(), key: key.into() }),
             }
         }
@@ -167,6 +211,16 @@ where
     }
 }
 
+/// `raw` as one of the names of [`UnpauseBy`].
+fn unpause_by(source: &str, key: &str, raw: &str) -> Result<UnpauseBy, Error> {
+    UnpauseBy::NAMES.iter().find(|(name, _)| *name == raw).map(|(_, value)| *value).ok_or_else(|| Error::BadValue {
+        file: source.into(),
+        key: key.into(),
+        expected: "password-check, setcred or both".into(),
+        raw: raw.into(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -188,7 +242,8 @@ mod tests {
     fn every_setting_is_read() {
         let text = "max_failures = 5\nmin_pin_length = 6\nrequired_non_digits_count = 1\nhash_cost = 6\n\
                     forgive_before_correct_pin = 30\nforgive_before_correct_password = 60\nmax_suspicious_24h = 5\n\
-                    max_suspicious_7d = 15\nmax_suspicious_total = 50\nmin_milliseconds_before_pin_unlock = 200\n";
+                    max_suspicious_7d = 15\nmax_suspicious_total = 50\nmin_milliseconds_before_pin_unlock = 200\n\
+                    pin_unpause_by = setcred\n";
         let expected = Settings {
             max_failures: 5,
             min_pin_length: 6,
@@ -200,6 +255,7 @@ mod tests {
             max_suspicious_7d: 15,
             max_suspicious_total: 50,
             min_milliseconds_before_pin_unlock: 200,
+            pin_unpause_by: UnpauseBy::Setcred,
             ..Settings::default()
         };
         assert_eq!(apply(text, false).unwrap(), expected);
@@ -219,6 +275,30 @@ mod tests {
         }
         let error = apply("max_failures = 11", false).unwrap_err().to_string();
         assert_eq!(error, "f: max_failures must be a number from 1 to 10, not \"11\"");
+    }
+
+    #[test]
+    fn pin_unpause_by_takes_its_three_names_only() {
+        assert_eq!(Settings::default().pin_unpause_by, UnpauseBy::PasswordCheck);
+        for (text, expected) in [("password-check", UnpauseBy::PasswordCheck), ("setcred", UnpauseBy::Setcred), ("both", UnpauseBy::Both)] {
+            let settings = apply(&format!("pin_unpause_by = {text}"), false).unwrap();
+            assert_eq!(settings.pin_unpause_by, expected);
+            assert_eq!(expected.to_string(), text);
+        }
+        for raw in ["Setcred", "password", "password_check", "1", "setcred both"] {
+            assert!(matches!(apply(&format!("pin_unpause_by = {raw}"), false), Err(Error::BadValue { .. })), "{raw}");
+        }
+        let error = apply("pin_unpause_by = pam", false).unwrap_err().to_string();
+        assert_eq!(error, "f: pin_unpause_by must be password-check, setcred or both, not \"pam\"");
+        assert!(matches!(apply("pin_unpause_by = setcred", true), Err(Error::OnlyTheHash { .. })));
+    }
+
+    #[test]
+    fn each_mode_says_which_path_unpauses() {
+        let paths = |by: UnpauseBy| (by.by_password_check(), by.by_setcred());
+        assert_eq!(paths(UnpauseBy::PasswordCheck), (true, false));
+        assert_eq!(paths(UnpauseBy::Setcred), (false, true));
+        assert_eq!(paths(UnpauseBy::Both), (true, true));
     }
 
     #[test]

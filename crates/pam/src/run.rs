@@ -6,11 +6,12 @@ use std::path::Path;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
-use properpin_core::{Error, Secret, exit};
-use properpin_sys::{Account, current_euid, current_uid};
+use properpin_core::{Error, Log, Secret, UnpauseBy, exit};
+use properpin_sys::{Account, config_settings, current_euid, current_uid};
 
-use crate::Args;
+use crate::args::INSTALLED_CONFIG;
 use crate::pam::DefaultSigchld;
+use crate::{Args, Mode};
 
 /// Far longer than the pinchecker ever takes (a hash, or `unix_chkpwd`, a lock it waits at most a
 /// second for, and the wait before a correct PIN's answer, at most a second). After this it is
@@ -36,11 +37,40 @@ pub fn run(transaction: &impl Transaction, args: &Args) -> Result<bool, Error> {
     calling_account(transaction)?;
     let code = ask_pinchecker(&args.pinchecker, args.mode.request(), &typed, args.test_panic)?;
     drop(typed);
+    answer(args, code)
+}
+
+/// After the stack succeeded (`pam_sm_setcred` on the `housekeeping` line): ask the pinchecker to
+/// unpause the PIN, sending it nothing. `Ok(true)` when it did.
+pub fn run_unlocked(transaction: &impl Transaction, args: &Args) -> Result<bool, Error> {
+    debug_assert_eq!(args.mode, Mode::Housekeeping);
+    calling_account(transaction)?;
+    let code = ask_pinchecker(&args.pinchecker, "unlocked", &Secret::new(Vec::new()), args.test_panic)?;
+    answer(args, code)
+}
+
+fn answer(args: &Args, code: u8) -> Result<bool, Error> {
     match code {
         exit::YES => Ok(true),
         exit::NO => Ok(false),
         other => Err(Error::System(format!("{} answered {other}; its log says why", args.pinchecker.display()))),
     }
+}
+
+/// The config's `pin_unpause_by`, the one setting the module reads itself, since it decides which
+/// of the module's own calls do the housekeeping. Read by the pinchecker's rules: owned by root,
+/// and writable by nobody else; a `settings=` config of the tests may also be the user's. A config
+/// the module can't use means password-check, today's behaviour, and the reason is logged; the
+/// pinchecker refuses the PIN for the same config anyway.
+pub fn unpause_by(args: &Args, log: &dyn Log) -> UnpauseBy {
+    let (path, owners) = match &args.settings {
+        Some(path) => (path.as_path(), vec![0, current_uid()]),
+        None => (Path::new(INSTALLED_CONFIG), vec![0]),
+    };
+    config_settings(path, &owners).map(|settings| settings.pin_unpause_by).unwrap_or_else(|error| {
+        log.log(&format!("pin_unpause_by taken as {}: {error}", UnpauseBy::PasswordCheck));
+        UnpauseBy::PasswordCheck
+    })
 }
 
 /// The user being unlocked, who must be both the user this process runs as and the user PAM is

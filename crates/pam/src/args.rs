@@ -4,12 +4,17 @@ use std::path::PathBuf;
 /// says `pinchecker=`. Only root can write a PAM line, so only root can point it elsewhere.
 pub const INSTALLED_PINCHECKER: &str = "/usr/local/libexec/properpin/properpin-pinchecker";
 
+/// The config the module reads `pin_unpause_by` from, unless the PAM line says `settings=`.
+pub const INSTALLED_CONFIG: &str = "/etc/properpin/config";
+
 /// What the module is asked to do: one PAM line's arguments.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Args {
     pub mode: Mode,
     /// The setgid pinchecker that holds the hashes and the counts.
     pub pinchecker: PathBuf,
+    /// The config, for `pin_unpause_by`, instead of [`INSTALLED_CONFIG`]; tests only.
+    pub settings: Option<PathBuf>,
     pub log: Option<PathBuf>,
     pub test_panic: bool,
 }
@@ -18,8 +23,10 @@ pub struct Args {
 pub enum Mode {
     /// Before the password stack: is the typed input the PIN, and is the PIN enabled?
     Check,
-    /// After the password stack, whatever it answered: if the pinchecker finds the password right,
-    /// forgive the user's own recent failures, and unpause the PIN.
+    /// After the password stack: forgive the user's own recent failures, and unpause the PIN. Done
+    /// by `pam_sm_authenticate`, whatever the stack answered, when the pinchecker finds the
+    /// password right, or by `pam_sm_setcred`, which libpam calls only after the stack succeeded,
+    /// or by both, as the config's `pin_unpause_by` says.
     Housekeeping,
 }
 
@@ -37,7 +44,7 @@ impl Args {
     /// Parse a PAM line's arguments. Anything unknown is an error, never ignored: a typo in the
     /// PAM line must not quietly change what the module does.
     pub fn parse<'a>(words: impl IntoIterator<Item = &'a str>) -> Result<Self, String> {
-        let (mut mode, mut pinchecker, mut log, mut test_panic) = (None, None, None, false);
+        let (mut mode, mut pinchecker, mut settings, mut log, mut test_panic) = (None, None, None, None, false);
         for word in words {
             match word.split_once('=') {
                 None if word == "check" => mode = Some(Mode::Check),
@@ -45,12 +52,14 @@ impl Args {
                 None if word == "test_panic" => test_panic = true,
                 Some(("pinchecker", path)) if path.starts_with('/') => pinchecker = Some(PathBuf::from(path)),
                 Some(("pinchecker", path)) => return Err(format!("pinchecker={path} is not an absolute path")),
+                Some(("settings", path)) if path.starts_with('/') => settings = Some(PathBuf::from(path)),
+                Some(("settings", path)) => return Err(format!("settings={path} is not an absolute path")),
                 Some(("log", file)) => log = Some(PathBuf::from(file)),
                 _ => return Err(format!("unknown argument {word:?}")),
             }
         }
         let mode = mode.ok_or("no mode: expected check or housekeeping")?;
-        Ok(Self { mode, pinchecker: pinchecker.unwrap_or_else(|| INSTALLED_PINCHECKER.into()), log, test_panic })
+        Ok(Self { mode, pinchecker: pinchecker.unwrap_or_else(|| INSTALLED_PINCHECKER.into()), settings, log, test_panic })
     }
 }
 
@@ -61,7 +70,7 @@ mod tests {
     #[test]
     fn parses_the_shipped_lines() {
         let args = Args::parse(["check"]).unwrap();
-        assert_eq!(args, Args { mode: Mode::Check, pinchecker: INSTALLED_PINCHECKER.into(), log: None, test_panic: false });
+        assert_eq!(args, Args { mode: Mode::Check, pinchecker: INSTALLED_PINCHECKER.into(), settings: None, log: None, test_panic: false });
         let args = Args::parse(["housekeeping"]).unwrap();
         assert_eq!((args.mode, args.pinchecker), (Mode::Housekeeping, INSTALLED_PINCHECKER.into()));
     }
@@ -70,6 +79,8 @@ mod tests {
     fn pinchecker_points_elsewhere() {
         let args = Args::parse("check pinchecker=/tmp/sandbox/pinchecker log=/tmp/sandbox/log".split(' ')).unwrap();
         assert_eq!((args.pinchecker, args.log), ("/tmp/sandbox/pinchecker".into(), Some("/tmp/sandbox/log".into())));
+        let args = Args::parse(["housekeeping", "settings=/tmp/sandbox/etc/config"]).unwrap();
+        assert_eq!(args.settings, Some("/tmp/sandbox/etc/config".into()));
     }
 
     #[test]
@@ -78,6 +89,7 @@ mod tests {
             "pinchecker=/h",
             "",
             "check pinchecker=h",
+            "housekeeping settings=etc/config",
             "check etc=/etc/properpin",
             "check debug",
             // What the lines of versions before 2026-10-18 passed, which the pinchecker now reads itself.

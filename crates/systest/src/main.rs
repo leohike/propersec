@@ -66,6 +66,11 @@ const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(60);
 const PINCHECKER_LINGER: Duration = Duration::from_secs(5);
 /// What the housekeeping logs after a correct password, and never after a wrong one.
 const PASSWORD_CORRECT: &str = "password correct";
+/// What the module logs when libpam calls the housekeeping line's `pam_sm_setcred`, which must be
+/// after a password unlock only.
+const SETCRED_LINE: &str = "pam_setcred(PAM_REFRESH_CRED) after a password unlock";
+/// What the pinchecker logs when the setcred path unpauses the PIN.
+const BY_SETCRED: &str = "unlocked through the password stack (setcred), PIN enabled";
 
 type Outcome<T = ()> = Result<T, String>;
 type Scenario = fn(&World) -> Outcome;
@@ -178,6 +183,10 @@ fn run() -> ExitCode {
         ("--dev options are refused under setgid", dev_options_are_refused_under_setgid),
         ("a poisoned start changes nothing", a_poisoned_start_changes_nothing),
         ("the housekeeping checks the password itself", the_housekeeping_checks_the_password_itself),
+        ("pam_setcred reaches the housekeeping line after a password unlock only", setcred_follows_a_password_unlock_only),
+        ("with pin_unpause_by = setcred, only a real password unlock unpauses the PIN", with_setcred_only_a_real_unlock_unpauses),
+        ("with pin_unpause_by = both, each path does the housekeeping", with_both_each_path_does_the_housekeeping),
+        ("the pinchecker's unlocked request changes nothing unless the config says so", unlocked_needs_the_config),
         ("a missing pinchecker fails closed", a_missing_pinchecker_fails_closed),
         ("an older version's lines keep the password working until add replaces them", an_older_versions_lines_keep_the_password),
         ("status shows your own PIN only", status_shows_your_own_pin),
@@ -462,6 +471,64 @@ fn the_housekeeping_checks_the_password_itself(world: &World) -> Outcome {
     world.pin_refused(PIN, "PIN paused after 3 consecutive failures")?;
     let done = world.as_user(USER, &[PINCHECKER, "housekeeping"], PASSWORD.as_bytes())?;
     expect_code(&done, exit::YES, "housekeeping with the password")?;
+    world.pin_unlocks()
+}
+
+/// In the default mode the module only logs from `pam_sm_setcred`, and it must log after a
+/// password unlock, through the real pam_unix, and never after a PIN unlock or a wrong input.
+fn setcred_follows_a_password_unlock_only(world: &World) -> Outcome {
+    let pin = world.kde(PIN)?;
+    expect(pin.unlocked && !pin.log.contains(SETCRED_LINE), "pam_setcred reached the housekeeping line after the PIN", &pin)?;
+    let wrong = world.kde("a wrong password, long enough")?;
+    expect(!wrong.unlocked && !wrong.log.contains(SETCRED_LINE), "pam_setcred after a wrong password", &wrong)?;
+    // The positive control, with the same matcher.
+    let password = world.kde(PASSWORD)?;
+    let said = format!("{SETCRED_LINE}; pin_unpause_by is password-check");
+    expect(password.unlocked && password.log.contains(&said), "no pam_setcred after the password", &password)?;
+    expect(password.log.contains(PASSWORD_CORRECT) && !password.log.contains(BY_SETCRED), "the wrong path did the housekeeping", &password)
+}
+
+/// With `pin_unpause_by = setcred` the housekeeping line never hands the password to the
+/// pinchecker: a wrong one is not even looked at, and the real pam_unix's success alone unpauses.
+fn with_setcred_only_a_real_unlock_unpauses(world: &World) -> Outcome {
+    write_file(&world.config(), "pin_unpause_by = setcred\n", 0, 0, 0o644)?;
+    for wrong in ["1111", "2222", "3333"] {
+        world.pin_refused(wrong, "not the PIN")?;
+    }
+    let wrong = world.kde("a wrong password, long enough")?;
+    let looked = wrong.log.contains("wrong password") || wrong.log.contains(SETCRED_LINE) || wrong.log.contains(BY_SETCRED);
+    expect(!wrong.unlocked && !looked, "the wrong password was looked at, or unpaused the PIN", &wrong)?;
+    world.pin_refused(PIN, "PIN paused after 3 consecutive failures")?;
+    let password = world.kde(PASSWORD)?;
+    expect(password.unlocked && password.log.contains(BY_SETCRED), "the password didn't unpause the PIN through setcred", &password)?;
+    expect(!password.log.contains(PASSWORD_CORRECT), "the pinchecker checked the password", &password)?;
+    let pin = world.kde(PIN)?;
+    expect(pin.unlocked && !pin.log.contains(SETCRED_LINE), "the PIN didn't unlock, or reached pam_setcred", &pin)
+}
+
+fn with_both_each_path_does_the_housekeeping(world: &World) -> Outcome {
+    write_file(&world.config(), "pin_unpause_by = both\n", 0, 0, 0o644)?;
+    for wrong in ["1111", "2222", "3333"] {
+        world.pin_refused(wrong, "not the PIN")?;
+    }
+    let password = world.kde(PASSWORD)?;
+    let (checked, setcred) = (password.log.find(PASSWORD_CORRECT), password.log.find(BY_SETCRED));
+    expect(password.unlocked && checked.is_some() && checked < setcred, "not both, the password check first", &password)?;
+    world.pin_unlocks()
+}
+
+/// `unlocked` takes no password, so anything the user runs can ask for it; at the default it must
+/// change nothing. With setcred it unpauses the PIN, which docs/current-setcred.md accepts.
+fn unlocked_needs_the_config(world: &World) -> Outcome {
+    for wrong in ["1111", "2222", "3333"] {
+        world.pin_refused(wrong, "not the PIN")?;
+    }
+    let done = world.as_user(USER, &[PINCHECKER, "unlocked"], b"")?;
+    expect_code(&done, exit::NO, "unlocked with the default config")?;
+    world.pin_refused(PIN, "PIN paused after 3 consecutive failures")?;
+    write_file(&world.config(), "pin_unpause_by = setcred\n", 0, 0, 0o644)?;
+    let done = world.as_user(USER, &[PINCHECKER, "unlocked"], b"")?;
+    expect_code(&done, exit::YES, "unlocked with pin_unpause_by = setcred")?;
     world.pin_unlocks()
 }
 

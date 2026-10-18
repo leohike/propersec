@@ -1,7 +1,7 @@
 //! `properpin-pinchecker`, the setgid program. See the library (`lib.rs`) for what it answers.
 //!
 //! ```text
-//! properpin-pinchecker check|housekeeping|status
+//! properpin-pinchecker check|housekeeping|unlocked|status
 //! ```
 //!
 //! Installed `root:properpin 2755`, setgid to the `properpin` group, with fixed locations: the

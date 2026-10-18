@@ -16,7 +16,11 @@
 //!                                    password stack, right or wrong. Checked as the password through
 //!                                    unix_chkpwd; if right, the failures of the last moments are
 //!                                    forgiven and the consecutive count starts over, which unpauses
-//!                                    the PIN
+//!                                    the PIN. Only when pin_unpause_by is password-check or both
+//! properpin-pinchecker unlocked      stdin: nothing. The lock screen was just unlocked through the
+//!                                    stock password stack (the module's pam_sm_setcred): the same
+//!                                    housekeeping, with no password checked. Only when
+//!                                    pin_unpause_by is setcred or both; otherwise nothing changes
 //! properpin-pinchecker status        prints the caller's PIN settings, and whether the PIN is
 //!                                    enabled, paused, disabled or refused, and why
 //! ```
@@ -52,6 +56,7 @@ use properpin_sys::{Account, UserFiles, local_time};
 pub enum Request {
     Check,
     Housekeeping,
+    Unlocked,
     Status,
 }
 
@@ -60,6 +65,7 @@ impl Request {
         match word {
             "check" => Some(Self::Check),
             "housekeeping" => Some(Self::Housekeeping),
+            "unlocked" => Some(Self::Unlocked),
             "status" => Some(Self::Status),
             _ => None,
         }
@@ -67,7 +73,7 @@ impl Request {
 
     /// Whether it reads something typed from stdin.
     pub fn reads_input(self) -> bool {
-        self != Self::Status
+        matches!(self, Self::Check | Self::Housekeeping)
     }
 }
 
@@ -154,12 +160,13 @@ pub fn serve<H: Hasher, C: Clock, P: PasswordCheck, L: Log + ?Sized>(
     let result = match request {
         Request::Check => check_pin(&files, caller, typed, context),
         Request::Housekeeping => housekeeping(&files, caller, typed, context),
+        Request::Unlocked => unlocked(&files, caller, context),
         Request::Status => status(&files, context.hasher, context.clock).map(|output| Reply { output, ..Reply::code(exit::YES) }),
     };
     result.unwrap_or_else(|error| {
         let what = match request {
             Request::Check => "PIN refused",
-            Request::Housekeeping => "housekeeping failed",
+            Request::Housekeeping | Request::Unlocked => "housekeeping failed",
             Request::Status => "status failed",
         };
         broken(what, error)
@@ -213,14 +220,48 @@ fn housekeeping<H, C: Clock, P: PasswordCheck, L: Log + ?Sized>(
         context.log.log(&format!("{}: wrong password, nothing changed", caller.name));
         return Ok(Reply::code(exit::NO));
     }
+    unpause(files, caller, "password correct", context)
+}
+
+/// After the lock screen's password stack succeeded, as the module's `pam_sm_setcred` tells it: the
+/// housekeeping, without checking any password. Open to everything the user runs, which could
+/// call it at will; docs/current-setcred.md says why that is acceptable. With `pin_unpause_by`
+/// left at password-check it changes nothing, so the default keeps today's guarantee that only
+/// the right password unpauses the PIN.
+fn unlocked<H, C: Clock, P, L: Log + ?Sized>(
+    files: &UserFiles,
+    caller: &Account,
+    context: &Context<'_, H, C, P, L>,
+) -> Result<Reply, Error> {
+    let settings = files.settings()?;
+    if settings.pin_hash.is_empty() {
+        context.log.log(&format!("{}: no PIN is set, so there is nothing to do", caller.name));
+        return Ok(Reply::code(exit::NO));
+    }
+    if !settings.pin_unpause_by.by_setcred() {
+        context
+            .log
+            .log(&format!("{}: unlock reported, but pin_unpause_by is {}, so nothing changed", caller.name, settings.pin_unpause_by));
+        return Ok(Reply::code(exit::NO));
+    }
+    unpause(files, caller, "unlocked through the password stack (setcred)", context)
+}
+
+/// Forgive the recent failures and unpause the PIN; `why` starts the log line.
+fn unpause<H, C: Clock, P, L: Log + ?Sized>(
+    files: &UserFiles,
+    caller: &Account,
+    why: &str,
+    context: &Context<'_, H, C, P, L>,
+) -> Result<Reply, Error> {
     let judged = housekeeping_after_password_unlock(files, context.clock)?;
     log_judged(&judged, caller, context.log);
     match judged.disabled {
         Some(limit) => context.log.log(&format!(
-            "{}: password correct, but the PIN stays disabled after {limit}; sudo properpin enable or set turns it back on",
+            "{}: {why}, but the PIN stays disabled after {limit}; sudo properpin enable or set turns it back on",
             caller.name
         )),
-        None => context.log.log(&format!("{}: password correct, PIN enabled", caller.name)),
+        None => context.log.log(&format!("{}: {why}, PIN enabled", caller.name)),
     }
     Ok(Reply::code(exit::YES))
 }

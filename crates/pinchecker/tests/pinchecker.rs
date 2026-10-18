@@ -131,6 +131,42 @@ fn a_wrong_password_never_unpauses_the_pin() {
     assert!(sandbox.log().contains("wrong password, nothing changed"), "{}", sandbox.log());
 }
 
+/// `unlocked` takes no password, so with `pin_unpause_by` left at its default it must change nothing:
+/// otherwise anything the user runs could unpause the PIN.
+#[test]
+fn unlocked_changes_nothing_by_default() {
+    let sandbox = Sandbox::new();
+    for wrong in ["1111", "2222", "3333"] {
+        sandbox.check(wrong);
+    }
+    assert_eq!(sandbox.run(&["unlocked"], b"").code, NO);
+    assert_eq!(sandbox.check(PIN), NO);
+    assert!(sandbox.log().contains("unlock reported, but pin_unpause_by is password-check, so nothing changed"), "{}", sandbox.log());
+}
+
+/// With `pin_unpause_by` at setcred or both, `unlocked` unpauses the PIN without checking any
+/// password: a `unix_chkpwd` that leaves a mark when run is never run.
+#[test]
+fn unlocked_unpauses_without_a_password_when_the_config_says_so() {
+    for mode in ["setcred", "both"] {
+        let sandbox = Sandbox::new();
+        let config = sandbox.path("etc/config");
+        fs::write(&config, format!("pin_unpause_by = {mode}\n")).unwrap();
+        fs::set_permissions(&config, Permissions::from_mode(0o644)).unwrap();
+        let mark = sandbox.path("chkpwd-ran");
+        fs::write(sandbox.path("unix_chkpwd"), format!("#!/bin/sh\ntouch {}\nexit 1\n", mark.display())).unwrap();
+        for wrong in ["1111", "2222", "3333"] {
+            sandbox.check(wrong);
+        }
+        assert_eq!(sandbox.check(PIN), NO, "{mode}");
+        // Whatever is on stdin is never read.
+        assert_eq!(sandbox.run(&["unlocked"], b"anything").code, YES, "{mode}: {}", sandbox.log());
+        assert_eq!(sandbox.check(PIN), YES, "{mode}");
+        assert!(sandbox.log().contains("unlocked through the password stack (setcred), PIN enabled"), "{mode}: {}", sandbox.log());
+        assert!(!mark.exists(), "{mode}: unix_chkpwd ran");
+    }
+}
+
 #[test]
 fn input_that_cannot_be_a_pin_is_refused_and_not_counted() {
     let sandbox = Sandbox::new();
