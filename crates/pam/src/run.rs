@@ -6,14 +6,15 @@ use std::path::Path;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
-use properpin_core::{Error, Log, Secret, Settings, exit};
-use properpin_sys::{Account, current_euid, current_uid, global_settings};
+use properpin_core::{Error, Secret, exit};
+use properpin_sys::{Account, current_euid, current_uid};
 
 use crate::Args;
 use crate::pam::DefaultSigchld;
 
-/// Far longer than the pinchecker ever takes (a hash, or `unix_chkpwd`, and a lock it waits at most a
-/// second for). After this it is killed and the PIN refused, so the lock screen never hangs on it.
+/// Far longer than the pinchecker ever takes (a hash, or `unix_chkpwd`, a lock it waits at most a
+/// second for, and the wait before a correct PIN's answer, at most a second). After this it is
+/// killed and the PIN refused, so the lock screen never hangs on it.
 const HELPER_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// What the module needs from the PAM transaction.
@@ -21,16 +22,18 @@ pub trait Transaction {
     /// The user PAM is authenticating.
     fn user(&self) -> Result<String, Error>;
     /// What the user typed, asking for it if no module has yet. Stored by libpam as `PAM_AUTHTOK`,
-    /// so pam_unix reuses it with `use_first_pass` instead of asking again. This is a copy of its
-    /// own, wiped when dropped; libpam's stays for the rest of the stack and libpam wipes it itself
-    /// (docs/chaos/pin-pam-copy.md).
+    /// so pam_unix in the stock stack below reuses it instead of asking again. This is a copy of
+    /// its own, wiped when dropped; libpam's stays for the rest of the stack and libpam wipes it
+    /// itself (docs/chaos/pin-pam-copy.md).
     fn typed(&self) -> Result<Secret, Error>;
 }
 
 /// `Ok(true)` unlocks (for `check`) or did the housekeeping (for `housekeeping`). Everything else refuses.
 pub fn run(transaction: &impl Transaction, args: &Args) -> Result<bool, Error> {
-    calling_account(transaction)?;
+    // Asked for before anything can refuse, so the lines after this one find it whatever happens
+    // here (see the bad PAM line in `pam_sm_authenticate`).
     let typed = transaction.typed()?;
+    calling_account(transaction)?;
     let code = ask_pinchecker(&args.pinchecker, args.mode.request(), &typed, args.test_panic)?;
     drop(typed);
     match code {
@@ -38,21 +41,6 @@ pub fn run(transaction: &impl Transaction, args: &Args) -> Result<bool, Error> {
         exit::NO => Ok(false),
         other => Err(Error::System(format!("{} answered {other}; its log says why", args.pinchecker.display()))),
     }
-}
-
-/// Sleep until `min_milliseconds_before_pin_unlock` from the config has passed since `started`,
-/// when the module was called. For a correct PIN only: kscreenlocker 6.8 takes an answer within
-/// 50 ms for a broken authenticator, and a correct PIN is the one answer that ends the stack with
-/// properpin's time alone. Waiting leaks nothing, since the unlock shows anyway. A config that
-/// can't be read is logged, and the default waited out: the pinchecker read the same file a moment
-/// ago, so this hardly happens, and the PIN was right.
-pub fn wait_before_unlock(config: &Path, started: Instant, log: &impl Log) {
-    let minimum =
-        global_settings(config, current_uid()).map(|settings| settings.min_milliseconds_before_pin_unlock).unwrap_or_else(|error| {
-            log.log(&format!("waiting the default before the PIN unlocks: {error}"));
-            Settings::default().min_milliseconds_before_pin_unlock
-        });
-    std::thread::sleep(Duration::from_millis(minimum).saturating_sub(started.elapsed()));
 }
 
 /// The user being unlocked, who must be both the user this process runs as and the user PAM is

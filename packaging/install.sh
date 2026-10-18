@@ -1,37 +1,36 @@
 #!/usr/bin/env bash
-# properpin's installer.
+# properpin's installer. It never touches /etc/pam.d: integrate-into-pam.sh, next to it, puts
+# properpin's lines into /etc/pam.d/kde and takes them out, and only when you run it.
 #
-#   install.sh install     after a diff and a yes: take properpin out of /etc/pam.d/kde, if it is
-#                          there; install the properpin group, the module, the setgid pinchecker, the
-#                          command, /etc/properpin and /var/lib/properpin; check them; and only then add
-#                          the three lines this version ships. Installing again, or a newer version,
-#                          is the same command. Also removes /run/properpin, which older versions
-#                          used. Then prints what properpin doctor finds in the PINs, budgets and
-#                          config, which install never judges or changes
+#   install.sh install     install the properpin group, the module, the setgid pinchecker, the
+#                          command, /etc/properpin and /var/lib/properpin, and check them. Installing
+#                          again, or a newer version, is the same command. Also removes /run/properpin,
+#                          which older versions used. Then says whether /etc/pam.d/kde has the lines
+#                          this version ships, and prints what properpin doctor finds in the PINs,
+#                          budgets and config, which install never judges or changes
 #   install.sh check       every installed path: kind, mode, owner, same bytes as the build, SELinux label,
 #                          and what the binaries load; that the group has no members and a locked
-#                          password; and that /etc/pam.d/kde has exactly the lines this version ships.
-#                          The PINs, budgets and config are properpin doctor's
+#                          password; and that properpin's lines in /etc/pam.d/kde, if it has any, are
+#                          exactly the ones this version ships. The PINs, budgets and config are
+#                          properpin doctor's
 #   install.sh check-build what the three built files load, as install checks it before it changes
 #                          anything; needs no root, and is what `just release` runs
-#   install.sh uninstall   take properpin out of /etc/pam.d/kde (its lines, or, if they are damaged,
-#                          the copy saved at install, after a diff and a yes), then remove what install
-#                          put in place; keeps /etc/properpin, /var/lib/properpin and the properpin group
+#   install.sh uninstall   remove what install put in place; keeps /etc/properpin, /var/lib/properpin
+#                          and the properpin group. Refuses while /etc/pam.d/kde has properpin's lines,
+#                          since lines naming a deleted module lock the lock screen:
+#                          integrate-into-pam.sh remove takes them out first
 #
 # Options:
 #   --from DIR       where the built libpam_properpin.so, properpin-pinchecker and properpin are
 #                    (default: target/properpin, where `just release` puts them)
-#   --yes            install, uninstall: don't ask (for scripted tests in a container)
 #   --root DIR       tests only: install under DIR instead of /
 #   --owner USER     tests only: who owns the installed files (default: root)
 #   --pinchecker-group GROUP   tests only: the group the pinchecker runs with (default: properpin)
 #
-# install rewrites properpin's lines every time, so lines from an older version never call a newer
-# module. They come out first, so a failure anywhere leaves the lock screen on its stock stack,
-# taking the password only, and go back in only once check passes. With the lines in, a user
-# without a PIN sees no difference: the module steps aside. Nothing ever deletes /etc/pam.d/kde:
-# properpin's lines come out between their two marker lines, and nothing else changes. (Deleting
-# /etc/pam.d/kde would hand the lock screen to the "other" service, which denies everyone.)
+# Each file is replaced by a rename, so a lock screen already using properpin never sees a missing
+# or half-written one. Pieces that don't fit together, after a failure partway or with an older
+# version's lines still in /etc/pam.d/kde, only ever refuse the PIN: the module steps aside from
+# anything it can't use, and the password works as always.
 #
 # Each binary must load its libraries from the system's directories alone, which only root can
 # change: no search path of its own (RPATH, RUNPATH), the system's loader, and every library found
@@ -57,14 +56,13 @@ fail() {
 
 # --- arguments
 
-command="" root=/ owner=root pinchecker_group=properpin from=$repo/target/properpin yes=0
+command="" root=/ owner=root pinchecker_group=properpin from=$repo/target/properpin
 while [[ $# -gt 0 ]]; do
     case $1 in
         --root) root=${2:?--root needs a directory}; shift 2 ;;
         --owner) owner=${2:?--owner needs a user}; shift 2 ;;
         --pinchecker-group) pinchecker_group=${2:?--pinchecker-group needs a group}; shift 2 ;;
         --from) from=${2:?--from needs a directory}; shift 2 ;;
-        --yes) yes=1; shift ;;
         install | check | check-build | uninstall) [[ -z $command ]] || usage; command=$1; shift ;;
         *) usage ;;
     esac
@@ -76,8 +74,8 @@ root=$(realpath -m "$root")
 real=$([[ -z $root ]] && echo 1 || echo 0)
 group=$(id -gn "$owner") || fail "no user named $owner"
 
-# --- what goes where. The PAM lines and the command spell out the same real paths whatever --root
-# is: they describe the installed system, not the directory it was installed into for a test.
+# --- what goes where. The command spells out the same real paths whatever --root is: it describes
+# the installed system, not the directory it was installed into for a test.
 
 module_path=/usr/local/lib64/security/pam_properpin.so
 libexec=/usr/local/libexec/properpin
@@ -91,31 +89,8 @@ budget_dir=/var/lib/properpin
 sysusers=/etc/sysusers.d/properpin.conf
 tmpfiles=/etc/tmpfiles.d/properpin.conf
 pam_file=/etc/pam.d/kde
-pam_backup=$etc/kde.pam.without-properpin
-# Where versions before 2026-10-17, which had separate enable and disable commands, kept it.
-old_pam_backup=$etc/kde.pam.before-enable
-pam_damaged=$etc/kde.pam.damaged
 # The directories install had to create, which uninstall removes again once they are empty.
 created=$etc/install.created-dirs
-pam_lines=$here/kde-auth.pam
-
-# Older versions wrote another text after the same beginning, so the begin marker is found by it.
-begin_prefix="# properpin begin"
-begin_marker="$begin_prefix: added by install.sh install; install.sh uninstall removes everything down to the end marker"
-end_marker="# properpin end"
-stock_auth='^auth[[:space:]]+substack[[:space:]]+password-auth([[:space:]]|$)'
-
-scratch=$(mktemp -d)
-# 1 while install has properpin's lines out of the PAM file, from taking them out to putting them back.
-lines_out=0
-on_exit() {
-    local status=$?
-    rm -rf "$scratch"
-    if [[ $status != 0 && $lines_out == 1 ]]; then
-        echo "install.sh: $pam_file is left without properpin's lines: the lock screen takes the password only, for every user, until install succeeds" >&2
-    fi
-}
-trap on_exit EXIT
 
 built_module=$from/libpam_properpin.so
 built_binary=$from/properpin
@@ -208,105 +183,12 @@ relabel() {
     fi
 }
 
-# Anything of properpin's in stdin: a marker, or a line naming the module.
-mentions_properpin() {
-    grep -qE '^# properpin|pam_properpin'
-}
-
-# The three auth lines from packaging/kde-auth.pam, without its comments, between the markers.
-properpin_block() {
-    echo "$begin_marker"
-    grep -v -e '^#' -e '^[[:space:]]*$' "$pam_lines"
-    echo "$end_marker"
-}
-
-# stdin with properpin's block inserted above the stock auth substack line.
-add_block() {
-    awk -v block="$(properpin_block)" -v stock="$stock_auth" '$0 ~ stock && !done { print block; done = 1 } { print }'
-}
-
-# stdin without properpin's block.
-remove_block() {
-    awk -v begin="$begin_prefix" -v end="$end_marker" 'index($0, begin) == 1 { skip = 1 } !skip { print } $0 == end { skip = 0 }'
-}
-
-# Only properpin's block from stdin, markers included.
-only_block() {
-    awk -v begin="$begin_prefix" -v end="$end_marker" 'index($0, begin) == 1 { keep = 1 } keep { print } $0 == end { keep = 0 }'
-}
-
-# Write to $scratch/without the PAM file without properpin's block, and succeed only if that
-# removes everything of properpin's cleanly: one begin and one end marker, nothing of properpin's
-# left outside them, and the stock auth line still there.
-without_block() {
-    local file=$root$pam_file
-    [[ $(grep -c "^$begin_prefix" "$file") == 1 && $(grep -cxF "$end_marker" "$file") == 1 ]] || return 1
-    remove_block <"$file" >"$scratch/without"
-    ! mentions_properpin <"$scratch/without" && grep -qE "$stock_auth" "$scratch/without"
-}
-
-# Work out the PAM file without anything of properpin's, into $scratch/without, changing nothing
-# yet. $pam_state says what that took: clean (there was nothing of properpin's), block (its block
-# taken out), restore (the file is damaged or missing, or lost its stock auth line, so it is the copy
-# saved at install), or absent (no file and no copy). Fails when it can't be worked out.
-pam_state=""
-without_properpin() {
-    local file=$root$pam_file backup=$root$pam_backup
-    # Versions before 2026-10-17 kept the copy under another name.
-    if [[ -f $root$old_pam_backup && ! -L $root$old_pam_backup && ! -e $backup ]]; then
-        mv "$root$old_pam_backup" "$backup"
-    fi
-    if [[ ! -e $file && ! -e $backup ]]; then
-        pam_state=absent
-    elif [[ -f $file ]] && ! mentions_properpin <"$file" && { grep -qE "$stock_auth" "$file" || [[ ! -e $backup ]]; }; then
-        cp "$file" "$scratch/without"
-        pam_state=clean
-    elif [[ -f $file ]] && without_block; then
-        pam_state=block
-    else
-        [[ -f $backup && ! -L $backup ]] ||
-            fail "$pam_file is damaged or missing, and there is no copy saved at install ($pam_backup); fix it by hand: take out every line naming properpin; nothing was changed"
-        if mentions_properpin <"$backup" || ! grep -qE "$stock_auth" "$backup"; then
-            fail "the copy saved at install ($pam_backup) doesn't look like the stock file; fix $pam_file by hand; nothing was changed"
-        fi
-        cp "$backup" "$scratch/without"
-        pam_state=restore
-    fi
-}
-
-# Write what without_properpin worked out to the PAM file, keeping a damaged file it replaces.
-# Never leaves the PAM file naming a module that is about to be replaced or deleted.
-take_out_of_pam() {
-    case $pam_state in
-        clean | absent) return 0 ;;
-        block) echo "took properpin's lines out of $pam_file" ;;
-        restore)
-            echo "$pam_file is damaged or missing, so it goes back to the copy saved at install"
-            if [[ -f $root$pam_file ]]; then
-                cp "$root$pam_file" "$root$pam_damaged"
-                echo "the damaged file is kept as $pam_damaged"
-            fi
-            ;;
-    esac
-    put "$pam_file" 0644 <"$scratch/without"
-    relabel "$root$pam_file"
-    if [[ $pam_state == restore ]]; then
-        echo "$pam_file is again exactly as it was before properpin's lines went in"
-    fi
-}
-
-# Show what changes in the PAM file and, on the real system, ask before writing it. A missing PAM
-# file shows as empty.
-confirm() {
-    local new=$1
-    diff -u --label "$pam_file" --label "$pam_file (new)" <(cat "$root$pam_file" 2>/dev/null) "$new" || true
-    if [[ $real == 0 || $yes == 1 ]]; then
-        return 0
-    fi
-    [[ -t 0 ]] || fail "no terminal to confirm on; nothing changed (--yes skips the question)"
-    local answer
-    read -r -p "Write $pam_file? Keep a root shell open until you have tested the lock screen. [y/N] " answer
-    [[ $answer == y ]] || fail "nothing changed"
+# What integrate-into-pam.sh check says about the PAM file, in $pam_said, and its exit code, in
+# $pam_code: 0 for exactly this version's lines, 3 for no properpin lines at all, 1 for anything else.
+pam_said="" pam_code=0
+check_pam() {
+    pam_code=0
+    pam_said=$("$here/integrate-into-pam.sh" check --root "${root:-/}" 2>&1) || pam_code=$?
 }
 
 require_root() {
@@ -376,33 +258,11 @@ do_check-build() {
 do_install() {
     require_root
     check_build
-    [[ ! -L $root$pam_file ]] || fail "$pam_file is a symbolic link; nothing was changed"
-    without_properpin
-    [[ $pam_state != absent ]] || fail "$pam_file is missing; nothing was changed"
-    local stock
-    stock=$(grep -cE "$stock_auth" "$scratch/without" || true)
-    [[ $stock == 1 ]] || fail "$pam_file has $stock 'auth substack password-auth' lines, not 1; nothing was changed"
-    grep -qF "$module_path " "$pam_lines" || fail "$pam_lines doesn't load $module_path"
-    add_block <"$scratch/without" >"$scratch/with"
-    # The change must be exactly reversible before it is made.
-    remove_block <"$scratch/with" | cmp -s - "$scratch/without" || fail "uninstall couldn't undo this change; nothing was changed"
-    if cmp -s "$scratch/with" "$root$pam_file"; then
-        echo "$pam_file already has the lines this version ships"
-    else
-        confirm "$scratch/with"
-    fi
-
-    # From here on, anything that fails leaves the lock screen on its stock stack.
-    take_out_of_pam
-    lines_out=1
     make_dirs "$(dirname "$module_path")" "$(dirname "$command_path")" "$(dirname "$sysusers")" "$(dirname "$tmpfiles")" "$(dirname "$libexec")" "$(dirname "$budget_dir")"
     sysusers_conf | put "$sysusers" 0644
     tmpfiles_conf | put "$tmpfiles" 0644
     ensure_group
     own_dir "$libexec"
-    # properpin's alone, so emptied: whatever an older version left there goes, such as the setgid
-    # properpin-helper of versions before the pinchecker's rename.
-    find "$root$libexec" -mindepth 1 -delete
     own_dir "$etc"
     # Added to what an earlier install noted, never replacing it.
     if ((${#created_now[@]})); then
@@ -414,6 +274,9 @@ do_install() {
     put "$module_path" 0755 <"$built_module"
     put "$binary" 0755 <"$built_binary"
     put "$pinchecker" 2755 "$owner:$pinchecker_group" <"$built_pinchecker"
+    # properpin's alone, so anything else goes, such as the setgid properpin-helper of versions
+    # before the pinchecker's rename. Only after the new pinchecker is in place, so there is always one.
+    find "$root$libexec" -mindepth 1 -maxdepth 1 ! -name "$(basename "$binary")" ! -name "$(basename "$pinchecker")" -exec rm -rf -- {} +
     wrapper | put "$command_path" 0755
     relabel "$root$module_path" "$root$libexec" "$root$command_path" "$root$etc" "$root$budget_dir" "$root$sysusers" "$root$tmpfiles"
     if ! check_files; then
@@ -421,13 +284,10 @@ do_install() {
         fail "the installed files don't check out"
     fi
 
-    cp "$scratch/without" "$root$pam_backup.properpin-new"
-    mv -f "$root$pam_backup.properpin-new" "$root$pam_backup"
-    put "$pam_file" 0644 <"$scratch/with"
-    lines_out=0
-    relabel "$root$pam_file" "$root$pam_backup"
-    echo "installed under ${root:-/}; $pam_file has properpin's lines, and was saved without them as $pam_backup"
-    echo "the lock screen offers the PIN to each user who sets one with: sudo properpin set"
+    echo "installed under ${root:-/}"
+    check_pam
+    echo "$pam_said"
+    echo "with the lines in, the lock screen offers the PIN to each user who sets one with: sudo properpin set"
     # Only reported: a PIN doctor finds fault with is refused for its user alone, never for anyone else.
     echo "properpin doctor:"
     "$root$binary" --etc "$root$etc" --budget "$root$budget_dir" --pinchecker "$root$pinchecker" \
@@ -531,36 +391,26 @@ check_files() {
     ((${#problems[@]} == 0))
 }
 
-# properpin's lines in the PAM file, adding to $problems what is wrong.
-check_pam() {
-    local file=$root$pam_file
-    if [[ ! -f $file ]] || ! mentions_properpin <"$file"; then
-        problems+=("$pam_file: has no properpin lines, so the lock screen takes the password only; install again")
-    elif ! without_block; then
-        problems+=("$pam_file: damaged around properpin's lines; install again, or uninstall, which put back the copy saved at install")
-    elif ! diff -q <(properpin_block) <(only_block <"$file") >/dev/null; then
-        problems+=("$pam_file: properpin's lines are not the ones this version ships; install again")
-    fi
-}
-
 do_check() {
     require_root
     check_files || true
     check_pam
+    if [[ $pam_code != 0 && $pam_code != 3 ]]; then
+        problems+=("$pam_said")
+    fi
     if ((${#problems[@]})); then
         printf '%s\n' "${problems[@]}"
         return 1
     fi
-    echo "all properpin files in place under ${root:-/}, and $pam_file has the lines this version ships"
+    echo "all properpin files in place under ${root:-/}"
+    echo "$pam_said"
 }
 
 do_uninstall() {
     require_root
-    without_properpin
-    if [[ $pam_state == block || $pam_state == restore ]]; then
-        confirm "$scratch/without"
-    fi
-    take_out_of_pam
+    check_pam
+    [[ $pam_code == 3 ]] ||
+        fail "$pam_file still has properpin's lines, which would lock the lock screen once the module is gone; take them out first, with just remove-from-pam, or: sudo packaging/integrate-into-pam.sh remove; nothing was removed"
     rm -f "$root$module_path" "$root$command_path" "$root$sysusers" "$root$tmpfiles"
     # properpin's own directory, whatever else ended up in it.
     rm -rf -- "$root$libexec"
@@ -576,9 +426,9 @@ do_uninstall() {
         done < <(sort -r "$root$created")
         rm -f "$root$created"
     fi
-    echo "uninstalled; $etc is kept, with any PINs and the PAM backup, and so are $budget_dir, with each"
-    echo "user's budget of failures, and the $pinchecker_group group those files belong to. To remove them all:"
-    echo "rm -r $etc $budget_dir && groupdel $pinchecker_group"
+    echo "uninstalled; $etc is kept, with any PINs and the copy of $pam_file without properpin's lines, and"
+    echo "so are $budget_dir, with each user's budget of failures, and the $pinchecker_group group those files"
+    echo "belong to. To remove them all: rm -r $etc $budget_dir && groupdel $pinchecker_group"
 }
 
 "do_$command"

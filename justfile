@@ -1,6 +1,8 @@
 # properpin -- a PIN for the KDE lock screen, within limits. Every recipe works in target/, a
 # temporary directory, or a podman container, and never touches this machine's /etc or /run, except
-# install, check and uninstall: they run packaging/install.sh on this machine, through sudo.
+# install, check and uninstall, which run packaging/install.sh on this machine, and
+# integrate-into-pam and remove-from-pam, which run packaging/integrate-into-pam.sh, all through
+# sudo. Only the last two ever touch /etc/pam.d.
 
 # List the recipes
 [private]
@@ -17,17 +19,25 @@ release:
     chmod --reference=target target/properpin
     packaging/install.sh check-build --from target/properpin
 
-# Build the release and install it on this machine, or update an earlier install: install.sh shows the change to /etc/pam.d/kde and asks first, then everything is checked. Installs whatever is checked out, uncommitted edits included. Run as yourself, not with sudo, so podman builds in your own image store
+# Build the release and install it on this machine, or update an earlier install, then check everything. It never touches /etc/pam.d: it ends by saying whether /etc/pam.d/kde has the lines this version ships, and if not, to run integrate-into-pam. Installs whatever is checked out, uncommitted edits included. Run as yourself, not with sudo, so podman builds in your own image store
 install: _not-root release
     @echo "installing properpin $(git describe --always --dirty)"
     sudo packaging/install.sh install
     sudo packaging/install.sh check
 
-# Check what is installed on this machine: every file, the group, and properpin's lines in /etc/pam.d/kde
+# Check what is installed on this machine: every file, the group, and properpin's lines in /etc/pam.d/kde, if it has any
 check: _not-root
     sudo packaging/install.sh check
 
-# Take properpin out of /etc/pam.d/kde on this machine, then remove its files; keeps /etc/properpin, /var/lib/properpin and the properpin group
+# Put properpin's two lines into /etc/pam.d/kde on this machine, or replace an older version's, after showing the change and asking; the PIN works at the lock screen from then on. Saves the file without them as /etc/properpin/kde.pam.without-properpin first
+integrate-into-pam: _not-root
+    sudo packaging/integrate-into-pam.sh add
+
+# Take properpin's lines out of /etc/pam.d/kde on this machine, after showing the change and asking; the lock screen takes the password only from then on
+remove-from-pam: _not-root
+    sudo packaging/integrate-into-pam.sh remove
+
+# Remove properpin's files from this machine; keeps /etc/properpin, /var/lib/properpin and the properpin group. Refuses until remove-from-pam has taken properpin's lines out of /etc/pam.d/kde
 uninstall: _not-root
     sudo packaging/install.sh uninstall
 
@@ -81,12 +91,12 @@ demo:
     lock_screen cat4859
     step "properpin status"; properpin status
 
-# Everything for real in a stock Fedora 44 container: install.sh, the real /etc/pam.d, pam_unix and unix_chkpwd. Never touches this machine's PAM
+# Everything for real in a stock Fedora 44 container: install.sh, integrate-into-pam.sh, the real /etc/pam.d, pam_unix and unix_chkpwd. Never touches this machine's PAM
 podman:
     podman build --quiet --ignorefile testing/podman/Containerfile.containerignore -f testing/podman/Containerfile -t properpin-systest .
     podman run --rm --init --network=none properpin-systest
 
-# install.sh uninstall against deliberately broken installs, one fresh container per case (after podman builds the image)
+# integrate-into-pam.sh remove and install.sh uninstall against deliberately broken installs, one fresh container per case (after podman builds the image)
 podman-uninstall: podman
     testing/podman/uninstall-cases.sh
 

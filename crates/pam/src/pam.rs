@@ -5,12 +5,11 @@
 use std::ffi::{CStr, CString, c_char, c_int};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Mutex, MutexGuard, PoisonError};
-use std::time::Instant;
 
 use properpin_core::{Error, Log, Secret};
 use properpin_sys::FileLog;
 
-use crate::run::{Transaction, run, wait_before_unlock};
+use crate::run::{Transaction, run};
 use crate::{Args, Mode};
 
 const PAM_SUCCESS: c_int = 0;
@@ -37,8 +36,6 @@ unsafe extern "C" {
 /// libpam's contract: `pamh` is a live handle, and `argv` holds `argc` NUL-terminated strings.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pam_sm_authenticate(pamh: *mut PamHandle, _flags: c_int, argc: c_int, argv: *const *const c_char) -> c_int {
-    // kscreenlocker 6.8 times the whole call; a correct PIN waits out the minimum from here.
-    let started = Instant::now();
     let pam = Pam(pamh);
     // A panic must never unwind into libpam, or into the lock screen around it.
     catch_unwind(AssertUnwindSafe(|| {
@@ -53,12 +50,18 @@ pub unsafe extern "C" fn pam_sm_authenticate(pamh: *mut PamHandle, _flags: c_int
                     Some(file) => FileLog(file.into()).log(&line),
                     None => pam.log(&line),
                 }
+                // Asked for all the same, as `run` does first: a line after this one may only read
+                // what was typed, as the `pam_unix.so use_first_pass` of versions before 2026-10-18
+                // does, and finding nothing it would refuse the password too. So a line this
+                // module can't read, such as an older version's after an upgrade, refuses the PIN
+                // alone.
+                drop(pam.typed());
                 return PAM_IGNORE;
             }
         };
         let result = match &args.log {
-            Some(file) => run_and_log(&pam, &args, started, &FileLog(file.clone())),
-            None => run_and_log(&pam, &args, started, &pam),
+            Some(file) => run_and_log(&pam, &args, &FileLog(file.clone())),
+            None => run_and_log(&pam, &args, &pam),
         };
         if result { PAM_SUCCESS } else { PAM_IGNORE }
     }))
@@ -75,21 +78,16 @@ pub unsafe extern "C" fn pam_sm_setcred(_pamh: *mut PamHandle, _flags: c_int, _a
     PAM_IGNORE
 }
 
-/// The pinchecker logs every answer itself; the module logs only what went wrong on its side. A
-/// correct PIN waits out the minimum before unlocking; nothing else waits.
-fn run_and_log(pam: &Pam, args: &Args, started: Instant, log: &impl Log) -> bool {
-    let yes = run(pam, args).unwrap_or_else(|error| {
+/// The pinchecker logs every answer itself; the module logs only what went wrong on its side.
+fn run_and_log(pam: &Pam, args: &Args, log: &impl Log) -> bool {
+    run(pam, args).unwrap_or_else(|error| {
         let what = match args.mode {
             Mode::Check => "PIN refused",
             Mode::Housekeeping => "housekeeping failed",
         };
         log.log(&format!("{what}: {error}"));
         false
-    });
-    if let (true, Mode::Check, Some(config)) = (yes, args.mode, &args.config) {
-        wait_before_unlock(config, started, log);
-    }
-    yes
+    })
 }
 
 /// # Safety

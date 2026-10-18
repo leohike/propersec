@@ -10,9 +10,11 @@
 //!
 //! ```text
 //! properpin-pinchecker check         stdin: what was typed. Exit 0 if it is the PIN and the PIN is
-//!                                    enabled
-//! properpin-pinchecker housekeeping  stdin: the password, just accepted by pam_unix. Checked again
-//!                                    through unix_chkpwd, then the failures of the last moments are
+//!                                    enabled, no sooner than min_milliseconds_before_pin_unlock
+//!                                    after the start
+//! properpin-pinchecker housekeeping  stdin: what was typed at the lock screen, after the stock
+//!                                    password stack, right or wrong. Checked as the password through
+//!                                    unix_chkpwd; if right, the failures of the last moments are
 //!                                    forgiven and the consecutive count starts over, which unpauses
 //!                                    the PIN
 //! properpin-pinchecker status        prints the caller's PIN settings, and whether the PIN is
@@ -35,10 +37,12 @@
 
 use std::io::Read;
 use std::path::PathBuf;
+use std::time::Duration;
 
 pub use properpin_core::PasswordCheck;
 use properpin_core::{
-    Clock, Error, Hasher, Judged, Log, MAX_INPUT_BYTES, Secret, Store, exit, housekeeping_after_password_unlock, try_unlock_with_pin,
+    Clock, Error, Hasher, Judged, Log, MAX_INPUT_BYTES, Secret, Settings, Store, exit, housekeeping_after_password_unlock,
+    try_unlock_with_pin,
 };
 pub use properpin_sys::UnixChkpwd;
 use properpin_sys::{Account, UserFiles, local_time};
@@ -98,16 +102,24 @@ pub fn dev_options_allowed(at_secure: bool, uid: u32, euid: u32, gid: u32, egid:
     !at_secure && uid == euid && gid == egid
 }
 
-/// What the pinchecker answers: an exit code from `properpin_core::exit`, and for `status` some text.
+/// What the pinchecker answers: an exit code from `properpin_core::exit`, for `status` some text,
+/// and for a correct PIN how soon it may answer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Reply {
     pub code: u8,
     pub output: String,
+    /// How long after the pinchecker started the answer may come at the earliest:
+    /// `min_milliseconds_before_pin_unlock` for a correct PIN, and nothing for anything else, which
+    /// goes on to the password at once. kscreenlocker 6.8 takes an answer within 50 ms for a broken
+    /// authenticator, and a correct PIN is the one answer that ends the stack with properpin's time
+    /// alone. Waiting leaks nothing, since the unlock shows anyway. `main.rs` waits it out, once the
+    /// budget is saved and its lock released.
+    pub not_before: Duration,
 }
 
 impl Reply {
     fn code(code: u8) -> Self {
-        Self { code, output: String::new() }
+        Self { code, output: String::new(), not_before: Duration::ZERO }
     }
 }
 
@@ -132,7 +144,8 @@ pub fn serve<H: Hasher, C: Clock, P: PasswordCheck, L: Log + ?Sized>(
     let broken = |what: &str, error: Error| {
         let line = format!("{}: {what}: {error}", caller.name);
         context.log.log(&line);
-        Reply { code: exit::BROKEN, output: if request == Request::Status { line + "\n" } else { String::new() } }
+        let output = if request == Request::Status { line + "\n" } else { String::new() };
+        Reply { output, ..Reply::code(exit::BROKEN) }
     };
     let files = match context.places.files(caller) {
         Ok(files) => files,
@@ -141,7 +154,7 @@ pub fn serve<H: Hasher, C: Clock, P: PasswordCheck, L: Log + ?Sized>(
     let result = match request {
         Request::Check => check_pin(&files, caller, typed, context),
         Request::Housekeeping => housekeeping(&files, caller, typed, context),
-        Request::Status => status(&files, context.hasher, context.clock).map(|output| Reply { code: exit::YES, output }),
+        Request::Status => status(&files, context.hasher, context.clock).map(|output| Reply { output, ..Reply::code(exit::YES) }),
     };
     result.unwrap_or_else(|error| {
         let what = match request {
@@ -162,7 +175,16 @@ fn check_pin<H: Hasher, C: Clock, P, L: Log + ?Sized>(
     let outcome = try_unlock_with_pin(files, context.hasher, context.clock, typed.as_bytes())?;
     log_judged(&outcome.judged, caller, context.log);
     context.log.log(&format!("{}: {}", caller.name, outcome.verdict));
-    Ok(Reply::code(if outcome.verdict.unlocks() { exit::YES } else { exit::NO }))
+    if !outcome.verdict.unlocks() {
+        return Ok(Reply::code(exit::NO));
+    }
+    // The attempt read the same config a moment ago, so this hardly fails; if it does, the PIN was
+    // right all the same, so the default is waited out.
+    let minimum = files.settings().map(|settings| settings.min_milliseconds_before_pin_unlock).unwrap_or_else(|error| {
+        context.log.log(&format!("{}: waiting the default before the PIN unlocks: {error}", caller.name));
+        Settings::default().min_milliseconds_before_pin_unlock
+    });
+    Ok(Reply { not_before: Duration::from_millis(minimum), ..Reply::code(exit::YES) })
 }
 
 fn log_judged<L: Log + ?Sized>(judged: &Judged, caller: &Account, log: &L) {
@@ -171,10 +193,11 @@ fn log_judged<L: Log + ?Sized>(judged: &Judged, caller: &Account, log: &L) {
     }
 }
 
-/// After a password unlock, but only for the right password: `housekeeping` is open to everything
-/// the user runs, so without this check any program could unpause the PIN, start its consecutive
-/// count over and forgive the budget's failures as often as it liked. `unix_chkpwd` checks it, as
-/// pam_unix just did.
+/// After the lock screen's password stack, but only for the right password. The PAM line runs
+/// this after a wrong one too, since the stock stack doesn't stop before it, and `housekeeping` is
+/// open to everything the user runs anyway: without this check any program could unpause the PIN,
+/// start its consecutive count over and forgive the budget's failures as often as it liked.
+/// `unix_chkpwd` checks it, as pam_unix in the stock stack just did.
 fn housekeeping<H, C: Clock, P: PasswordCheck, L: Log + ?Sized>(
     files: &UserFiles,
     caller: &Account,
@@ -334,9 +357,17 @@ mod tests {
 
         fn ask_with(&self, clock: &impl Clock, caller: &Account, request: Request, typed: &str) -> (u8, String, String) {
             let log = Lines::default();
-            let context = Context { places: &self.places, hasher: &Yescrypt, clock, password: &Password, log: &log };
-            let reply = serve(request, caller, &Secret::new(typed.as_bytes().to_vec()), &context);
+            let reply = self.reply_logged(clock, caller, request, typed, &log);
             (reply.code, reply.output, log.0.into_inner().join("\n"))
+        }
+
+        fn reply(&self, request: Request, typed: &str) -> Reply {
+            self.reply_logged(&SystemClock, &self.caller, request, typed, &Lines::default())
+        }
+
+        fn reply_logged(&self, clock: &impl Clock, caller: &Account, request: Request, typed: &str, log: &Lines) -> Reply {
+            let context = Context { places: &self.places, hasher: &Yescrypt, clock, password: &Password, log };
+            serve(request, caller, &Secret::new(typed.as_bytes().to_vec()), &context)
         }
 
         fn write_config(&self, text: &str) {
@@ -394,6 +425,19 @@ mod tests {
         let (code, _, log) = sandbox.ask(Request::Housekeeping, PASSWORD);
         assert_eq!((code, log.as_str()), (exit::YES, "alice: password correct, PIN enabled"));
         assert_eq!(sandbox.ask(Request::Check, PIN).0, exit::YES);
+    }
+
+    /// A correct PIN answers no sooner than the config's minimum after the start, 75 ms by default;
+    /// nothing else waits.
+    #[test]
+    fn only_a_correct_pin_asks_to_wait() {
+        let sandbox = sandbox();
+        assert_eq!(sandbox.reply(Request::Check, PIN).not_before, Duration::from_millis(75));
+        sandbox.write_config("min_milliseconds_before_pin_unlock = 500\n");
+        assert_eq!(sandbox.reply(Request::Check, PIN), Reply { not_before: Duration::from_millis(500), ..Reply::code(exit::YES) });
+        for (request, typed) in [(Request::Check, "1111"), (Request::Housekeeping, PASSWORD), (Request::Status, "")] {
+            assert_eq!(sandbox.reply(request, typed).not_before, Duration::ZERO, "{request:?} {typed:?}");
+        }
     }
 
     #[test]

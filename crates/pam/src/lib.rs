@@ -1,30 +1,29 @@
 //! `pam_properpin.so`: properpin's PAM module, for the lock screen's `auth` stack only.
 //!
-//! Two lines of `/etc/pam.d/kde` call it, around a direct `pam_unix` line (see `packaging/kde-auth.pam`):
+//! Two lines of `/etc/pam.d/kde` call it, around the stock `auth substack password-auth` line,
+//! which stays as it is (see `packaging/kde-auth.pam`):
 //!
 //! ```text
 //! check         Is the typed input the PIN, and is the PIN enabled? Success unlocks, but never
-//!               sooner than min_milliseconds_before_pin_unlock after the module was called;
-//!               anything else returns PAM_IGNORE at once, so pam_unix checks the same input as the
-//!               password.
-//! housekeeping  The password just succeeded: forgive the failures of the last moments as the
-//!               user's own, the password itself among them, and start the consecutive count over,
-//!               which unpauses the PIN.
+//!               sooner than min_milliseconds_before_pin_unlock after the pinchecker started;
+//!               anything else returns PAM_IGNORE at once, so the stock stack checks the same input
+//!               as the password.
+//! housekeeping  After the stock stack, whatever it answered: when the pinchecker finds the password
+//!               right, forgive the failures of the last moments as the user's own, the password
+//!               itself among them, and start the consecutive count over, which unpauses the PIN.
 //! ```
 //!
 //! It decides nothing itself. The hashes and the counts belong to the `properpin` group, out of
 //! the user's reach, and only the setgid pinchecker `properpin-pinchecker` reads them: the module hands it
 //! what was typed through a pipe and reads its exit code, the way pam_unix uses `unix_chkpwd`.
 //!
-//! Arguments, all spelled out in the PAM line so nothing falls back to a real path by accident:
+//! Arguments, none of them in the shipped lines:
 //!
 //! ```text
-//! pinchecker=PATH    the pinchecker (/usr/local/libexec/properpin/properpin-pinchecker)   required
-//! config=PATH    the global config (/etc/properpin/config), for how long a     required with check,
-//!                correct PIN takes at least                                    refused with housekeeping
-//! log=FILE       append the module's own log lines here instead of syslog (tests)
-//! test_panic     panic on purpose while SIGCHLD is changed, to prove a panic becomes PAM_IGNORE
-//!                and puts SIGCHLD back (tests)
+//! pinchecker=PATH  the pinchecker, instead of /usr/local/libexec/properpin/properpin-pinchecker (tests)
+//! log=FILE         append the module's own log lines here instead of syslog (tests)
+//! test_panic       panic on purpose while SIGCHLD is changed, to prove a panic becomes PAM_IGNORE
+//!                  and puts SIGCHLD back (tests)
 //! ```
 //!
 //! It runs inside the lock screen, as the locked user, never as root. Refusal is the default:

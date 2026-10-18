@@ -27,7 +27,7 @@ const LOCK_TIMEOUT: Duration = Duration::from_secs(1);
 ///
 /// The settings and the hash must belong to `etc_owner`, so nobody else can change them: root once
 /// installed, the test's own uid in tests. The hash must be readable by the pinchecker's group and
-/// by nobody else, and the config by everyone, since the PAM module reads it as the user. The
+/// by nobody else, and the config by everyone, since the pinchecker reads it as the user. The
 /// pinchecker can't even open a file it can't read, so those rules matter to root, which reads
 /// everything: `properpin doctor` judges every file by the same rules the pinchecker does, and
 /// finds what an attempt would refuse. The budgets live in one directory for all users, which
@@ -369,15 +369,6 @@ fn flock(mut file: File, path: &Path) -> Result<Flock<File>, Error> {
     }
 }
 
-/// The global settings alone, from the config at `path`, for the PAM module: it runs as the user,
-/// who can't read their own file. Trusted when owned by root, or by `uid`, the user the module
-/// runs as: the one setting the module uses changes only how long that user's own correct PIN
-/// waits, and the tests' sandboxes belong to the user running them. Defaults when there is no
-/// config.
-pub fn global_settings(path: &Path, uid: u32) -> Result<Settings, Error> {
-    config_settings(path, &[0, uid])
-}
-
 /// The config at `path` on top of the defaults, trusted when owned by one of `owners`.
 fn config_settings(path: &Path, owners: &[u32]) -> Result<Settings, Error> {
     let text = read_trusted(path, owners, Readers::Everyone)?.unwrap_or_default();
@@ -546,7 +537,8 @@ fn usable_name(user: &str) -> Result<(), Error> {
 /// Who reads a trusted file, besides root.
 #[derive(Debug, Clone, Copy)]
 enum Readers {
-    /// Everyone: the global config, which the PAM module reads as the user.
+    /// Everyone: the global config, which the pinchecker reads as the user, and the config isn't
+    /// its group's.
     Everyone,
     /// The pinchecker's group alone: a user's own file, which holds the hash.
     Group(u32),
@@ -570,7 +562,7 @@ fn read_trusted(path: &Path, owners: &[u32], readers: Readers) -> Result<Option<
     }
     // Only root, which reads anything, gets past the open with a file its readers can't read.
     match readers {
-        Readers::Everyone if info.mode() & 0o004 == 0 => refuse("not readable by others, and the PAM module reads it as the user".into()),
+        Readers::Everyone if info.mode() & 0o004 == 0 => refuse("not readable by others, and the pinchecker reads it as the user".into()),
         Readers::Group(_) if info.mode() & 0o004 != 0 => refuse("readable by others".into()),
         Readers::Group(group) if info.gid() != group => refuse(format!("group {}, not {group}", info.gid())),
         Readers::Group(_) if info.mode() & 0o040 == 0 => refuse("not readable by its group".into()),
@@ -636,23 +628,6 @@ mod tests {
         assert!(matches!(files.user_settings(), Err(Error::OnlyTheHash { .. })), "doctor's rules are the pinchecker's");
     }
 
-    #[test]
-    fn the_pam_module_reads_the_global_config_alone() {
-        let Scratch { files, .. } = &scratch();
-        let uid = current_uid();
-        assert_eq!(global_settings(&files.config(), uid).unwrap(), Settings::default(), "no config, the defaults");
-        write(&files.config(), "min_milliseconds_before_pin_unlock = 300\nmax_failures = 5\n", 0o644);
-        write(&files.user_file(), "max_failures = 2\n", 0o640);
-        let settings = global_settings(&files.config(), uid).unwrap();
-        assert_eq!((settings.min_milliseconds_before_pin_unlock, settings.max_failures), (300, 5));
-        let error = global_settings(&files.config(), uid + 1).unwrap_err().to_string();
-        assert!(error.contains(&format!("owned by uid {uid}, not 0 or {}", uid + 1)), "{error}");
-        write(&files.config(), "min_milliseconds_before_pin_unlock = 300\n", 0o664);
-        assert!(global_settings(&files.config(), uid).unwrap_err().to_string().contains("writable by its group"));
-        write(&files.config(), "hash = $y$j9T$abc$def\n", 0o644);
-        assert!(matches!(global_settings(&files.config(), uid), Err(Error::OutsideUserFile { .. })));
-    }
-
     /// The test owns its files, as root would: it can read what the pinchecker couldn't, so the
     /// readers' rules are what refuses those.
     #[test]
@@ -679,7 +654,7 @@ mod tests {
 
         write(&files.config(), "max_failures = 2\n", 0o640);
         let error = files.settings().unwrap_err().to_string();
-        assert!(error.contains("not readable by others, and the PAM module reads it as the user"), "{error}");
+        assert!(error.contains("not readable by others, and the pinchecker reads it as the user"), "{error}");
     }
 
     #[test]

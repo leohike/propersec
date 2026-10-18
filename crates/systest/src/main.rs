@@ -2,8 +2,8 @@
 //! the real `/etc/pam.d`, the real `pam_unix` and its own setuid helper `unix_chkpwd`.
 //!
 //! It runs as root inside the container built from `testing/podman/Containerfile` (run it with
-//! `just podman`), never on a real machine: it installs properpin, which adds its lines
-//! to `/etc/pam.d/kde`, sets a PIN, and tampers with files as root.
+//! `just podman`), never on a real machine: it installs properpin, puts its lines into
+//! `/etc/pam.d/kde` with `integrate-into-pam.sh`, sets a PIN, and tampers with files as root.
 //!
 //! ```text
 //! properpin-systest run                    every scenario in order; exit 1 if any fails
@@ -20,7 +20,8 @@
 //! comes back to the scenario that caused it. After every scenario no pinchecker may still be running.
 //!
 //! The uninstall cases (`uninstall.rs`) each run in a fresh container: they install a deliberately
-//! broken properpin and check that `install.sh uninstall` puts the system back as it was.
+//! broken properpin and check that `integrate-into-pam.sh remove` and `install.sh uninstall` put the
+//! system back as it was.
 
 #![forbid(unsafe_code)]
 
@@ -178,6 +179,7 @@ fn run() -> ExitCode {
         ("a poisoned start changes nothing", a_poisoned_start_changes_nothing),
         ("the housekeeping checks the password itself", the_housekeeping_checks_the_password_itself),
         ("a missing pinchecker fails closed", a_missing_pinchecker_fails_closed),
+        ("an older version's lines keep the password working until add replaces them", an_older_versions_lines_keep_the_password),
         ("status shows your own PIN only", status_shows_your_own_pin),
         ("the pinchecker's group can't change the pinchecker", the_group_cannot_change_the_pinchecker),
         ("one user's pinchecker can't touch another's counts", one_users_pinchecker_cannot_touch_anothers_counts),
@@ -236,12 +238,15 @@ fn three_wrong_pins_pause_the_pin(world: &World) -> Outcome {
     world.pin_unlocks()
 }
 
+/// The stock stack doesn't stop before the housekeeping, so the housekeeping hears a wrong password
+/// too, and the pinchecker, checking it through the real unix_chkpwd, changes nothing.
 fn a_wrong_password_never_unpauses_the_pin(world: &World) -> Outcome {
     for wrong in ["1111", "2222", "3333"] {
         world.pin_refused(wrong, "not the PIN")?;
     }
     let wrong = world.kde("a wrong password, long enough")?;
     expect(!wrong.unlocked && !wrong.log.contains(PASSWORD_CORRECT), "a wrong password unlocked or unpaused the PIN", &wrong)?;
+    expect(wrong.log.contains("wrong password, nothing changed"), "the housekeeping didn't hear the wrong password", &wrong)?;
     world.pin_refused(PIN, "PIN paused after 3 consecutive failures")?;
     // The positive control: the right password does log what the wrong one mustn't.
     world.unlock_with_password()
@@ -457,6 +462,35 @@ fn the_housekeeping_checks_the_password_itself(world: &World) -> Outcome {
     world.pin_refused(PIN, "PIN paused after 3 consecutive failures")?;
     let done = world.as_user(USER, &[PINCHECKER, "housekeeping"], PASSWORD.as_bytes())?;
     expect_code(&done, exit::YES, "housekeeping with the password")?;
+    world.pin_unlocks()
+}
+
+/// What this machine had before 2026-10-18: properpin's lines between markers, with a pam_unix line of
+/// their own that only reads what the module asked for, and an argument the module now rejects. A
+/// new install leaves them in place, and they must refuse the PIN alone, never the password, until
+/// integrate-into-pam.sh add replaces them.
+fn an_older_versions_lines_keep_the_password(world: &World) -> Outcome {
+    let old = "\
+# properpin begin: added by install.sh install; install.sh uninstall removes everything down to the end marker
+auth  [success=done default=ignore]  /usr/local/lib64/security/pam_properpin.so check pinchecker=/usr/local/libexec/properpin/properpin-pinchecker config=/etc/properpin/config
+auth  [success=ok default=die]       pam_unix.so use_first_pass
+auth  optional                       /usr/local/lib64/security/pam_properpin.so housekeeping pinchecker=/usr/local/libexec/properpin/properpin-pinchecker
+# properpin end
+";
+    fs::write(KDE, format!("{old}{}", world.stock_kde)).map_err(message)?;
+    let pin = world.kde(PIN)?;
+    expect(!pin.unlocked && pin.log.contains("bad PAM line: unknown argument"), "the old lines didn't refuse the PIN", &pin)?;
+    world.unlock_with_password()?;
+    let wrong = world.kde("a wrong password, long enough")?;
+    expect(!wrong.unlocked, "a wrong password unlocked", &wrong)?;
+    match install_sh(&["check"]) {
+        Err(said) if said.contains("not exactly the ones this version ships") => {}
+        other => return Err(format!("check accepted an older version's lines: {other:?}")),
+    }
+    integrate(&["add", "--yes"])?;
+    if fs::read_to_string(KDE).map_err(message)? != world.integrated_kde {
+        return Err(format!("add didn't replace the old lines with this version's:\n{}", fs::read_to_string(KDE).map_err(message)?));
+    }
     world.pin_unlocks()
 }
 
@@ -749,7 +783,7 @@ fn one_session_serves_many_attempts(world: &World) -> Outcome {
     {
         return Err(format!("the log doesn't show the housekeeping, two PIN unlocks and one failure: {}", said()));
     }
-    // kscreenlocker 6.8 takes an answer within 50 ms for a broken authenticator; the module makes
+    // kscreenlocker 6.8 takes an answer within 50 ms for a broken authenticator; the pinchecker makes
     // a correct PIN wait out min_milliseconds_before_pin_unlock, 75 ms with no config.
     let minimum = Settings::default().min_milliseconds_before_pin_unlock;
     if answers[1].ms < minimum || answers[3].ms < minimum {
@@ -821,8 +855,8 @@ fn a_killed_worker_loses_no_count(world: &World) -> Outcome {
     Ok(())
 }
 
-/// An upgrade is the same install again: properpin's lines come out and go back in, the PIN and
-/// the budget stay.
+/// An upgrade is the same install again: the PAM file stays as it is, and so do the PIN and the
+/// budget.
 fn installing_again_keeps_the_pin(world: &World) -> Outcome {
     let kde = fs::read_to_string(KDE).map_err(message)?;
     world.pin_refused("1111", "not the PIN, consecutive failure 1 of 3")?;
@@ -833,11 +867,11 @@ fn installing_again_keeps_the_pin(world: &World) -> Outcome {
         Err(said) if said.contains(&format!("{stale}: not installed by this version")) => {}
         other => return Err(format!("check accepted {stale}: {other:?}")),
     }
-    let said = install_sh(&["install", "--yes"])?;
+    let said = install_sh(&["install"])?;
     if Path::new(stale).exists() {
         return Err(format!("install again left {stale}"));
     }
-    if !said.contains("already has the lines this version ships") || fs::read_to_string(KDE).map_err(message)? != kde {
+    if !said.contains("has the lines this version ships") || fs::read_to_string(KDE).map_err(message)? != kde {
         return Err(format!("install again changed {KDE}:\n{said}"));
     }
     if !said.contains(&format!("no problems; a PIN is set for {USER}")) {
@@ -862,7 +896,7 @@ fn install_refuses_a_build_that_loads_code_from_elsewhere(world: &World) -> Outc
     fs::copy(format!("{PRODUCT}/pinchecker-with-runpath"), from.join("properpin-pinchecker")).map_err(message)?;
     fs::write(from.join("libpam_properpin.so"), "this is not a shared library\n").map_err(message)?;
     let from = from.to_str().ok_or("a scratch path that isn't UTF-8")?;
-    let said = match install_sh_from(from, &["install", "--yes"]) {
+    let said = match install_sh_from(from, &["install"]) {
         Err(said) => said,
         Ok(said) => return Err(format!("install accepted the build:\n{said}")),
     };
@@ -884,6 +918,8 @@ fn install_refuses_a_build_that_loads_code_from_elsewhere(world: &World) -> Outc
     install_sh(&["check"]).map(drop)
 }
 
+/// Uninstall waits until remove has taken properpin's lines out, since lines naming a deleted module
+/// lock the lock screen; then the two together leave PAM as it was.
 fn uninstall_leaves_pam_as_it_was(world: &World) -> Outcome {
     world.pin_unlocks()?;
     let installed = [
@@ -898,7 +934,16 @@ fn uninstall_leaves_pam_as_it_was(world: &World) -> Outcome {
         return Err(format!("{missing} isn't there before uninstall, so its absence afterwards would prove nothing"));
     }
     world.module_and_pinchecker_log()?;
-    install_sh(&["uninstall", "--yes"])?;
+    match install_sh(&["uninstall"]) {
+        Err(said) if said.contains("still has properpin's lines") && said.contains("nothing was removed") => {}
+        other => return Err(format!("uninstall didn't wait for properpin's lines to come out: {other:?}")),
+    }
+    if let Some(gone) = installed.iter().find(|path| !Path::new(path).exists()) {
+        return Err(format!("uninstall refused, but removed {gone}"));
+    }
+    world.pin_unlocks()?;
+    integrate(&["remove", "--yes"])?;
+    install_sh(&["uninstall"])?;
     let kde = fs::read_to_string(KDE).map_err(message)?;
     if kde != world.stock_kde {
         return Err(format!("{KDE} after uninstall differs from before install:\n{kde}"));
@@ -934,6 +979,8 @@ struct World {
     syslog: Syslog,
     /// `/etc/pam.d/kde` before install.
     stock_kde: String,
+    /// `/etc/pam.d/kde` once `integrate-into-pam.sh add` has put properpin's lines in.
+    integrated_kde: String,
     /// The user file `properpin set` wrote.
     pin_file: Vec<u8>,
 }
@@ -984,7 +1031,12 @@ impl World {
         let syslog = Syslog::listen()?;
         let stock_kde = fs::read_to_string(KDE).map_err(message)?;
 
-        install_sh(&["install", "--yes"])?;
+        install_sh(&["install"])?;
+        if fs::read_to_string(KDE).map_err(message)? != stock_kde {
+            return Err(format!("install changed {KDE}"));
+        }
+        integrate(&["add", "--yes"])?;
+        let integrated_kde = fs::read_to_string(KDE).map_err(message)?;
         let pinchecker_gid = group_by_name(PINCHECKER_GROUP).map_err(message)?;
 
         properpin_as_root(&["set", "--user", USER], &format!("{PIN}\n{PIN}\n"))?;
@@ -998,7 +1050,7 @@ impl World {
             return Err(format!("properpin doctor after set:\n{doctor}"));
         }
         let pin_file = fs::read(format!("/etc/properpin/users/{USER}")).map_err(message)?;
-        Ok(Self { user, pinchecker_gid, syslog, stock_kde, pin_file })
+        Ok(Self { user, pinchecker_gid, syslog, stock_kde, integrated_kde, pin_file })
     }
 
     fn user_file(&self) -> PathBuf {
@@ -1025,8 +1077,12 @@ impl World {
         overwrite(&self.budget_file(), &budget.format())
     }
 
-    /// Back to just after set-up: the PIN set and enabled, nothing tampered with.
+    /// Back to just after set-up: the PIN set and enabled, this version's lines in the PAM file,
+    /// nothing tampered with.
     fn reset(&self) -> Outcome {
+        if fs::read_to_string(KDE).map_err(message)? != self.integrated_kde {
+            fs::write(KDE, &self.integrated_kde).map_err(message)?;
+        }
         for path in [self.config(), self.user_file().with_extension("real")] {
             match fs::remove_file(&path) {
                 Err(error) if error.kind() != ErrorKind::NotFound => return Err(format!("{}: {error}", path.display())),
@@ -1407,6 +1463,18 @@ fn doctor_finds(why: &str) -> Outcome {
         Err(said) if said.contains(why) => Ok(()),
         Err(said) => Err(format!("properpin doctor didn't say {why:?}:\n{said}")),
     }
+}
+
+/// Run `packaging/integrate-into-pam.sh` against the real root.
+fn integrate(args: &[&str]) -> Outcome<String> {
+    let output = Command::new("bash")
+        .arg(format!("{PRODUCT}/packaging/integrate-into-pam.sh"))
+        .args(args)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(message)?;
+    let said = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    if output.status.success() { Ok(said) } else { Err(format!("integrate-into-pam.sh {}:\n{said}", args.join(" "))) }
 }
 
 /// Run `packaging/install.sh` against the real root, from the container's build.

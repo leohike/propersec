@@ -10,8 +10,8 @@ use crate::{Error, HASH_SETTING, MAX_PIN_CHARS};
 /// user's own file, which holds the hash and nothing else. Each [`Settings::apply`] wins over the
 /// layer before.
 ///
-/// The unlock path uses the hash, `max_failures` and the budget's five; `set` uses the three in
-/// between. The PAM module itself reads `min_milliseconds_before_pin_unlock`.
+/// The unlock path uses the hash, `max_failures`, the budget's five and
+/// `min_milliseconds_before_pin_unlock`; `set` uses the three in between.
 #[derive(Clone, PartialEq)]
 pub struct Settings {
     /// Empty: no PIN is set. Otherwise the PIN's yescrypt hash.
@@ -35,11 +35,10 @@ pub struct Settings {
     pub max_suspicious_7d: u32,
     /// Suspicious failures since the PIN was set that disable it.
     pub max_suspicious_total: u64,
-    /// The shortest time a correct PIN takes to unlock, counted from when the PAM module is called;
-    /// the module waits out the rest. kscreenlocker 6.8 takes an answer within 50 ms for a broken
-    /// authenticator, so below that the PIN stops unlocking. Only a correct PIN waits: anything
-    /// else goes on to pam_unix, which is slow anyway. The PAM module reads it, as the user, from
-    /// the global config, which everyone can read.
+    /// The shortest time a correct PIN takes to unlock, counted from when the pinchecker starts;
+    /// the pinchecker waits out the rest before it answers. kscreenlocker 6.8 takes an answer
+    /// within 50 ms for a broken authenticator, so below that the PIN stops unlocking. Only a
+    /// correct PIN waits: anything else goes on to the password stack, which is slow anyway.
     pub min_milliseconds_before_pin_unlock: u64,
 }
 

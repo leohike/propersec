@@ -1,18 +1,20 @@
-//! The uninstall cases: what is under test is `install.sh uninstall`, not properpin. Each case, in
-//! a fresh container of its own:
+//! The uninstall cases: what is under test is the way out, `integrate-into-pam.sh remove` and then
+//! `install.sh uninstall`, not properpin. Each case, in a fresh container of its own:
 //!
 //! - records the stock system: what the lock screen, `sudo`, `su` and `login` answer to the right
 //!   and a wrong password, every file in `/etc/pam.d` byte for byte, the files properpin's paths
 //!   hold, and the groups;
 //! - installs a deliberately broken properpin, through `install.sh` and under exactly the real
 //!   names (the variants come from `crates/brokenpin`, built by `testing/podman/build-broken.sh`),
-//!   or a real one followed by a damaged `/etc/pam.d/kde`;
+//!   or a real one broken afterwards, and puts its lines in with `integrate-into-pam.sh add`;
 //! - checks that it really broke the lock screen the way the case says, and that `sudo`, the way
 //!   in for a repair, still works;
-//! - runs `install.sh uninstall --yes`, and checks that the record matches again, apart from what
-//!   uninstall keeps on purpose (`/etc/properpin`, `/var/lib/properpin`, the `properpin` group);
-//! - runs uninstall again, which must change nothing, then installs the real properpin and checks
-//!   that the PIN works and that uninstalling it also leaves the record.
+//! - checks that `install.sh uninstall` refuses while the lines are in, then runs
+//!   `integrate-into-pam.sh remove --yes` and `install.sh uninstall`, and checks that the record
+//!   matches again, apart from what uninstall keeps on purpose (`/etc/properpin`,
+//!   `/var/lib/properpin`, the `properpin` group);
+//! - runs both again, which must change nothing, then installs the real properpin and checks that
+//!   the PIN works and that taking it out again also leaves the record.
 //!
 //! docs/chaos/install-uninstall-with-a-broken-properpin.md has the reasoning.
 
@@ -43,10 +45,9 @@ enum Breaks {
     LetsAnyoneIn,
     /// The right password unlocks, but only after the module's pinchecker timeout, twice over.
     Slows,
-    /// The right password is refused.
-    LocksOut,
-    /// `install.sh check` finds the PAM file damaged around properpin's lines.
-    Damaged,
+    /// The PIN never unlocks, while the right password still does: the stock stack prompts for
+    /// it when the module can't, and libpam skips a module it can't load or call.
+    PinOnly,
 }
 
 struct Case {
@@ -67,15 +68,11 @@ const CASES: &[Case] = &[
     Case { name: "module-segfaults", variant: Some("module-segfaults"), damage: no_damage, breaks: &[Breaks::Dies] },
     Case { name: "module-sleeps", variant: Some("module-sleeps"), damage: no_damage, breaks: &[Breaks::Hangs] },
     Case { name: "module-says-yes", variant: Some("module-says-yes"), damage: no_damage, breaks: &[Breaks::LetsAnyoneIn] },
-    Case { name: "module-missing-symbol", variant: Some("module-missing-symbol"), damage: no_damage, breaks: &[Breaks::LocksOut] },
-    Case { name: "module-garbage", variant: None, damage: garbage_the_module, breaks: &[Breaks::LocksOut] },
-    Case { name: "module-deleted", variant: None, damage: delete_the_module, breaks: &[Breaks::LocksOut] },
+    Case { name: "module-missing-symbol", variant: Some("module-missing-symbol"), damage: no_damage, breaks: &[Breaks::PinOnly] },
+    Case { name: "module-garbage", variant: None, damage: garbage_the_module, breaks: &[Breaks::PinOnly] },
+    Case { name: "module-deleted", variant: None, damage: delete_the_module, breaks: &[Breaks::PinOnly] },
     Case { name: "pinchecker-says-yes", variant: Some("pinchecker-says-yes"), damage: no_damage, breaks: &[Breaks::LetsAnyoneIn] },
     Case { name: "pinchecker-sleeps", variant: Some("pinchecker-sleeps"), damage: no_damage, breaks: &[Breaks::Slows] },
-    Case { name: "kde-end-marker-deleted", variant: None, damage: delete_the_end_marker, breaks: &[Breaks::Damaged] },
-    Case { name: "kde-block-twice", variant: None, damage: repeat_the_block, breaks: &[Breaks::Damaged] },
-    Case { name: "kde-markers-stripped", variant: None, damage: strip_the_markers, breaks: &[Breaks::Damaged] },
-    Case { name: "kde-cut-inside-block", variant: None, damage: cut_inside_the_block, breaks: &[Breaks::Damaged, Breaks::LocksOut] },
 ];
 
 fn delete_the_module() -> Outcome {
@@ -85,33 +82,6 @@ fn delete_the_module() -> Outcome {
 /// Text where the module should be. install refuses such a build, so it comes after install.
 fn garbage_the_module() -> Outcome {
     fs::write(MODULE, "this is not a shared library\n").map_err(message)
-}
-
-fn edit_kde(change: impl FnOnce(&str) -> String) -> Outcome {
-    let text = fs::read_to_string(KDE).map_err(message)?;
-    fs::write(KDE, change(&text)).map_err(message)
-}
-
-fn delete_the_end_marker() -> Outcome {
-    edit_kde(|text| text.lines().filter(|line| *line != "# properpin end").map(|line| format!("{line}\n")).collect())
-}
-
-/// As if properpin's lines had gone in twice.
-fn repeat_the_block() -> Outcome {
-    edit_kde(|text| {
-        let block: String = text.lines().take_while(|line| *line != "# properpin end").map(|line| format!("{line}\n")).collect();
-        format!("{block}# properpin end\n{text}")
-    })
-}
-
-/// The lines left in, their markers gone, as a careless hand edit could leave them.
-fn strip_the_markers() -> Outcome {
-    edit_kde(|text| text.lines().filter(|line| !line.starts_with("# properpin")).map(|line| format!("{line}\n")).collect())
-}
-
-/// A half-written file: the begin marker and the PIN line, and nothing after them.
-fn cut_inside_the_block() -> Outcome {
-    edit_kde(|text| text.lines().take(2).map(|line| format!("{line}\n")).collect())
 }
 
 pub(super) fn list() -> ExitCode {
@@ -191,26 +161,37 @@ impl Bench {
         }
 
         let from = case.variant.map_or(format!("{PRODUCT}/build"), |variant| format!("{BROKEN}/{variant}"));
-        install_sh_from(&from, &["install", "--yes"])?;
+        install_sh_from(&from, &["install"])?;
+        integrate(&["add", "--yes"])?;
         properpin_as_root(&["set", "--user", USER], &format!("{PIN}\n{PIN}\n"))?;
         (case.damage)()?;
         self.is_broken(case).map_err(|error| format!("the broken install didn't break as expected: {error}"))?;
 
-        let said = install_sh(&["uninstall", "--yes"]).map_err(|error| format!("uninstall failed: {error}"))?;
+        match install_sh(&["uninstall"]) {
+            Err(said) if said.contains("still has properpin's lines") => {}
+            other => return Err(format!("uninstall didn't wait for properpin's lines to come out: {other:?}")),
+        }
+        let said = Self::take_out().map_err(|error| format!("taking properpin out failed: {error}"))?;
         no_pinchecker_left()?;
-        self.matches(&before, "after uninstall").map_err(|error| format!("{error}\nuninstall said:\n{said}"))?;
+        self.matches(&before, "after uninstall").map_err(|error| format!("{error}\nremove and uninstall said:\n{said}"))?;
 
-        install_sh(&["uninstall", "--yes"]).map_err(|error| format!("a second uninstall failed: {error}"))?;
+        Self::take_out().map_err(|error| format!("taking properpin out again failed: {error}"))?;
         self.matches(&before, "after a second uninstall")?;
 
         // properpin itself still installs and works afterwards, and goes again just as cleanly.
-        install_sh(&["install", "--yes"])?;
+        install_sh(&["install"])?;
+        integrate(&["add", "--yes"])?;
         // The PIN file was kept, so this is the PIN already set, which set asks about first.
         properpin_as_root(&["set", "--user", USER, "--yes"], &format!("{PIN}\n{PIN}\n"))?;
         self.expect("kde", PASSWORD, &Ran::Unlocked, "the password, reinstalled")?;
         self.expect("kde", PIN, &Ran::Unlocked, "the PIN, reinstalled")?;
-        install_sh(&["uninstall", "--yes"])?;
+        Self::take_out()?;
         self.matches(&before, "after installing the real properpin and uninstalling it")
+    }
+
+    /// The way out: properpin's lines out of `/etc/pam.d/kde`, then its files.
+    fn take_out() -> Outcome<String> {
+        Ok(integrate(&["remove", "--yes"])? + &install_sh(&["uninstall"])?)
     }
 
     /// The case's breakage, seen the way the lock screen would see it, while `sudo` stays usable.
@@ -236,11 +217,10 @@ impl Bench {
                         return Err(format!("the right password should unlock after two pinchecker timeouts: {probe:?}"));
                     }
                 }
-                Breaks::LocksOut => self.expect("kde", PASSWORD, &Ran::Refused, "the right password")?,
-                Breaks::Damaged => match install_sh(&["check"]) {
-                    Err(said) if said.contains("damaged around properpin's lines") => {}
-                    other => return Err(format!("check should find the PAM file damaged: {other:?}")),
-                },
+                Breaks::PinOnly => {
+                    self.expect("kde", PIN, &Ran::Refused, "the PIN")?;
+                    self.expect("kde", PASSWORD, &Ran::Unlocked, "the right password")?;
+                }
             }
         }
         self.expect("sudo", PASSWORD, &Ran::Unlocked, "sudo, the way in for a repair")

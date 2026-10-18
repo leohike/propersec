@@ -2,6 +2,8 @@
 
 Written as an idea on 2026-10-03 and built the same day. The cases are in `crates/systest/src/uninstall.rs`, the broken builds in `crates/brokenpin`, and `just podman-uninstall` and CI run them. What was left for later is in `docs/chaos/uninstall-test-remaining-ideas.md`.
 
+**Since 2026-10-18** the way out is two steps, and the rest of this document describes the one command before them. `install.sh` never touches `/etc/pam.d` any more: `integrate-into-pam.sh add` puts properpin's two lines in, around the stock `auth substack password-auth`, without markers or a `pam_unix` line of their own, and `integrate-into-pam.sh remove` takes out every line naming the module. `install.sh uninstall` refuses while there is one, and only then removes the files. Each case now installs, adds the lines, checks the breakage, checks that `uninstall` refuses, then runs `remove --yes` and `uninstall`. The four `kde-*` cases, about a damaged block between markers, went with the markers. And the three cases with a module libpam can't load or call no longer lock anyone out, as What the cases showed about PAM below explains.
+
 ## The idea
 
 What is under test is the uninstaller, not properpin. If properpin breaks something on the live system, `install.sh uninstall` has to put it right. So each case installs a deliberately dysfunctional properpin and checks that one uninstall repairs the damage:
@@ -24,15 +26,11 @@ The broken builds come from `crates/brokenpin`, a test-only crate. `testing/podm
 | `module-segfaults` | The module writes to an unmapped address | Dies |
 | `module-sleeps` | The module sleeps for ten hours | Hangs |
 | `module-says-yes` | The module returns success for everything | A wrong password unlocks |
-| `module-missing-symbol` | A module without `pam_sm_authenticate` | The right password is refused |
-| `module-garbage` | Text written over the real module after install, since install refuses such a build | The right password is refused |
-| `module-deleted` | The real module, deleted after install | The right password is refused |
-| `helper-says-yes` | The helper exits 0, yes, whatever it is asked | A wrong password unlocks |
-| `helper-sleeps` | The helper sleeps for ten hours | The right password unlocks only after 20 seconds, the module's 10-second helper timeout twice |
-| `kde-end-marker-deleted` | The block's end marker removed | `check` finds it damaged |
-| `kde-block-twice` | The block repeated | `check` finds it damaged |
-| `kde-markers-stripped` | The lines left in, both markers removed | `check` finds it damaged |
-| `kde-cut-inside-block` | The file cut off after the PIN line | `check` finds it damaged, and the right password is refused |
+| `module-missing-symbol` | A module without `pam_sm_authenticate` | The PIN is refused; the right password still unlocks (until 2026-10-18: the right password is refused) |
+| `module-garbage` | Text written over the real module after install, since install refuses such a build | The same |
+| `module-deleted` | The real module, deleted after install | The same |
+| `pinchecker-says-yes` | The pinchecker exits 0, yes, whatever it is asked | A wrong password unlocks |
+| `pinchecker-sleeps` | The pinchecker sleeps for ten hours | The right password unlocks only after 20 seconds, the module's 10-second pinchecker timeout twice |
 
 The segfault is a real memory fault rather than `raise(SIGSEGV)`: the test's attempt process is a Rust program, and std's own SIGSEGV handler swallowed the raised signal, so the first version came back as a clean refusal.
 
@@ -47,7 +45,9 @@ The segfault is a real memory fault rather than `raise(SIGSEGV)`: the test's att
 
 ## What the cases showed about PAM
 
-A module that the PAM file names but libpam can't load (deleted, garbage, or missing its entry point) fails the whole stack, even with properpin's `[success=done default=ignore]` control. The right password is refused, and the lock screen locks its user out. This is why the uninstaller must never delete the module while the PAM file still names it. The mutation check below shows the cases catch exactly that.
+A module that the PAM file names but libpam can't load (deleted, garbage, or missing its entry point) failed the whole stack, even with properpin's `[success=done default=ignore]` control. The right password was refused, and the lock screen locked its user out. This is why the uninstaller must never delete the module while the PAM file still names it. The mutation check below shows the cases catch exactly that.
+
+Since 2026-10-18 it is clear that this was the old lines' doing, not libpam's. libpam skips a module it can't load or call: the line answers `PAM_MODULE_UNKNOWN`, which `default=ignore` ignores. But with properpin's module skipped, nothing had asked for the password, and the next line, properpin's own `pam_unix.so use_first_pass`, only reads what an earlier module asked for: it found nothing and stopped the stack with `default=die`. With that line gone, the stock `pam_unix` in `password-auth` asks for the password itself, and the same three cases only stop the PIN, which the cases now check. `uninstall` still refuses while the PAM file names the module, since an older version's lines, with their `use_first_pass`, may still be there.
 
 ## Checked by breaking things on purpose
 

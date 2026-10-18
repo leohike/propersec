@@ -16,7 +16,7 @@ Cases and checks left out of the first round of uninstall cases (2026-10-03), ta
 
 ## Checks not made yet
 
-- **The confirmation prompt.** Every case runs `uninstall --yes`. The interactive path, where uninstall shows the diff and asks, is untested: it needs a terminal, or a pty in the test.
-- **The SELinux labels** of a restored `/etc/pam.d/kde` and of everything uninstall leaves. Only the VM enforces them.
+- **The confirmation prompt.** Every case runs `integrate-into-pam.sh remove --yes`. The interactive path, where `add` and `remove` show the diff and ask, is untested: it needs a terminal, or a pty in the test.
+- **The SELinux labels** of `/etc/pam.d/kde` as `add` and `remove` write it, and of everything uninstall leaves. Only the VM enforces them.
 - **A repair from a TTY.** In the container, `sudo` stands in for the way back in. The VM rehearsal should lock itself out with one of the broken variants for real, then repair it from a text console.
 - **A purge.** Uninstall keeps `/etc/properpin`, `/var/lib/properpin` and the group, and the cases allow exactly those. `docs/chaos/uninstall-should-purge-pin-hashes.md` argues that the PIN hashes, at least, should go.

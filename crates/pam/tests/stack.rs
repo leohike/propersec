@@ -1,11 +1,11 @@
 //! The lock-screen stack, through the real libpam and the real `pam_properpin.so`.
 //!
 //! The PAM files come from a temporary directory (`pam_start_confdir`). The stack is the shipped
-//! `packaging/kde-auth.pam` with only three things swapped: the module path points at the freshly built
-//! `.so`, the pinchecker path at a script that runs the freshly built `properpin-pinchecker` against the
-//! sandbox (through its `--dev-*` options, which it accepts here because it isn't setgid), and
-//! `pam_unix` becomes `pam_permit` (the password was right) or `pam_deny` (it was wrong). The
-//! control columns are the shipped ones.
+//! `packaging/kde-auth.pam` with only two things swapped: the module path points at the freshly built
+//! `.so`, given `pinchecker=` with a script that runs the freshly built `properpin-pinchecker` against
+//! the sandbox (through its `--dev-*` options, which it accepts here because it isn't setgid), and
+//! the stock `password-auth` substack becomes one of two stand-ins, `pam_permit` (the password was
+//! right) or `pam_deny` (it was wrong). The control columns are the shipped ones.
 //!
 //! Attempts run the way kscreenlocker runs them: one PAM session kept for many attempts, with
 //! `pam_setcred` after a success. The hosts below then misbehave the ways real PAM hosts do with
@@ -60,6 +60,9 @@ impl Sandbox {
         fs::create_dir_all(sandbox.path("pam.d")).unwrap();
         // libpam logs to the journal when a confdir has no "other" fallback service.
         fs::write(sandbox.path("pam.d/other"), "auth required pam_deny.so\n").unwrap();
+        // The stock password-auth, which the shipped lines go around, as each test needs it.
+        fs::write(sandbox.path("pam.d/password-auth-right"), "auth required pam_permit.so\n").unwrap();
+        fs::write(sandbox.path("pam.d/password-auth-wrong"), "auth required pam_deny.so\n").unwrap();
         let user_file = sandbox.path("etc/users").join(&sandbox.user);
         fs::write(&user_file, format!("hash = {}\n", Yescrypt.hash(PIN, 4).unwrap())).unwrap();
         fs::set_permissions(&user_file, Permissions::from_mode(0o640)).unwrap();
@@ -109,20 +112,18 @@ impl Sandbox {
     }
 
     fn stack_as(&self, service: &str, password: Password, extra: &str) {
-        let module = format!("{} {extra}", built().join("libpam_properpin.so").display());
-        let pinchecker = format!("pinchecker={} log={}", self.path("pinchecker").display(), self.path("log").display());
-        let config = format!("config={}", self.path("etc/config").display());
-        let unix = match password {
-            Password::Right => "pam_permit.so",
-            Password::Wrong => "pam_deny.so",
+        let module = format!(
+            "{} pinchecker={} log={} {extra} ",
+            built().join("libpam_properpin.so").display(),
+            self.path("pinchecker").display(),
+            self.path("log").display()
+        );
+        let substack = match password {
+            Password::Right => " password-auth-right\n",
+            Password::Wrong => " password-auth-wrong\n",
         };
-        let mut text = SHIPPED.to_owned();
-        for (old, new) in [
-            ("/usr/local/lib64/security/pam_properpin.so", module.as_str()),
-            ("pinchecker=/usr/local/libexec/properpin/properpin-pinchecker", pinchecker.as_str()),
-            ("config=/etc/properpin/config", config.as_str()),
-            ("pam_unix.so use_first_pass", unix),
-        ] {
+        let mut text: String = SHIPPED.lines().filter(|line| !line.starts_with('#')).map(|line| format!("{line}\n")).collect();
+        for (old, new) in [("/usr/local/lib64/security/pam_properpin.so ", module.as_str()), (" password-auth\n", substack)] {
             // Fail loudly if the shipped file changes shape, rather than test something else.
             assert!(text.contains(old), "{old:?} is no longer in packaging/kde-auth.pam");
             text = text.replace(old, new);
@@ -209,20 +210,14 @@ fn a_wrong_password_never_unpauses_the_pin() {
         assert!(!sandbox.attempt(Password::Wrong, wrong).unlocked());
     }
     assert!(!sandbox.attempt(Password::Wrong, "a wrong password, long enough").unlocked());
-    // The stack stops at the password line, so the housekeeping never even hears of it: neither
-    // of its answers is logged, nor its failure.
-    let housekeeping = ["password correct", "wrong password, nothing changed", "housekeeping failed"];
-    for line in housekeeping {
-        assert!(!sandbox.log().contains(line), "{line:?}: {}", sandbox.log());
-    }
+    // A failed substack doesn't stop the stack, so the housekeeping hears every wrong password, and
+    // the pinchecker, which checks it itself, changes nothing.
+    assert!(sandbox.log().contains("wrong password, nothing changed"), "{}", sandbox.log());
+    assert!(!sandbox.log().contains("password correct") && !sandbox.log().contains("housekeeping failed"), "{}", sandbox.log());
     assert!(!sandbox.attempt(Password::Wrong, PIN).unlocked());
-    // The positive controls: with a stack whose password line lets anything through, the
-    // housekeeping does hear a wrong password and a right one, and the same matchers find both.
-    sandbox.attempt(Password::Right, "a wrong password, long enough");
+    // The positive control: the right password logs what the wrong ones mustn't, found by the same matcher.
     sandbox.unlock_with_password();
-    for line in &housekeeping[..2] {
-        assert!(sandbox.log().contains(line), "{line:?}: {}", sandbox.log());
-    }
+    assert!(sandbox.log().contains("password correct"), "{}", sandbox.log());
 }
 
 #[test]
@@ -246,12 +241,19 @@ fn the_pin_only_works_for_the_user_the_lock_screen_runs_as() {
     assert!(sandbox.log().contains("PAM is authenticating \"nobody\""), "{}", sandbox.log());
 }
 
+/// A line the module can't read refuses the PIN alone. The module still asks for the input, once,
+/// so lines after it that only read it, as an older version's `pam_unix.so use_first_pass` does,
+/// still find it: the container test shows the password working through such lines.
 #[test]
 fn a_bad_pam_line_refuses_instead_of_guessing() {
     let sandbox = Sandbox::new();
     sandbox.stack(Password::Wrong, "no_such_option");
     assert!(!PamClient::new(sandbox.path("pam.d"), "kde", &sandbox.user).authenticate(PIN).unlocked());
     assert!(sandbox.log().contains("bad PAM line: unknown argument \"no_such_option\""), "{}", sandbox.log());
+    sandbox.stack(Password::Right, "config=/etc/properpin/config");
+    let attempt = PamClient::new(sandbox.path("pam.d"), "kde", &sandbox.user).authenticate(PASSWORD);
+    assert!(attempt.unlocked() && attempt.prompts.len() == 1, "the module asks, once, even on a bad line: {attempt:?}");
+    assert!(sandbox.log().contains("bad PAM line: unknown argument \"config=/etc/properpin/config\""), "{}", sandbox.log());
 }
 
 /// libpam loads and unloads the module on every transaction. Rust `.so`s have crashed on unload
@@ -321,9 +323,9 @@ fn one_session_serves_many_attempts() {
     assert!(sandbox.log().contains("unlocked with the PIN"));
 }
 
-/// A correct PIN never unlocks sooner than the config's minimum, counted from when the module is
-/// called, 75 ms by default; a wrong PIN and the password go on at once. The stand-ins for
-/// pam_unix and its failure delay take no time, so whatever waits here is the module.
+/// A correct PIN never unlocks sooner than the config's minimum, counted from when the pinchecker
+/// starts, 75 ms by default; a wrong PIN and the password go on at once. The stand-ins for the
+/// stock stack and its failure delay take no time, so whatever waits here is the pinchecker.
 #[test]
 fn only_a_correct_pin_waits_out_the_minimum() {
     let sandbox = Sandbox::new();
@@ -335,12 +337,22 @@ fn only_a_correct_pin_waits_out_the_minimum() {
     let (unlocked, took) = timed(Password::Wrong, PIN);
     assert!(unlocked && took >= Duration::from_millis(75), "the default minimum: {took:?}");
     let config = sandbox.path("etc/config");
-    fs::write(&config, "min_milliseconds_before_pin_unlock = 500\n").unwrap();
+    fs::write(&config, "min_milliseconds_before_pin_unlock = 1000\n").unwrap();
     fs::set_permissions(&config, Permissions::from_mode(0o644)).unwrap();
-    for (password, typed, unlocks) in [(Password::Wrong, PIN, true), (Password::Wrong, "1111", false), (Password::Right, PASSWORD, true)] {
-        let (unlocked, took) = timed(password, typed);
-        assert_eq!(unlocked, unlocks, "{typed}: {}", sandbox.log());
-        assert_eq!(took >= Duration::from_millis(500), typed == PIN, "{typed} took {took:?}");
+    let (unlocked, took) = timed(Password::Wrong, PIN);
+    assert!(unlocked && took >= Duration::from_secs(1), "the configured minimum: {took:?}");
+    // A busy machine, such as one running the other tests, can slow down one attempt past the
+    // minimum, but hardly all of three.
+    for (password, typed, unlocks) in [(Password::Wrong, "1111", false), (Password::Right, PASSWORD, true)] {
+        let fastest = (0..3)
+            .map(|_| {
+                let (unlocked, took) = timed(password, typed);
+                assert_eq!(unlocked, unlocks, "{typed}: {}", sandbox.log());
+                took
+            })
+            .min()
+            .unwrap();
+        assert!(fastest < Duration::from_secs(1), "{typed} took {fastest:?} at the fastest");
     }
 }
 

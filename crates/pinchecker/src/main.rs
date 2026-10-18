@@ -30,6 +30,7 @@ use std::ffi::OsString;
 use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::time::Instant;
 
 use properpin_core::{Log, Secret, exit};
 use properpin_pinchecker::{Context, Places, Request, UnixChkpwd, dev_options_allowed, read_input, serve};
@@ -38,15 +39,17 @@ use properpin_sys::{Account, FileLog, SystemClock, Yescrypt, current_egid, curre
 mod secure;
 
 fn main() -> ExitCode {
+    // What a correct PIN's answer waits from (`Reply::not_before`).
+    let started = Instant::now();
     // A panic aborts at once: no unwinding through half-done work, and no backtrace, whose printing
     // would read RUST_BACKTRACE from the caller's environment. The attempt was already counted.
     std::panic::set_hook(Box::new(|_| std::process::abort()));
     secure::start_clean();
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
-    ExitCode::from(run(&args))
+    ExitCode::from(run(&args, started))
 }
 
-fn run(args: &[OsString]) -> u8 {
+fn run(args: &[OsString], started: Instant) -> u8 {
     let options = match Options::parse(args) {
         Ok(options) => options,
         Err(why) => {
@@ -119,6 +122,8 @@ fn run(args: &[OsString]) -> u8 {
     let context = Context { places: &places, hasher: &Yescrypt, clock: &SystemClock, password: &password, log: log.as_ref() };
     let reply = serve(options.request, &caller, &typed, &context);
     drop(typed);
+    // The budget is saved and its lock released by now, so the wait holds up no other attempt.
+    std::thread::sleep(reply.not_before.saturating_sub(started.elapsed()));
     // Nothing to do if stdout is gone: the exit code is the answer.
     let _ = std::io::stdout().write_all(reply.output.as_bytes());
     reply.code

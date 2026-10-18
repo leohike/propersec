@@ -1,6 +1,6 @@
 # Current concerns
 
-What was still open on 2026-10-17, after the pepper was dropped and `install` became the one command that edits PAM. Most come from `docs/chaos/review-of-dropping-the-pepper.md`, which has the details; the last came out of the install change. Listed most serious first, each with the fix that seems right. The older, longer list is `docs/chaos/concerns.md`.
+What was still open on 2026-10-17, after the pepper was dropped and `install` became the one command that edits PAM, and since 2026-10-18, when `install` stopped editing PAM and `integrate-into-pam.sh` took that over, only when run. Most come from `docs/chaos/review-of-dropping-the-pepper.md`, which has the details; the last came out of the install change. Listed most serious first, each with the fix that seems right. The older, longer list is `docs/chaos/concerns.md`.
 
 Fixed the same day: checks for absence that could pass while checking nothing. The container test's "no pinchecker left running" looked for a hardcoded process name that went stale at the rename to `properpin-pinchecker`, so it found nothing, and passed, whatever was running. Its matchers, and those of the checks that another service or an uninstalled system logs nothing of properpin's, are now derived from the installed file names, and each check for absence has a positive control that finds its target in the same run; the PAM stack test's "no housekeeping after a wrong password", which only matched the module's error, now matches the housekeeping's own answers. Breaking each matcher on purpose failed the scenario it guards.
 
@@ -10,16 +10,22 @@ Also fixed that day: one badly moded user file turned the PIN off for everyone, 
 
 ## The tests can be trusted a little less
 
-- The confirmation prompt on a real terminal, `y` and `N`, is untested, in `properpin` and in `install.sh` alike.
+- The confirmation prompt on a real terminal, `y` and `N`, is untested, in `properpin` and in `integrate-into-pam.sh` alike.
 - Mutation testing hasn't been run on the new code.
 
 The fix: drive the prompts through a pseudo-terminal in the CLI tests; a run of `just mutants`, working through what survives.
 
-## install edits any PAM file with the one stock line
+## faillock doesn't stop the PIN
 
-`install` refuses only a `/etc/pam.d/kde` without exactly one `auth substack password-auth` line. Anything else around it passes: `pam_fprintd`, `pam_sss`, a `pam_faillock` someone added. properpin's second line assumes the password check is plain `pam_unix`, so on a machine that authenticates through sssd it would refuse the right password and lock the lock screen.
+Since 2026-10-18 every input the `check` line doesn't accept goes through the stock `password-auth` stack, so with authselect's `with-faillock` on (it is off on stock Fedora) a wrong PIN counts towards faillock's lockout like a wrong password, as it should. Two gaps remain, both only with faillock on. While faillock has the account locked, a right PIN still unlocks, since the `check` line runs before the substack that holds faillock. And a right password still unpauses the PIN, since the housekeeping runs after the substack whatever it answered, and asks `unix_chkpwd`, which knows nothing of faillock.
 
-The fix, deferred: edit the file only when its auth lines are exactly Fedora's stock pair (`auth substack password-auth`, then `auth include postlogin`), and perhaps only with authselect's plain local profile behind it. Anywhere else, install and check the files, print the block with its markers, and leave the edit to the user; on later upgrades, leave a hand-placed block alone too and have `check` show how it differs from the shipped lines. The README then says plainly: automatic on stock Fedora-family KDE, manual elsewhere.
+The fix, deferred: have the pinchecker refuse both the PIN and the housekeeping while faillock has the account locked, asking faillock the way `pam_faillock preauth` does.
+
+## integrate-into-pam.sh edits any PAM file with the one stock line
+
+Until 2026-10-18 `install` edited `/etc/pam.d/kde` itself, with a `pam_unix` line of its own that assumed the password check is plain `pam_unix`: on a machine that authenticates through sssd it would have refused the right password and locked the lock screen. Now `install` never touches PAM, the `pam_unix` line is gone, and properpin's two lines sit around the stock stack without changing what it decides, so that lock-out can't happen. `integrate-into-pam.sh add`, which only runs when asked, still edits any file with exactly one `auth substack password-auth` line, whatever is around it or behind it. What is left for a user whose password `unix_chkpwd` can't check (sssd, systemd-homed): the housekeeping never finds their password right, so a paused PIN stays paused for them.
+
+The fix, deferred: have `add` say so when the auth lines aren't Fedora's stock pair, or the profile behind them isn't authselect's plain local one, and have the README say plainly what properpin was tested with.
 
 ## Considered and dismissed
 

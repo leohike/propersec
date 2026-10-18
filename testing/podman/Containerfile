@@ -1,6 +1,7 @@
 # properpin's system test: a stock Fedora 44 with properpin installed by packaging/install.sh and
-# enabled in the real /etc/pam.d/kde, then exercised through the real pam_unix and unix_chkpwd by
-# crates/systest. Run it with `just podman`; the build context is the repo root.
+# its lines put into the real /etc/pam.d/kde by packaging/integrate-into-pam.sh, then exercised
+# through the real pam_unix and unix_chkpwd by crates/systest. Run it with `just podman`; the build
+# context is the repo root.
 
 # Build with Fedora's own toolchain and libraries, never the host's.
 FROM registry.fedoraproject.org/fedora:44 AS build
