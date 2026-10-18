@@ -75,6 +75,8 @@ From a clone, as yourself (not with sudo; the recipes ask for sudo themselves):
 ```
 just install               # build in podman, then install.sh install and check; run it again to update to what is checked out
 just integrate-into-pam    # properpin's two lines into /etc/pam.d/kde, after a diff and a yes; the PIN works from then on
+just install-both          # install, integrate-into-pam, then pin_unpause_by = both; install-setcred and install-password-check likewise
+just logs                  # print properpin's journal lines of the last 30 minutes and how it is set up, to paste into a report; just logs "2 hours ago"
 just check                 # install.sh check
 just remove-from-pam       # properpin's lines out of /etc/pam.d/kde, after a diff and a yes
 just uninstall             # install.sh uninstall, once remove-from-pam has run

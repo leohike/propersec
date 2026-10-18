@@ -27,7 +27,7 @@
 
 use std::fs::{self, Permissions};
 use std::io::{ErrorKind, Read, Write};
-use std::os::unix::fs::{PermissionsExt, chown, symlink};
+use std::os::unix::fs::{MetadataExt, PermissionsExt, chown, symlink};
 use std::os::unix::net::UnixDatagram;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -187,6 +187,7 @@ fn run() -> ExitCode {
         ("with pin_unpause_by = setcred, only a real password unlock unpauses the PIN", with_setcred_only_a_real_unlock_unpauses),
         ("with pin_unpause_by = both, each path does the housekeeping", with_both_each_path_does_the_housekeeping),
         ("the pinchecker's unlocked request changes nothing unless the config says so", unlocked_needs_the_config),
+        ("set-pin-unpause-by.sh changes that one setting, and the lock screen follows it", set_pin_unpause_by_sh),
         ("a missing pinchecker fails closed", a_missing_pinchecker_fails_closed),
         ("an older version's lines keep the password working until add replaces them", an_older_versions_lines_keep_the_password),
         ("status shows your own PIN only", status_shows_your_own_pin),
@@ -530,6 +531,35 @@ fn unlocked_needs_the_config(world: &World) -> Outcome {
     let done = world.as_user(USER, &[PINCHECKER, "unlocked"], b"")?;
     expect_code(&done, exit::YES, "unlocked with pin_unpause_by = setcred")?;
     world.pin_unlocks()
+}
+
+/// What the `just install-*` recipes run: the one setting changes, the rest of the config stays,
+/// doctor finds nothing wrong, and the next password unlock goes the new way.
+fn set_pin_unpause_by_sh(world: &World) -> Outcome {
+    write_file(&world.config(), "# kept\nmax_failures = 5\npin_unpause_by = both\n", 0, 0, 0o644)?;
+    set_pin_unpause_by("setcred")?;
+    let text = fs::read_to_string(world.config()).map_err(message)?;
+    if text != "# kept\nmax_failures = 5\npin_unpause_by = setcred\n" {
+        return Err(format!("the config became:\n{text}"));
+    }
+    let info = fs::metadata(world.config()).map_err(message)?;
+    if (info.uid(), info.gid(), info.mode() & 0o7777) != (0, 0, 0o644) {
+        return Err(format!("the config is {}:{} {:o}, not root:root 644", info.uid(), info.gid(), info.mode() & 0o7777));
+    }
+    properpin_as_root(&["doctor"], "")?;
+    let said = set_pin_unpause_by("setcred")?;
+    if !said.contains("already has pin_unpause_by = setcred") {
+        return Err(format!("the second run said: {said}"));
+    }
+    let password = world.kde(PASSWORD)?;
+    expect(
+        password.unlocked && password.log.contains(BY_SETCRED) && !password.log.contains(PASSWORD_CORRECT),
+        "not unpaused by setcred",
+        &password,
+    )?;
+    fs::remove_file(world.config()).map_err(message)?;
+    set_pin_unpause_by("password-check")?;
+    world.unlock_with_password()
 }
 
 /// What this machine had before 2026-10-18: properpin's lines between markers, with a pam_unix line of
@@ -1542,6 +1572,18 @@ fn integrate(args: &[&str]) -> Outcome<String> {
         .map_err(message)?;
     let said = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
     if output.status.success() { Ok(said) } else { Err(format!("integrate-into-pam.sh {}:\n{said}", args.join(" "))) }
+}
+
+/// Run `packaging/set-pin-unpause-by.sh` against the real root.
+fn set_pin_unpause_by(mode: &str) -> Outcome<String> {
+    let output = Command::new("bash")
+        .arg(format!("{PRODUCT}/packaging/set-pin-unpause-by.sh"))
+        .arg(mode)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(message)?;
+    let said = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    if output.status.success() { Ok(said) } else { Err(format!("set-pin-unpause-by.sh {mode}:\n{said}")) }
 }
 
 /// Run `packaging/install.sh` against the real root, from the container's build.

@@ -1,8 +1,10 @@
 # properpin -- a PIN for the KDE lock screen, within limits. Every recipe works in target/, a
 # temporary directory, or a podman container, and never touches this machine's /etc or /run, except
-# install, check and uninstall, which run packaging/install.sh on this machine, and
-# integrate-into-pam and remove-from-pam, which run packaging/integrate-into-pam.sh, all through
-# sudo. Only the last two ever touch /etc/pam.d.
+# install, check and uninstall, which run packaging/install.sh on this machine, integrate-into-pam
+# and remove-from-pam, which run packaging/integrate-into-pam.sh, the three install-* recipes, which
+# run all of install, integrate-into-pam and packaging/set-pin-unpause-by.sh, and logs, which only
+# reads, all through sudo. Only integrate-into-pam, remove-from-pam and the install-* recipes ever
+# touch /etc/pam.d.
 
 # List the recipes
 [private]
@@ -24,6 +26,44 @@ install: _not-root release
     @echo "installing properpin $(git describe --always --dirty)"
     sudo packaging/install.sh install
     sudo packaging/install.sh check
+
+# Install, then integrate-into-pam (which asks first, and does nothing when the lines are in already), then pin_unpause_by = password-check in /etc/properpin/config: only the pinchecker's own password check unpauses the PIN, the default. The config keeps the setting through later plain installs
+install-password-check: install integrate-into-pam (_pin-unpause-by "password-check")
+
+# Install, then integrate-into-pam (which asks first, and does nothing when the lines are in already), then pin_unpause_by = setcred: only pam_setcred after a successful unlock unpauses the PIN, and the password is never read. The config keeps the setting through later plain installs
+install-setcred: install integrate-into-pam (_pin-unpause-by "setcred")
+
+# Install, then integrate-into-pam (which asks first, and does nothing when the lines are in already), then pin_unpause_by = both: the password check and pam_setcred each unpause the PIN, to compare them in the logs. The config keeps the setting through later plain installs
+install-both: install integrate-into-pam (_pin-unpause-by "both")
+
+# Set pin_unpause_by in /etc/properpin/config, keeping every other setting, then show what doctor finds
+[private]
+_pin-unpause-by mode: _not-root
+    sudo packaging/set-pin-unpause-by.sh {{ mode }}
+    sudo /usr/local/bin/properpin doctor
+
+# Print, for pasting into a bug report or a chat, the journal lines of properpin, of every PAM module on the lock screen's kde service and of kscreenlocker since SINCE (default: 30 minutes ago, any journalctl --since works), then what is installed and how: the checkout, /etc/pam.d/kde, the config, doctor and status. Only prints; writes nothing anywhere. Never shows a PIN or a password, which nothing logs; it does show your user name and the times you unlocked
+logs since="30 min ago": _not-root
+    #!/usr/bin/env bash
+    set -uo pipefail
+    section() { printf '\n===== %s\n' "$*"; }
+    section "properpin logs since {{ since }}, printed $(date -Is)"
+    section "checkout"
+    echo "$(git describe --always --dirty) on branch $(git branch --show-current)"
+    ls -l --time-style=full-iso /usr/local/lib64/security/pam_properpin.so /usr/local/libexec/properpin/properpin-pinchecker 2>&1
+    section "journal"
+    sudo journalctl -q --since "{{ since }}" --no-pager -o short-iso | grep -E 'properpin-pinchecker\[|pam_[a-z_]+\(kde[:-]|kscreenlocker' || echo "(nothing)"
+    section "/etc/pam.d/kde"
+    cat /etc/pam.d/kde
+    section "integrate-into-pam check"
+    packaging/integrate-into-pam.sh check
+    section "/etc/properpin/config"
+    sudo cat /etc/properpin/config 2>/dev/null || echo "(no config: every setting at its default, pin_unpause_by = password-check)"
+    section "properpin doctor"
+    sudo /usr/local/bin/properpin doctor 2>&1
+    section "properpin status"
+    /usr/local/bin/properpin status 2>&1
+    section "end"
 
 # Check what is installed on this machine: every file, the group, and properpin's lines in /etc/pam.d/kde, if it has any
 check: _not-root
