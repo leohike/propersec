@@ -16,6 +16,8 @@ One change to the `check` line was needed, described more fully under how libpam
 
 Tested on 2026-10-18: `crates/pam/tests/stack.rs` (the three paths in each mode, and a bad value), `crates/pinchecker/tests/pinchecker.rs` (`unlocked` in each mode, with a `unix_chkpwd` that must not run), and four new scenarios in `crates/systest` that `just podman` ran on a stock Fedora 44 through the real `kde` stack and `pam_unix`: all 45 scenarios passed. Faillock is not covered yet.
 
+On a real lock screen, on 2026-10-18: kscreenlocker on the Aurora VM (`aurora-first`), installed with `just install-both`. Every password unlock logged `pam_setcred(PAM_REFRESH_CRED) after a password unlock; pin_unpause_by is both`, between the password check's `password correct, PIN enabled` and the setcred path's `unlocked through the password stack (setcred), PIN enabled`. No PIN unlock and no wrong input logged a `pam_setcred` line. Three wrong inputs paused the PIN, further wrong passwords left it paused, and the password unpaused it. kscreenlocker passes `PAM_REFRESH_CRED`, as its source says. A greeter started before `integrate-into-pam` kept the old lines it had read at `pam_start`, so its first attempts logged "bad PAM line" and refused the PIN alone, as designed.
+
 ## The problem
 
 Today the `housekeeping` line in `/etc/pam.d/kde` runs after the stock `password-auth` substack whatever it answered, since a failed substack doesn't stop the stack. So it runs after a wrong password too, and to tell a right password from a wrong one it reads `PAM_AUTHTOK`, passes it to the pinchecker, and the pinchecker checks it through `unix_chkpwd`. That makes properpin take the password, check it as the password, and so know that it holds the right one.
