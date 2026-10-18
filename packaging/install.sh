@@ -1,23 +1,26 @@
 #!/usr/bin/env bash
-# screenlock-pin's installer. It never touches /etc/pam.d: integrate-into-pam.sh, next to it, puts
-# screenlock-pin's lines into /etc/pam.d/kde and takes them out, and only when you run it.
+# screenlock-pin's installer. Of /etc/pam.d it writes only screenlock-pin's own file, screenlock-auth,
+# which does nothing until /etc/pam.d/kde names it: integrate-into-pam.sh, next to it, changes kde's
+# line to do so and back, and only when you run it.
 #
 #   install.sh install     install the screenlock-pin group, the module, the setgid PIN checker, the
-#                          command, /etc/screenlock-pin and /var/lib/screenlock-pin, and check them. Installing
-#                          again, or a newer version, is the same command. Then says whether
-#                          /etc/pam.d/kde has the lines this version ships, and prints what screenlock-pin doctor finds in the PINs,
-#                          budgets and config, which install never judges or changes
+#                          command, /etc/pam.d/screenlock-auth, /etc/screenlock-pin and /var/lib/screenlock-pin,
+#                          and check them. Installing again, or a newer version, is the same command.
+#                          Refuses, before it changes anything, where properpin (screenlock-pin's name
+#                          until 2026-10-18) or an earlier screenlock-pin's lines in /etc/pam.d/kde are.
+#                          Then says whether /etc/pam.d/kde has screenlock-pin's line, and prints what
+#                          screenlock-pin doctor finds in the PINs, budgets and config, which install never
+#                          judges or changes
 #   install.sh check       every installed path: kind, mode, owner, same bytes as the build, SELinux label,
 #                          and what the binaries load; that the group has no members and a locked
-#                          password; and that screenlock-pin's lines in /etc/pam.d/kde, if it has any, are
-#                          exactly the ones this version ships. The PINs, budgets and config are
-#                          screenlock-pin doctor's
+#                          password; and that /etc/pam.d/kde has screenlock-pin's line or nothing of
+#                          screenlock-pin's. The PINs, budgets and config are screenlock-pin doctor's
 #   install.sh check-build what the three built files load, as install checks it before it changes
 #                          anything; needs no root, and is what `just release` runs
 #   install.sh uninstall   remove what install put in place; keeps /etc/screenlock-pin, /var/lib/screenlock-pin
-#                          and the screenlock-pin group. Refuses while /etc/pam.d/kde has screenlock-pin's lines,
-#                          since lines naming a deleted module lock the lock screen:
-#                          integrate-into-pam.sh remove takes them out first
+#                          and the screenlock-pin group. Refuses while /etc/pam.d/kde has anything of
+#                          screenlock-pin's, since kde naming a deleted /etc/pam.d/screenlock-auth locks
+#                          the lock screen: integrate-into-pam.sh remove takes the line out first
 #
 # Options:
 #   --from DIR       where the built libpam_screenlock_pin.so, screenlock-pin-checker and screenlock-pin are
@@ -27,9 +30,8 @@
 #   --pin-checker-group GROUP   tests only: the group the PIN checker runs with (default: screenlock-pin)
 #
 # Each file is replaced by a rename, so a lock screen already using screenlock-pin never sees a missing
-# or half-written one. Pieces that don't fit together, after a failure partway or with an older
-# version's lines still in /etc/pam.d/kde, only ever refuse the PIN: the module steps aside from
-# anything it can't use, and the password works as always.
+# or half-written one. Pieces that don't fit together, after a failure partway, only ever refuse the
+# PIN: the module steps aside from anything it can't use, and the password works as always.
 #
 # Each binary must load its libraries from the system's directories alone, which only root can
 # change: no search path of its own (RPATH, RUNPATH), the system's loader, and every library found
@@ -87,12 +89,15 @@ budget_dir=/var/lib/screenlock-pin
 sysusers=/etc/sysusers.d/screenlock-pin.conf
 tmpfiles=/etc/tmpfiles.d/screenlock-pin.conf
 pam_file=/etc/pam.d/kde
+# screenlock-pin's own PAM file, which kde names once integrate-into-pam.sh add has run.
+auth_file=/etc/pam.d/screenlock-auth
 # The directories install had to create, which uninstall removes again once they are empty.
 created=$etc/install.created-dirs
 
 built_module=$from/libpam_screenlock_pin.so
 built_binary=$from/screenlock-pin
 built_pin_checker=$from/screenlock-pin-checker
+shipped_auth=$here/screenlock-auth.pam
 
 wrapper() {
     cat <<EOF
@@ -189,6 +194,24 @@ check_pam() {
     pam_said=$("$here/integrate-into-pam.sh" check --root "${root:-/}" 2>&1) || pam_code=$?
 }
 
+# This version installs only where nothing older is: properpin, as screenlock-pin was called until
+# 2026-10-18, or an earlier screenlock-pin, whose lines in the PAM file named the module itself.
+refuse_older() {
+    local found=() path
+    for path in /etc/properpin /var/lib/properpin /usr/local/libexec/properpin /usr/local/bin/properpin /usr/local/lib64/security/pam_properpin.so; do
+        if [[ -e $root$path || -L $root$path ]]; then
+            found+=("$path")
+        fi
+    done
+    if [[ -f $root$pam_file ]] && grep -qE 'properpin|pam_screenlock_pin' "$root$pam_file"; then
+        found+=("lines in $pam_file naming properpin or pam_screenlock_pin.so")
+    fi
+    if ((${#found[@]})); then
+        printf '%s\n' "${found[@]}" >&2
+        fail "properpin, as screenlock-pin was called until 2026-10-18, or an earlier screenlock-pin is installed here, and this version installs only where neither is: take them out by hand, as README-BIG.md says under Installing, then install again; nothing was changed"
+    fi
+}
+
 require_root() {
     if [[ $real == 1 && $(id -u) != 0 ]]; then
         fail "$command needs root (it writes to /usr/local and /etc, or reads /etc/gshadow); run it with sudo"
@@ -256,6 +279,8 @@ do_check-build() {
 do_install() {
     require_root
     check_build
+    refuse_older
+    [[ -d $root/etc/pam.d ]] || fail "no /etc/pam.d here, so no PAM to install into; nothing was changed"
     make_dirs "$(dirname "$module_path")" "$(dirname "$command_path")" "$(dirname "$sysusers")" "$(dirname "$tmpfiles")" "$(dirname "$libexec")" "$(dirname "$budget_dir")"
     sysusers_conf | put "$sysusers" 0644
     tmpfiles_conf | put "$tmpfiles" 0644
@@ -275,7 +300,9 @@ do_install() {
     # after the new PIN checker is in place, so there is always one.
     find "$root$libexec" -mindepth 1 -maxdepth 1 ! -name "$(basename "$binary")" ! -name "$(basename "$pin_checker")" -exec rm -rf -- {} +
     wrapper | put "$command_path" 0755
-    relabel "$root$module_path" "$root$libexec" "$root$command_path" "$root$etc" "$root$budget_dir" "$root$sysusers" "$root$tmpfiles"
+    # After the module it names, though a missing module would only refuse the PIN.
+    put "$auth_file" 0644 <"$shipped_auth"
+    relabel "$root$module_path" "$root$libexec" "$root$command_path" "$root$auth_file" "$root$etc" "$root$budget_dir" "$root$sysusers" "$root$tmpfiles"
     if ! check_files; then
         printf '%s\n' "${problems[@]}"
         fail "the installed files don't check out"
@@ -284,7 +311,7 @@ do_install() {
     echo "installed under ${root:-/}"
     check_pam
     echo "$pam_said"
-    echo "with the lines in, the lock screen offers the PIN to each user who sets one with: sudo screenlock-pin set"
+    echo "with the line in, the lock screen offers the PIN to each user who sets one with: sudo screenlock-pin set"
     # Only reported: a PIN doctor finds fault with is refused for its user alone, never for anyone else.
     echo "screenlock-pin doctor:"
     "$root$binary" --etc "$root$etc" --budget "$root$budget_dir" --pin-checker "$root$pin_checker" \
@@ -350,6 +377,8 @@ check_files() {
     expect "$binary" file 755 "$owner" "$group"
     expect "$pin_checker" file 2755 "$owner" "$pin_checker_group"
     expect "$command_path" file 755 "$owner" "$group"
+    expect "$auth_file" file 644 "$owner" "$group"
+    expect_bytes "$auth_file" "$shipped_auth"
     expect "$sysusers" file 644 "$owner" "$group"
     expect "$tmpfiles" file 644 "$owner" "$group"
     expect "$etc" dir 755 "$owner" "$group"
@@ -379,7 +408,7 @@ check_files() {
     fi
     if selinux_enabled; then
         local path
-        for path in "$module_path" "$libexec" "$binary" "$pin_checker" "$command_path" "$etc" "$users" "$budget_dir" "$sysusers" "$tmpfiles"; do
+        for path in "$module_path" "$libexec" "$binary" "$pin_checker" "$command_path" "$auth_file" "$etc" "$users" "$budget_dir" "$sysusers" "$tmpfiles"; do
             matchpathcon -V "$path" >/dev/null 2>&1 || problems+=("$path: wrong SELinux label; install again")
         done
     elif [[ $real == 1 ]]; then
@@ -407,8 +436,9 @@ do_uninstall() {
     require_root
     check_pam
     [[ $pam_code == 3 ]] ||
-        fail "$pam_file still has screenlock-pin's lines, which would lock the lock screen once the module is gone; take them out first, with just remove-from-pam, or: sudo packaging/integrate-into-pam.sh remove; nothing was removed"
-    rm -f "$root$module_path" "$root$command_path" "$root$sysusers" "$root$tmpfiles"
+        fail "$pam_said
+uninstall waits until $pam_file has nothing of screenlock-pin's, since $pam_file naming a deleted $auth_file would lock the lock screen; take screenlock-pin's line out first, with just remove-from-pam, or: sudo packaging/integrate-into-pam.sh remove; nothing was removed"
+    rm -f "$root$auth_file" "$root$module_path" "$root$command_path" "$root$sysusers" "$root$tmpfiles"
     # screenlock-pin's own directory, whatever else ended up in it.
     rm -rf -- "$root$libexec"
     # The directories install created, deepest first, as long as nothing else has moved in.
@@ -421,9 +451,9 @@ do_uninstall() {
         done < <(sort -r "$root$created")
         rm -f "$root$created"
     fi
-    echo "uninstalled; $etc is kept, with any PINs and the copy of $pam_file without screenlock-pin's lines, and"
-    echo "so are $budget_dir, with each user's budget of failures, and the $pin_checker_group group those files"
-    echo "belong to. To remove them all: rm -r $etc $budget_dir && groupdel $pin_checker_group"
+    echo "uninstalled; $etc is kept, with any PINs, and so are $budget_dir, with each user's budget of"
+    echo "failures, and the $pin_checker_group group those files belong to. To remove them all:"
+    echo "rm -r $etc $budget_dir && groupdel $pin_checker_group"
 }
 
 "do_$command"

@@ -2,7 +2,7 @@
 //! the real `/etc/pam.d`, the real `pam_unix` and its own setuid helper `unix_chkpwd`.
 //!
 //! It runs as root inside the container built from `testing/podman/Containerfile` (run it with
-//! `just podman`), never on a real machine: it installs screenlock-pin, puts its lines into
+//! `just podman`), never on a real machine: it installs screenlock-pin, puts its line into
 //! `/etc/pam.d/kde` with `integrate-into-pam.sh`, sets a PIN, and tampers with files as root.
 //!
 //! ```text
@@ -49,6 +49,8 @@ const USER: &str = "alice";
 const PASSWORD: &str = "correct horse battery staple";
 const PIN: &str = "cat4859";
 const KDE: &str = "/etc/pam.d/kde";
+/// screenlock-pin's own PAM file, which `kde` names once `integrate-into-pam.sh add` has run.
+const AUTH: &str = "/etc/pam.d/screenlock-auth";
 const PIN_CHECKER: &str = "/usr/local/libexec/screenlock-pin/screenlock-pin-checker";
 const MODULE: &str = "/usr/local/lib64/security/pam_screenlock_pin.so";
 /// The group the PIN checker runs with, created by install.sh.
@@ -195,7 +197,8 @@ fn run() -> ExitCode {
         ("one session serves many attempts, and the worker exits cleanly", one_session_serves_many_attempts),
         ("a killed worker never unlocks and loses no count", a_killed_worker_loses_no_count),
         ("a correct PIN waits out the minimum, and a kill meanwhile unlocks nothing", a_correct_pin_waits_out_the_minimum),
-        ("installing again keeps the PIN and the lines", installing_again_keeps_the_pin),
+        ("installing again keeps the PIN and the line", installing_again_keeps_the_pin),
+        ("kde naming a deleted screenlock-auth refuses everyone, and install mends it", a_deleted_screenlock_auth_refuses_everyone),
         ("install refuses a build that loads code from elsewhere", install_refuses_a_build_that_loads_code_from_elsewhere),
         ("uninstall leaves PAM as it was", uninstall_leaves_pam_as_it_was),
     ];
@@ -827,8 +830,7 @@ fn a_killed_worker_loses_no_count(world: &World) -> Outcome {
     Ok(())
 }
 
-/// An upgrade is the same install again: the PAM file stays as it is, and so do the PIN and the
-/// budget.
+/// An upgrade is the same install again: `kde` stays as it is, and so do the PIN and the budget.
 fn installing_again_keeps_the_pin(world: &World) -> Outcome {
     let kde = fs::read_to_string(KDE).map_err(message)?;
     world.pin_refused("1111", "not the PIN, consecutive failure 1 of 3")?;
@@ -843,7 +845,7 @@ fn installing_again_keeps_the_pin(world: &World) -> Outcome {
     if Path::new(stale).exists() {
         return Err(format!("install again left {stale}"));
     }
-    if !said.contains("has the lines this version ships") || fs::read_to_string(KDE).map_err(message)? != kde {
+    if !said.contains("has screenlock-pin's line") || fs::read_to_string(KDE).map_err(message)? != kde {
         return Err(format!("install again changed {KDE}:\n{said}"));
     }
     if !said.contains(&format!("no problems; a PIN is set for {USER}")) {
@@ -852,6 +854,26 @@ fn installing_again_keeps_the_pin(world: &World) -> Outcome {
     world.pin_refused("2222", "not the PIN, consecutive failure 2 of 3")?;
     world.pin_unlocks()?;
     install_sh(&["check"]).map(drop)
+}
+
+/// The one new way to lock the lock screen: `kde` naming a `screenlock-auth` that is gone. libpam
+/// then fails every attempt before any module asks for anything, the password too, while `sudo`,
+/// the way in for a repair, works; check says so, and installing again puts the file back.
+fn a_deleted_screenlock_auth_refuses_everyone(world: &World) -> Outcome {
+    world.pin_unlocks()?;
+    fs::remove_file(AUTH).map_err(message)?;
+    let password = world.attempt("kde", PASSWORD)?;
+    let missing = password.log.contains("unable to open config for screenlock-auth");
+    expect(!password.unlocked && password.prompts == 0 && missing, "the password got further than libpam", &password)?;
+    let sudo = world.attempt("sudo", PASSWORD)?;
+    expect(sudo.unlocked, "sudo refused the password", &sudo)?;
+    match integrate(&["check"]) {
+        Err(said) if said.contains("is missing, so the lock screen refuses everyone") => {}
+        other => return Err(format!("check didn't name the missing file: {other:?}")),
+    }
+    install_sh(&["install"])?;
+    world.pin_unlocks()?;
+    world.password_unlocks()
 }
 
 /// A build whose binaries would load libraries from outside the system's directories, such as from
@@ -890,11 +912,12 @@ fn install_refuses_a_build_that_loads_code_from_elsewhere(world: &World) -> Outc
     install_sh(&["check"]).map(drop)
 }
 
-/// Uninstall waits until remove has taken screenlock-pin's lines out, since lines naming a deleted module
-/// lock the lock screen; then the two together leave PAM as it was.
+/// Uninstall waits until remove has changed screenlock-pin's line back, since `kde` naming a deleted
+/// `screenlock-auth` locks the lock screen; then the two together leave PAM as it was.
 fn uninstall_leaves_pam_as_it_was(world: &World) -> Outcome {
     world.pin_unlocks()?;
     let installed = [
+        AUTH,
         MODULE,
         "/usr/local/libexec/screenlock-pin",
         "/usr/local/bin/screenlock-pin",
@@ -907,8 +930,8 @@ fn uninstall_leaves_pam_as_it_was(world: &World) -> Outcome {
     }
     world.module_and_pin_checker_log()?;
     match install_sh(&["uninstall"]) {
-        Err(said) if said.contains("still has screenlock-pin's lines") && said.contains("nothing was removed") => {}
-        other => return Err(format!("uninstall didn't wait for screenlock-pin's lines to come out: {other:?}")),
+        Err(said) if said.contains("uninstall waits until") && said.contains("nothing was removed") => {}
+        other => return Err(format!("uninstall didn't wait for screenlock-pin's line to come out: {other:?}")),
     }
     if let Some(gone) = installed.iter().find(|path| !Path::new(path).exists()) {
         return Err(format!("uninstall refused, but removed {gone}"));
@@ -951,7 +974,7 @@ struct World {
     syslog: Syslog,
     /// `/etc/pam.d/kde` before install.
     stock_kde: String,
-    /// `/etc/pam.d/kde` once `integrate-into-pam.sh add` has put screenlock-pin's lines in.
+    /// `/etc/pam.d/kde` once `integrate-into-pam.sh add` has put screenlock-pin's line in.
     integrated_kde: String,
     /// The user file `screenlock-pin set` wrote.
     pin_file: Vec<u8>,
@@ -1013,7 +1036,7 @@ impl World {
 
         screenlock_pin_as_root(&["set", "--user", USER], &format!("{PIN}\n{PIN}\n"))?;
         let checked = install_sh(&["check"])?;
-        if !checked.contains("has the lines this version ships") {
+        if !checked.contains("has screenlock-pin's line") {
             return Err(format!("install.sh check after set:\n{checked}"));
         }
         // The positive control for every scenario's doctor_finds: a clean system, judged clean.
@@ -1049,11 +1072,14 @@ impl World {
         overwrite(&self.budget_file(), &budget.format())
     }
 
-    /// Back to just after set-up: the PIN set and enabled, this version's lines in the PAM file,
-    /// nothing tampered with.
+    /// Back to just after set-up: the PIN set and enabled, screenlock-pin's line in `kde` and its
+    /// file next to it, nothing tampered with.
     fn reset(&self) -> Outcome {
         if fs::read_to_string(KDE).map_err(message)? != self.integrated_kde {
             fs::write(KDE, &self.integrated_kde).map_err(message)?;
+        }
+        if !Path::new(AUTH).exists() {
+            install_sh(&["install"])?;
         }
         for path in [self.config(), self.user_file().with_extension("real")] {
             match fs::remove_file(&path) {

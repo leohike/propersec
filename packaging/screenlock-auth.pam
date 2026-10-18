@@ -1,0 +1,34 @@
+# /etc/pam.d/screenlock-auth: the KDE lock screen's password check with screenlock-pin's PIN in
+# front of it. screenlock-pin's install.sh puts this file here, replaces it on every install and
+# removes it on uninstall; edits to it don't last.
+#
+# On its own it does nothing: only a PAM file that names it uses it. screenlock-pin's
+# integrate-into-pam.sh add changes one word in /etc/pam.d/kde, its stock line
+#   auth        substack      password-auth
+# to
+#   auth        substack      screenlock-auth
+# and integrate-into-pam.sh remove changes it back, so /etc/pam.d/kde is then stock again, byte for
+# byte. While kde names this file, deleting it makes the lock screen refuse everyone, the password
+# too, so install.sh uninstall refuses until remove has run.
+#
+# kde pulls it in with substack, so a correct PIN ends this file alone: kde then goes on to its
+# "auth include postlogin", as after the password. Any other input goes to the stock password-auth,
+# which checks it as the password exactly as it would without screenlock-pin, faillock and all.
+#
+#   check         the PIN: a match ends this file with success, never sooner than the config's
+#                 min_milliseconds_before_pin_unlock after the PIN checker started (kscreenlocker 6.8
+#                 takes a faster answer for a broken authenticator); anything else is ignored at
+#                 once, and password-auth checks the same input as the password
+#   after-password-auth
+#                 forgives the user's own recent failures, the password among them, and unpauses
+#                 the PIN, after a password unlock: libpam replays pam_setcred down to this line
+#                 only after the stock password-auth stack succeeded, never after a PIN unlock or a
+#                 failure. That is usually the password, but anything password-auth accepts
+#                 counts, a FIDO key with authselect's with-pam-u2f too. It never reads the password
+#
+# crates/pam/tests/stack.rs builds its PAM stack from this very file, swapping only the module's
+# path and password-auth, so the control columns tested are the ones that ship. The container test
+# (just podman) installs it into a stock Fedora for real.
+auth        sufficient    /usr/local/lib64/security/pam_screenlock_pin.so check
+auth        substack      password-auth
+auth        optional      /usr/local/lib64/security/pam_screenlock_pin.so after-password-auth

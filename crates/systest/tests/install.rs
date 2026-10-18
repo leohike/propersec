@@ -12,6 +12,7 @@ use std::sync::OnceLock;
 
 const INSTALL_SH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../packaging/install.sh");
 const INTEGRATE_SH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../packaging/integrate-into-pam.sh");
+const SHIPPED_AUTH: &str = include_str!("../../../packaging/screenlock-auth.pam");
 
 /// Fedora 44's `/etc/pam.d/kde`, from plasma-workspace, as the lock screen reads it.
 const STOCK_KDE: &str = "\
@@ -109,8 +110,8 @@ impl FakeRoot {
         fs::read_to_string(self.kde()).unwrap()
     }
 
-    fn copy(&self) -> PathBuf {
-        self.path("etc/screenlock-pin/kde.pam.without-screenlock-pin")
+    fn auth(&self) -> PathBuf {
+        self.path("etc/pam.d/screenlock-auth")
     }
 }
 
@@ -150,42 +151,44 @@ fn built() -> &'static Path {
     })
 }
 
-/// screenlock-pin's two lines, as `packaging/kde-auth.pam` ships them, and the stock line they go around.
-const CHECK_LINE: &str = "auth        sufficient    /usr/local/lib64/security/pam_screenlock_pin.so check\n";
+/// The stock line in `kde`, and screenlock-pin's, which differ in one word.
 const STOCK_LINE: &str = "auth        substack      password-auth\n";
-const AFTER_PASSWORD_AUTH_LINE: &str = "auth        optional      /usr/local/lib64/security/pam_screenlock_pin.so after-password-auth\n";
+const OWN_LINE: &str = "auth        substack      screenlock-auth\n";
 
-/// `kde` with screenlock-pin's lines put in around its stock substack line.
+/// `kde` with screenlock-pin's line in place of its stock substack line.
 fn integrated(kde: &str) -> String {
-    kde.replacen(STOCK_LINE, &format!("{CHECK_LINE}{STOCK_LINE}{AFTER_PASSWORD_AUTH_LINE}"), 1)
+    assert_eq!(kde.matches(STOCK_LINE).count(), 1, "{kde}");
+    kde.replacen(STOCK_LINE, OWN_LINE, 1)
 }
 
-/// install never touches the PAM file, and says what to run to put screenlock-pin's lines in.
+/// install puts screenlock-pin's own PAM file in place, which nothing uses yet, never touches
+/// `kde`, and says what to run to change it.
 #[test]
-fn install_leaves_pam_alone_and_says_what_to_run() {
+fn install_leaves_kde_alone_and_says_what_to_run() {
     let root = FakeRoot::new();
     let said = root.ok("install");
     assert_eq!(root.kde_text(), STOCK_KDE);
-    assert!(said.contains("has no screenlock-pin lines") && said.contains("just integrate-into-pam"), "{said}");
+    assert_eq!(fs::read_to_string(root.auth()).unwrap(), SHIPPED_AUTH);
+    assert_eq!(fs::metadata(root.auth()).unwrap().permissions().mode() & 0o7777, 0o644);
+    assert!(said.contains("has no screenlock-pin line") && said.contains("just integrate-into-pam"), "{said}");
     let checked = root.ok("check");
-    assert!(checked.contains("all screenlock-pin files in place") && checked.contains("has no screenlock-pin lines"), "{checked}");
+    assert!(checked.contains("all screenlock-pin files in place") && checked.contains("has no screenlock-pin line"), "{checked}");
     assert_eq!(root.pam("check").0, Some(3));
-    assert!(!root.copy().exists(), "nothing saved, since nothing changed");
 }
 
 #[test]
 fn add_remove_and_uninstall_leave_pam_as_it_was() {
     let root = FakeRoot::new();
     root.ok("install");
-    assert!(root.pam_ok("add").contains("has screenlock-pin's lines"));
+    assert!(root.pam_ok("add").contains("has screenlock-pin's line"));
     assert_eq!(root.kde_text(), integrated(STOCK_KDE));
-    assert_eq!(fs::read_to_string(root.copy()).unwrap(), STOCK_KDE, "the copy is the file without screenlock-pin's lines");
-    assert!(root.pam_ok("check").contains("has the lines this version ships"));
-    assert!(root.ok("check").contains("has the lines this version ships"));
+    assert!(root.pam_ok("check").contains("has screenlock-pin's line, auth substack screenlock-auth"));
+    assert!(root.ok("check").contains("has screenlock-pin's line"));
 
     // The fake root had only etc/pam.d: every directory install had to create goes again, except
     // those holding what is kept. Each is there now, or its absence afterwards would prove nothing.
     let installed = [
+        "etc/pam.d/screenlock-auth",
         "usr/local/lib64/security/pam_screenlock_pin.so",
         "usr/local/libexec/screenlock-pin",
         "usr/local/bin/screenlock-pin",
@@ -198,14 +201,17 @@ fn add_remove_and_uninstall_leave_pam_as_it_was() {
     for path in installed {
         assert!(root.path(path).exists(), "{path} isn't there after install");
     }
-    // Lines naming a deleted module would lock the lock screen, so uninstall waits for remove.
+    // kde naming a deleted screenlock-auth would lock the lock screen, so uninstall waits for remove.
     let said = root.refused("uninstall");
     assert!(
-        said.contains("still has screenlock-pin's lines") && said.contains("just remove-from-pam") && said.contains("nothing was removed"),
+        said.contains("has screenlock-pin's line")
+            && said.contains("uninstall waits until")
+            && said.contains("just remove-from-pam")
+            && said.contains("nothing was removed"),
         "{said}"
     );
     assert!(installed.iter().all(|path| root.path(path).exists()), "uninstall refused, but removed something");
-    assert!(root.pam_ok("remove").contains("took screenlock-pin's lines out"));
+    assert!(root.pam_ok("remove").contains("changed /etc/pam.d/kde back to auth substack password-auth"));
     assert_eq!(root.kde_text(), STOCK_KDE);
     assert_eq!(root.pam("check").0, Some(3));
     root.ok("uninstall");
@@ -213,8 +219,8 @@ fn add_remove_and_uninstall_leave_pam_as_it_was() {
     for gone in installed {
         assert!(!root.path(gone).exists(), "{gone} is still there");
     }
+    assert!(root.path("etc/pam.d").is_dir(), "the PAM directory stays");
     assert!(root.path("etc/screenlock-pin/users").is_dir(), "PINs are kept");
-    assert!(root.copy().exists(), "the copy is kept, for whoever wants it");
     assert!(root.path("var/lib/screenlock-pin").is_dir(), "budgets are kept");
     assert!(root.pam_ok("remove").contains("nothing to do"));
 }
@@ -224,17 +230,23 @@ fn adding_twice_is_harmless() {
     let root = FakeRoot::new();
     root.ok("install");
     root.pam_ok("add");
-    assert!(root.pam_ok("add").contains("already has the lines this version ships"));
-    assert_eq!(root.kde_text(), integrated(STOCK_KDE), "the lines go in once");
+    assert!(root.pam_ok("add").contains("already has screenlock-pin's line"));
+    assert_eq!(root.kde_text(), integrated(STOCK_KDE), "the line changes once");
     root.ok("install");
-    assert_eq!(root.kde_text(), integrated(STOCK_KDE), "installing again leaves them as they are");
+    assert_eq!(root.kde_text(), integrated(STOCK_KDE), "installing again leaves it as it is");
 }
 
+/// kde must never name a file that isn't there, nor screenlock-auth a module that isn't.
 #[test]
 fn add_refuses_until_screenlock_pin_is_installed() {
     let root = FakeRoot::new();
     assert!(root.pam_refused("add").contains("screenlock-pin isn't installed"));
-    assert!(!root.copy().exists());
+    for missing in ["etc/pam.d/screenlock-auth", "usr/local/lib64/security/pam_screenlock_pin.so"] {
+        let root = FakeRoot::new();
+        root.ok("install");
+        fs::remove_file(root.path(missing)).unwrap();
+        assert!(root.pam_refused("add").contains("screenlock-pin isn't installed"), "{missing}");
+    }
 }
 
 #[test]
@@ -248,9 +260,8 @@ fn add_refuses_an_unexpected_pam_file_and_changes_nothing() {
         fs::write(root.kde(), kde).unwrap();
         let said = root.pam_refused("add");
         assert!(said.contains(why), "{said}");
-        // The lines, for whoever puts them in by hand.
-        assert!(said.contains(CHECK_LINE) && said.contains(AFTER_PASSWORD_AUTH_LINE), "{said}");
-        assert!(!root.copy().exists());
+        // What to do, for whoever does it by hand.
+        assert!(said.contains("change password-auth to screenlock-auth on that line"), "{said}");
     }
     let root = FakeRoot::new();
     root.ok("install");
@@ -264,39 +275,90 @@ fn add_refuses_an_unexpected_pam_file_and_changes_nothing() {
     assert!(root.kde().is_symlink(), "the link stays a link");
 }
 
-/// Whatever screenlock-pin's lines look like after hand edits, remove takes out exactly them.
+/// add changes one word and remove changes it back, so whatever spacing and comment the stock line
+/// has, and whatever an admin added elsewhere, the file comes back byte for byte.
 #[test]
-fn remove_takes_out_every_screenlock_pin_line_and_nothing_else() {
-    let root = FakeRoot::new();
-    root.ok("install");
-    let own = "auth        sufficient    pam_unix.so try_first_pass\n# an admin's note\n";
-    let messy = format!(
-        "{AFTER_PASSWORD_AUTH_LINE}{CHECK_LINE}{own}{}auth   sufficient   /usr/local/lib64/security/pam_screenlock_pin.so  check   log=/tmp/log\n",
-        integrated(STOCK_KDE)
-    );
-    fs::write(root.kde(), &messy).unwrap();
-    assert_eq!(root.pam("check").0, Some(1));
-    root.pam_ok("remove");
-    assert_eq!(root.kde_text(), format!("{own}{STOCK_KDE}"));
+fn remove_gives_back_the_file_byte_for_byte() {
+    for stock in [STOCK_KDE.to_owned(), STOCK_KDE.replace(STOCK_LINE, "auth\tsubstack password-auth   # the password\n")] {
+        let root = FakeRoot::new();
+        root.ok("install");
+        fs::write(root.kde(), &stock).unwrap();
+        root.pam_ok("add");
+        // The stock substack line is the file's first.
+        assert_eq!(root.kde_text(), stock.replacen("password-auth", "screenlock-auth", 1));
+        assert_eq!(root.pam("check").0, Some(0), "{}", root.kde_text());
+        let edited = format!("{}# added by an admin\n", root.kde_text());
+        fs::write(root.kde(), &edited).unwrap();
+        assert!(root.pam_ok("add").contains("already has screenlock-pin's line"));
+        assert_eq!(root.kde_text(), edited);
+        root.pam_ok("remove");
+        assert_eq!(root.kde_text(), format!("{stock}# added by an admin\n"));
+    }
 }
 
+/// This version installs only where nothing older is, and changes only a stock `kde` or its own
+/// line: properpin's lines, an earlier screenlock-pin's, which named the module in `kde` itself, and
+/// hand edits of screenlock-pin's line are refused, and left as they are.
 #[test]
-fn add_keeps_changes_made_elsewhere() {
+fn older_lines_and_hand_edits_are_refused_and_left_alone() {
+    let properpin = "\
+# properpin begin: added by install.sh install; install.sh uninstall removes everything down to the end marker
+auth  [success=done default=ignore]  /usr/local/lib64/security/pam_properpin.so check
+auth  [success=ok default=die]       pam_unix.so use_first_pass
+# properpin end
+";
+    let earlier = "auth        sufficient    /usr/local/lib64/security/pam_screenlock_pin.so check\n";
+    for (kde, why, install_refuses) in [
+        (format!("{properpin}{STOCK_KDE}"), "has lines of properpin", true),
+        (format!("{earlier}{STOCK_KDE}"), "names pam_screenlock_pin.so itself", true),
+        (format!("{OWN_LINE}{STOCK_KDE}"), "edited by hand", false),
+        (format!("{}{OWN_LINE}", integrated(STOCK_KDE)), "edited by hand", false),
+        (STOCK_KDE.replace(STOCK_LINE, "auth        include       screenlock-auth\n"), "edited by hand", false),
+    ] {
+        let root = FakeRoot::new();
+        root.ok("install");
+        fs::write(root.kde(), &kde).unwrap();
+        let (code, said) = root.pam("check");
+        assert!(code == Some(1) && said.contains(why) && said.contains("put it back as stock by hand"), "{kde}\n{said}");
+        assert!(root.pam_refused("add").contains(why), "{kde}");
+        assert!(root.pam_refused("remove").contains(why), "{kde}");
+        assert!(root.refused("uninstall").contains("nothing was removed"), "{kde}");
+        assert!(root.refused("check").contains(why), "{kde}");
+        if install_refuses {
+            let said = root.refused("install");
+            assert!(said.contains("installs only where neither is") && said.contains("nothing was changed"), "{said}");
+            let fresh = FakeRoot::new();
+            fs::write(fresh.kde(), &kde).unwrap();
+            fresh.refused("install");
+            assert!(!fresh.path("usr").exists() && !fresh.auth().exists(), "install refused, but changed something");
+        }
+        assert_eq!(root.kde_text(), kde);
+    }
+    let root = FakeRoot::new();
+    fs::create_dir_all(root.path("usr/local/libexec/properpin")).unwrap();
+    let said = root.refused("install");
+    assert!(said.contains("/usr/local/libexec/properpin") && said.contains("nothing was changed"), "{said}");
+    assert!(!root.auth().exists() && !root.path("usr/local/bin").exists());
+}
+
+/// kde naming a missing screenlock-auth makes the lock screen refuse everyone, the password too:
+/// check says so, install puts the file back, and remove still works.
+#[test]
+fn a_missing_screenlock_auth_is_named_and_mended() {
     let root = FakeRoot::new();
     root.ok("install");
     root.pam_ok("add");
-    let edited = format!("{}# added by an admin\n", root.kde_text());
-    fs::write(root.kde(), &edited).unwrap();
-    assert!(root.pam_ok("add").contains("already has the lines this version ships"));
-    assert_eq!(root.kde_text(), edited);
-    fs::write(root.kde(), format!("{CHECK_LINE}{STOCK_KDE}# added by an admin\n")).unwrap();
-    root.pam_ok("add");
-    assert_eq!(root.kde_text(), integrated(&format!("{STOCK_KDE}# added by an admin\n")));
-    assert_eq!(
-        fs::read_to_string(root.copy()).unwrap(),
-        format!("{STOCK_KDE}# added by an admin\n"),
-        "the copy is of the file as it is now, without screenlock-pin's lines"
-    );
+    fs::remove_file(root.auth()).unwrap();
+    let (code, said) = root.pam("check");
+    assert!(code == Some(1) && said.contains("is missing, so the lock screen refuses everyone, the password too"), "{said}");
+    let problems = root.refused("check");
+    assert!(problems.contains("/etc/pam.d/screenlock-auth: missing") && problems.contains("refuses everyone"), "{problems}");
+    root.ok("install");
+    assert_eq!(root.pam("check").0, Some(0));
+    fs::remove_file(root.auth()).unwrap();
+    root.pam_ok("remove");
+    assert_eq!(root.kde_text(), STOCK_KDE);
+    root.ok("uninstall");
 }
 
 #[test]
@@ -315,6 +377,8 @@ fn install_puts_everything_in_place_and_twice_is_harmless() {
     );
     let mode = |path: &str| fs::metadata(root.path(path)).unwrap().permissions().mode() & 0o7777;
     assert_eq!(mode("usr/local/libexec/screenlock-pin/screenlock-pin-checker"), 0o2755, "the PIN checker is setgid only");
+    assert_eq!(mode("etc/pam.d/screenlock-auth"), 0o644);
+    assert_eq!(fs::read_to_string(root.auth()).unwrap(), SHIPPED_AUTH);
     assert_eq!(mode("etc/screenlock-pin/users"), 0o750);
     assert!(!root.path("run").exists(), "nothing in /run any more");
     assert_eq!(mode("var/lib/screenlock-pin"), 0o1770);
@@ -343,8 +407,10 @@ fn check_finds_what_is_wrong() {
     fs::set_permissions(root.path("usr/local/lib64/security/pam_screenlock_pin.so"), Permissions::from_mode(0o777)).unwrap();
     fs::write(root.path("usr/local/libexec/screenlock-pin/screenlock-pin"), "not the build").unwrap();
     fs::remove_dir(root.path("etc/screenlock-pin/users")).unwrap();
+    fs::write(root.auth(), format!("{SHIPPED_AUTH}auth optional pam_permit.so\n")).unwrap();
     let problems = root.refused("check");
     assert!(problems.contains("pam_screenlock_pin.so: is 777"), "{problems}");
+    assert!(problems.contains("/etc/pam.d/screenlock-auth: differs from"), "{problems}");
     assert!(problems.contains("libexec/screenlock-pin/screenlock-pin: differs from"), "{problems}");
     assert!(problems.contains("/etc/screenlock-pin/users: missing"), "{problems}");
 
@@ -447,6 +513,7 @@ fn uninstall_copes_with_extra_and_missing_files() {
     fs::write(root.path("usr/local/libexec/screenlock-pin/left-behind"), "junk").unwrap();
     fs::remove_file(root.path("usr/local/bin/screenlock-pin")).unwrap();
     fs::remove_file(root.path("usr/local/lib64/security/pam_screenlock_pin.so")).unwrap();
+    fs::remove_file(root.auth()).unwrap();
     root.ok("uninstall");
     assert!(!root.path("usr/local/libexec/screenlock-pin").exists());
     root.ok("uninstall");

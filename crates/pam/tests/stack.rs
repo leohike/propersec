@@ -1,11 +1,13 @@
 //! The lock-screen stack, through the real libpam and the real `pam_screenlock_pin.so`.
 //!
-//! The PAM files come from a temporary directory (`pam_start_confdir`). The stack is the shipped
-//! `packaging/kde-auth.pam` with only two things swapped: the module path points at the freshly built
-//! `.so`, given `pin_checker=` with a script that runs the freshly built `screenlock-pin-checker` against
-//! the sandbox (through its `--dev-*` options, which it accepts here because it isn't setgid), and
-//! the stock `password-auth` substack becomes one of two stand-ins, `pam_permit` (the password was
-//! right) or `pam_deny` (it was wrong). The control columns are the shipped ones.
+//! The PAM files come from a temporary directory (`pam_start_confdir`). The stack is `kde` as
+//! `integrate-into-pam.sh add` leaves Fedora's, `auth substack screenlock-auth` and then `auth
+//! include postlogin`, and the shipped `packaging/screenlock-auth.pam` with only two things swapped:
+//! the module path points at the freshly built `.so`, given `pin_checker=` with a script that runs
+//! the freshly built `screenlock-pin-checker` against the sandbox (through its `--dev-*` options,
+//! which it accepts here because it isn't setgid), and the stock `password-auth` substack becomes one
+//! of two stand-ins, `pam_permit` (the password was right) or `pam_deny` (it was wrong). The control
+//! columns are the shipped ones.
 //!
 //! Attempts run the way kscreenlocker runs them: one PAM session kept for many attempts, with
 //! `pam_setcred` after a success. The hosts below then misbehave the ways real PAM hosts do with
@@ -31,7 +33,7 @@ use screenlock_pin_sys::{Account, UserFiles, Yescrypt, current_egid, current_uid
 
 const PIN: &str = "4859";
 const PASSWORD: &str = "correct horse battery staple";
-const SHIPPED: &str = include_str!("../../../packaging/kde-auth.pam");
+const SHIPPED: &str = include_str!("../../../packaging/screenlock-auth.pam");
 /// Set in the environment of a test binary started again for one test alone; names that test.
 const ALONE: &str = "SCREENLOCK_PIN_STACK_TEST_ALONE";
 
@@ -60,9 +62,11 @@ impl Sandbox {
         fs::create_dir_all(sandbox.path("pam.d")).unwrap();
         // libpam logs to the journal when a confdir has no "other" fallback service.
         fs::write(sandbox.path("pam.d/other"), "auth required pam_deny.so\n").unwrap();
-        // The stock password-auth, which the shipped lines go around, as each test needs it.
+        // The stock password-auth, which screenlock-auth goes on to, as each test needs it.
         fs::write(sandbox.path("pam.d/password-auth-right"), "auth required pam_permit.so\n").unwrap();
         fs::write(sandbox.path("pam.d/password-auth-wrong"), "auth required pam_deny.so\n").unwrap();
+        // Fedora's postlogin has no auth lines.
+        fs::write(sandbox.path("pam.d/postlogin"), "").unwrap();
         let user_file = sandbox.path("etc/users").join(&sandbox.user);
         fs::write(&user_file, format!("hash = {}\n", Yescrypt.hash(PIN, 4).unwrap())).unwrap();
         fs::set_permissions(&user_file, Permissions::from_mode(0o640)).unwrap();
@@ -112,6 +116,8 @@ impl Sandbox {
         self.stack_as("kde", password, extra);
     }
 
+    /// `service`, as `kde`, and the shipped `screenlock-auth` it names under a name of its own, so
+    /// each service can have its own stand-in and module arguments.
     fn stack_as(&self, service: &str, password: Password, extra: &str) {
         let module = format!(
             "{} pin_checker={} log={} {extra} ",
@@ -126,10 +132,13 @@ impl Sandbox {
         let mut text: String = SHIPPED.lines().filter(|line| !line.starts_with('#')).map(|line| format!("{line}\n")).collect();
         for (old, new) in [("/usr/local/lib64/security/pam_screenlock_pin.so ", module.as_str()), (" password-auth\n", substack)] {
             // Fail loudly if the shipped file changes shape, rather than test something else.
-            assert!(text.contains(old), "{old:?} is no longer in packaging/kde-auth.pam");
+            assert!(text.contains(old), "{old:?} is no longer in packaging/screenlock-auth.pam");
             text = text.replace(old, new);
         }
-        fs::write(self.path("pam.d").join(service), text).unwrap();
+        let auth = format!("{service}.screenlock-auth");
+        fs::write(self.path("pam.d").join(&auth), text).unwrap();
+        let kde = format!("auth        substack      {auth}\nauth        include       postlogin\n");
+        fs::write(self.path("pam.d").join(service), kde).unwrap();
     }
 
     /// A session on the shipped stack, for as many attempts as the test makes: the password stand-in
@@ -226,8 +235,8 @@ fn a_wrong_password_never_unpauses_the_pin() {
 const UNPAUSED: &str = "unlocked with the password, PIN enabled";
 
 /// libpam calls the `after-password-auth` line's `pam_sm_setcred` after a password unlock only:
-/// the replay of a PIN unlock ends at the `check` line, which answers `PAM_SUCCESS` for that, and a
-/// failed attempt gets no `pam_setcred` at all.
+/// the replay of a PIN unlock ends `screenlock-auth` at the `check` line, which answers `PAM_SUCCESS`
+/// for that, and a failed attempt gets no `pam_setcred` at all.
 #[test]
 fn setcred_reaches_the_after_password_auth_line_after_a_password_unlock_only() {
     let sandbox = Sandbox::new();
@@ -244,24 +253,18 @@ fn setcred_reaches_the_after_password_auth_line_after_a_password_unlock_only() {
     }
 }
 
-/// A line after a correct PIN, as `postlogin` would be in screenlock-pin's own file
-/// (docs/where-the-pin-belongs-in-pam-IMPORTANT.md), finds no typed password and has to ask, as
-/// after a fingerprint unlock; after any other input it finds what was typed. `pam_exec
-/// expose_authtok` stands for a module that keeps the password, and asks when there is none.
+/// A correct PIN ends `screenlock-auth` alone, so `kde` goes on to `postlogin`, as after the
+/// password. A line there finds no typed password after a correct PIN and has to ask, as after a
+/// fingerprint unlock; after any other input it finds what was typed. `pam_exec expose_authtok`
+/// stands for a module that keeps the password, and asks when there is none: that it asks shows
+/// that it ran.
 #[test]
-fn a_correct_pin_is_not_left_for_the_lines_after_it() {
+fn postlogin_follows_a_correct_pin_and_finds_no_pin() {
     let sandbox = Sandbox::new();
     sandbox.script("reader", "#!/bin/sh\ncat >/dev/null\n");
-    let module = built().join("libpam_screenlock_pin.so");
-    let text = format!(
-        "auth [success=ok default=ignore] {} check pin_checker={} log={}\nauth required pam_exec.so quiet expose_authtok {}\n",
-        module.display(),
-        sandbox.path("pin-checker").display(),
-        sandbox.path("log").display(),
-        sandbox.path("reader").display()
-    );
-    fs::write(sandbox.path("pam.d/kde-then-reader"), text).unwrap();
-    let client = PamClient::new(sandbox.path("pam.d"), "kde-then-reader", &sandbox.user);
+    let reader = format!("auth required pam_exec.so quiet expose_authtok {}\n", sandbox.path("reader").display());
+    fs::write(sandbox.path("pam.d/postlogin"), reader).unwrap();
+    let client = PamClient::new(sandbox.path("pam.d"), "kde-right", &sandbox.user);
     for (typed, prompts) in [("1111", 1), (PIN, 2)] {
         let attempt = client.authenticate(typed);
         assert!(attempt.unlocked(), "{typed}: {attempt:?} {}", sandbox.log());
@@ -367,7 +370,7 @@ fn one_session_serves_many_attempts() {
     assert!(sandbox.log().contains("consecutive failure 3 of 3; PIN paused, password required"), "{}", sandbox.log());
     assert!(password.authenticate(PASSWORD).unlocked());
     assert!(pin.authenticate(PIN).unlocked(), "the PIN's session works again once the password unpaused it");
-    // The PIN on the session whose password would pass: the check line ends the stack first.
+    // The PIN on the session whose password would pass: the check line ends screenlock-auth first.
     assert!(password.authenticate(PIN).unlocked());
     assert!(sandbox.log().contains("unlocked with the PIN"));
 }

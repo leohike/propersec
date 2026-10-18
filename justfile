@@ -2,7 +2,8 @@
 # temporary directory, or a podman container, and never touches this machine's /etc or /run, except
 # install, check and uninstall, which run packaging/install.sh on this machine, integrate-into-pam
 # and remove-from-pam, which run packaging/integrate-into-pam.sh, and logs, which only reads, all
-# through sudo. Only integrate-into-pam and remove-from-pam ever touch /etc/pam.d.
+# through sudo. Only integrate-into-pam and remove-from-pam ever change /etc/pam.d/kde; install puts
+# screenlock-pin's own /etc/pam.d/screenlock-auth next to it, which nothing uses until then.
 
 # List the recipes
 [private]
@@ -19,7 +20,7 @@ release:
     chmod --reference=target target/screenlock-pin
     packaging/install.sh check-build --from target/screenlock-pin
 
-# Build the release and install it on this machine, or update an earlier install, then check everything. It never touches /etc/pam.d: it ends by saying whether /etc/pam.d/kde has the lines this version ships, and if not, to run integrate-into-pam. Installs whatever is checked out, uncommitted edits included. Run as yourself, not with sudo, so podman builds in your own image store
+# Build the release and install it on this machine, or update an earlier install, then check everything. It never changes /etc/pam.d/kde, and only puts screenlock-pin's own /etc/pam.d/screenlock-auth next to it: it ends by saying whether kde has screenlock-pin's line, and if not, to run integrate-into-pam. Refuses where properpin or an earlier screenlock-pin's lines are. Installs whatever is checked out, uncommitted edits included. Run as yourself, not with sudo, so podman builds in your own image store
 install: _not-root release
     @echo "installing screenlock-pin $(git describe --always --dirty)"
     sudo packaging/install.sh install
@@ -38,6 +39,8 @@ logs since="30 min ago": _not-root
     sudo journalctl -q --since "{{ since }}" --no-pager -o short-iso | grep -E 'screenlock-pin-checker\[|pam_[a-z_]+\(kde[:-]|kscreenlocker' || echo "(nothing)"
     section "/etc/pam.d/kde"
     cat /etc/pam.d/kde
+    section "/etc/pam.d/screenlock-auth"
+    cat /etc/pam.d/screenlock-auth 2>&1
     section "integrate-into-pam check"
     packaging/integrate-into-pam.sh check
     section "/etc/screenlock-pin/config"
@@ -48,19 +51,19 @@ logs since="30 min ago": _not-root
     /usr/local/bin/screenlock-pin status 2>&1
     section "end"
 
-# Check what is installed on this machine: every file, the group, and screenlock-pin's lines in /etc/pam.d/kde, if it has any
+# Check what is installed on this machine: every file, the group, and whether /etc/pam.d/kde has screenlock-pin's line or nothing of screenlock-pin's
 check: _not-root
     sudo packaging/install.sh check
 
-# Put screenlock-pin's two lines into /etc/pam.d/kde on this machine, or replace another version's, after showing the change and asking; the PIN works at the lock screen from then on. Saves the file without them as /etc/screenlock-pin/kde.pam.without-screenlock-pin first
+# Change one word of /etc/pam.d/kde on this machine, after showing the change and asking: its auth substack password-auth line becomes auth substack screenlock-auth, and the PIN works at the lock screen from then on. Refuses a kde that isn't stock
 integrate-into-pam: _not-root
     sudo packaging/integrate-into-pam.sh add
 
-# Take screenlock-pin's lines out of /etc/pam.d/kde on this machine, after showing the change and asking; the lock screen takes the password only from then on
+# Change /etc/pam.d/kde on this machine back to auth substack password-auth, after showing the change and asking; the lock screen takes the password only from then on
 remove-from-pam: _not-root
     sudo packaging/integrate-into-pam.sh remove
 
-# Remove screenlock-pin's files from this machine; keeps /etc/screenlock-pin, /var/lib/screenlock-pin and the screenlock-pin group. Refuses until remove-from-pam has taken screenlock-pin's lines out of /etc/pam.d/kde
+# Remove screenlock-pin's files from this machine; keeps /etc/screenlock-pin, /var/lib/screenlock-pin and the screenlock-pin group. Refuses until remove-from-pam has changed /etc/pam.d/kde back
 uninstall: _not-root
     sudo packaging/install.sh uninstall
 

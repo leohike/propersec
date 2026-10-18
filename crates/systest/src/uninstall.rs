@@ -6,10 +6,10 @@
 //!   hold, and the groups;
 //! - installs a deliberately broken screenlock-pin, through `install.sh` and under exactly the real
 //!   names (the variants come from `crates/brokenpin`, built by `testing/podman/build-broken.sh`),
-//!   or a real one broken afterwards, and puts its lines in with `integrate-into-pam.sh add`;
+//!   or a real one broken afterwards, and puts its line in with `integrate-into-pam.sh add`;
 //! - checks that it really broke the lock screen the way the case says, and that `sudo`, the way
 //!   in for a repair, still works;
-//! - checks that `install.sh uninstall` refuses while the lines are in, then runs
+//! - checks that `install.sh uninstall` refuses while the line is in, then runs
 //!   `integrate-into-pam.sh remove --yes` and `install.sh uninstall`, and checks that the record
 //!   matches again, apart from what uninstall keeps on purpose (`/etc/screenlock-pin`,
 //!   `/var/lib/screenlock-pin`, the `screenlock-pin` group);
@@ -48,6 +48,9 @@ enum Breaks {
     /// The PIN never unlocks, while the right password still does: the stock stack prompts for
     /// it when the module can't, and libpam skips a module it can't load or call.
     PinOnly,
+    /// Nothing unlocks, the right password included: libpam fails every attempt on a service that
+    /// names a missing file.
+    RefusesEveryone,
 }
 
 struct Case {
@@ -73,10 +76,15 @@ const CASES: &[Case] = &[
     Case { name: "module-deleted", variant: None, damage: delete_the_module, breaks: &[Breaks::PinOnly] },
     Case { name: "pin-checker-says-yes", variant: Some("pin-checker-says-yes"), damage: no_damage, breaks: &[Breaks::LetsAnyoneIn] },
     Case { name: "pin-checker-sleeps", variant: Some("pin-checker-sleeps"), damage: no_damage, breaks: &[Breaks::Slows] },
+    Case { name: "screenlock-auth-deleted", variant: None, damage: delete_screenlock_auth, breaks: &[Breaks::RefusesEveryone] },
 ];
 
 fn delete_the_module() -> Outcome {
     fs::remove_file(MODULE).map_err(message)
+}
+
+fn delete_screenlock_auth() -> Outcome {
+    fs::remove_file(AUTH).map_err(message)
 }
 
 /// Text where the module should be. install refuses such a build, so it comes after install.
@@ -168,8 +176,8 @@ impl Bench {
         self.is_broken(case).map_err(|error| format!("the broken install didn't break as expected: {error}"))?;
 
         match install_sh(&["uninstall"]) {
-            Err(said) if said.contains("still has screenlock-pin's lines") => {}
-            other => return Err(format!("uninstall didn't wait for screenlock-pin's lines to come out: {other:?}")),
+            Err(said) if said.contains("uninstall waits until") => {}
+            other => return Err(format!("uninstall didn't wait for screenlock-pin's line to come out: {other:?}")),
         }
         let said = Self::take_out().map_err(|error| format!("taking screenlock-pin out failed: {error}"))?;
         no_pin_checker_left()?;
@@ -189,7 +197,7 @@ impl Bench {
         self.matches(&before, "after installing the real screenlock-pin and uninstalling it")
     }
 
-    /// The way out: screenlock-pin's lines out of `/etc/pam.d/kde`, then its files.
+    /// The way out: screenlock-pin's line in `/etc/pam.d/kde` changed back, then its files.
     fn take_out() -> Outcome<String> {
         Ok(integrate(&["remove", "--yes"])? + &install_sh(&["uninstall"])?)
     }
@@ -220,6 +228,10 @@ impl Bench {
                 Breaks::PinOnly => {
                     self.expect("kde", PIN, &Ran::Refused, "the PIN")?;
                     self.expect("kde", PASSWORD, &Ran::Unlocked, "the right password")?;
+                }
+                Breaks::RefusesEveryone => {
+                    self.expect("kde", PIN, &Ran::Refused, "the PIN")?;
+                    self.expect("kde", PASSWORD, &Ran::Refused, "the right password")?;
                 }
             }
         }

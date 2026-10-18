@@ -1,7 +1,8 @@
 //! `pam_screenlock_pin.so`: screenlock-pin's PAM module, for the lock screen's `auth` stack only.
 //!
-//! Two lines of `/etc/pam.d/kde` call it, around the stock `auth substack password-auth` line,
-//! which stays as it is (see `packaging/kde-auth.pam`):
+//! Two lines of `/etc/pam.d/screenlock-auth` call it, around the stock `auth substack password-auth`
+//! line, and `/etc/pam.d/kde` pulls that file in where its stock stack had `password-auth` (see
+//! `packaging/screenlock-auth.pam`):
 //!
 //! ```text
 //! check         Is the typed input the PIN, and is the PIN enabled? Success unlocks, but never
