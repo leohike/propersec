@@ -30,14 +30,14 @@ mod secret;
 mod settings;
 
 pub use attempt::{
-    Clock, Hasher, Log, PasswordCheck, Store, UnlockAttemptOutcome, Verdict, housekeeping_after_password_unlock, input_that_could_be_a_pin,
+    Clock, Hasher, Log, Store, UnlockAttemptOutcome, Verdict, housekeeping_after_password_unlock, input_that_could_be_a_pin,
     try_unlock_with_pin,
 };
 pub use budget::{Budget, Counts, DAY, Disabled, Judged, Limit, WEEK};
 pub use error::Error;
 pub use refusal::Refusal;
 pub use secret::Secret;
-pub use settings::{Settings, UnpauseBy};
+pub use settings::Settings;
 
 /// The longest PIN `set` accepts, in characters. Not a setting: a PIN is a secret short enough to
 /// type often, and this is only a sanity bound, said once when `set` asks for the PIN.
@@ -58,15 +58,14 @@ pub const HASH_SETTING: &str = "hash";
 
 /// The setgid pinchecker's exit codes, which are all it answers: the PAM module and the CLI read them.
 pub mod exit {
-    /// `check`: the PIN unlocks. `housekeeping` and `unlocked`: done. `status`: printed.
+    /// `check`: the PIN unlocks. `housekeeping`: done. `status`: printed.
     pub const YES: u8 = 0;
-    /// `check`: not unlocked. `housekeeping`: a wrong password, or no PIN set. `unlocked`: no PIN
-    /// set, or the config doesn't let it unpause the PIN. A clean "no", logged by the pinchecker.
+    /// `check`: not unlocked. `housekeeping`: no PIN set. A clean "no", logged by the pinchecker.
     pub const NO: u8 = 1;
     /// Bad arguments, or a refused environment: run as root, a terminal on stdin, `--dev-*` options
     /// under setgid.
     pub const USAGE: u8 = 2;
-    /// Something is broken: a file, the clock, libxcrypt, `unix_chkpwd`. Logged by the pinchecker.
+    /// Something is broken: a file, the clock, libxcrypt. Logged by the pinchecker.
     pub const BROKEN: u8 = 3;
 }
 

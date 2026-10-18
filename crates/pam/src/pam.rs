@@ -9,13 +9,12 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use properpin_core::{Error, Log, Secret};
 use properpin_sys::FileLog;
 
-use crate::run::{Transaction, run, run_unlocked, unpause_by};
+use crate::run::{Transaction, run, run_housekeeping};
 use crate::{Args, Mode};
 
 const PAM_SUCCESS: c_int = 0;
 const PAM_IGNORE: c_int = 25;
 const PAM_AUTHTOK: c_int = 6;
-const PAM_SILENT: c_int = 0x8000;
 const LOG_NOTICE: c_int = 5;
 
 /// libpam's opaque `pam_handle_t`.
@@ -60,16 +59,16 @@ pub unsafe extern "C" fn pam_sm_authenticate(pamh: *mut PamHandle, _flags: c_int
                 return PAM_IGNORE;
             }
         };
+        // The housekeeping is pam_sm_setcred's, after a password unlock only; here, after the stock
+        // stack whatever it answered, what was typed is never read.
+        if args.mode == Mode::Housekeeping {
+            return PAM_IGNORE;
+        }
         let file_log = args.log.clone().map(FileLog);
         let log: &dyn Log = match &file_log {
             Some(file) => file,
             None => &pam,
         };
-        // With pin_unpause_by = setcred, the housekeeping is pam_sm_setcred's alone, and what was
-        // typed is never read here.
-        if args.mode == Mode::Housekeeping && !unpause_by(&args, log).by_password_check() {
-            return PAM_IGNORE;
-        }
         if run_and_log(&pam, &args, log, run) { PAM_SUCCESS } else { PAM_IGNORE }
     }))
     .unwrap_or(PAM_IGNORE)
@@ -79,9 +78,8 @@ pub unsafe extern "C" fn pam_sm_authenticate(pamh: *mut PamHandle, _flags: c_int
 /// lock screen was unlocked through the stock password stack. libpam calls `pam_sm_setcred` only
 /// when the program calls `pam_setcred`, which kscreenlocker does only after a successful
 /// `pam_authenticate`, and it replays the path `pam_authenticate` took (docs/current-setcred.md).
-/// Any flag counts; it is logged. With `pin_unpause_by` at setcred or both the pinchecker then
-/// does the housekeeping; at password-check this only logs. The `housekeeping` line answers
-/// `PAM_IGNORE`, which kscreenlocker ignores anyway.
+/// Any flag counts. The pinchecker then does the housekeeping, and logs it. The `housekeeping`
+/// line answers `PAM_IGNORE`, which kscreenlocker ignores anyway.
 ///
 /// The `check` line answers `PAM_SUCCESS`, and must: that is what ends the replay there after a
 /// PIN unlock. libpam's `done` action, which `sufficient` takes on success, ends the replay only
@@ -94,7 +92,7 @@ pub unsafe extern "C" fn pam_sm_authenticate(pamh: *mut PamHandle, _flags: c_int
 ///
 /// libpam's contract: `pamh` is a live handle, and `argv` holds `argc` NUL-terminated strings.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn pam_sm_setcred(pamh: *mut PamHandle, flags: c_int, argc: c_int, argv: *const *const c_char) -> c_int {
+pub unsafe extern "C" fn pam_sm_setcred(pamh: *mut PamHandle, _flags: c_int, argc: c_int, argv: *const *const c_char) -> c_int {
     let pam = Pam(pamh);
     catch_unwind(AssertUnwindSafe(|| {
         // SAFETY: libpam passes `argc` valid C strings in `argv`.
@@ -109,25 +107,10 @@ pub unsafe extern "C" fn pam_sm_setcred(pamh: *mut PamHandle, flags: c_int, argc
             Some(file) => file,
             None => &pam,
         };
-        let by = unpause_by(&args, log);
-        log.log(&format!("pam_setcred({}) after a password unlock; pin_unpause_by is {by}", setcred_flag(flags)));
-        if by.by_setcred() {
-            run_and_log(&pam, &args, log, run_unlocked);
-        }
+        run_and_log(&pam, &args, log, run_housekeeping);
         PAM_IGNORE
     }))
     .unwrap_or(PAM_IGNORE)
-}
-
-/// The flag kscreenlocker and other programs pass to `pam_setcred`, by name.
-fn setcred_flag(flags: c_int) -> String {
-    match flags & !PAM_SILENT {
-        0x2 => "PAM_ESTABLISH_CRED".into(),
-        0x4 => "PAM_DELETE_CRED".into(),
-        0x8 => "PAM_REINITIALIZE_CRED".into(),
-        0x10 => "PAM_REFRESH_CRED".into(),
-        other => format!("{other:#x}"),
-    }
 }
 
 /// The pinchecker logs every answer itself; the module logs only what went wrong on its side.

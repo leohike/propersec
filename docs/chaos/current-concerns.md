@@ -17,9 +17,9 @@ The fix: drive the prompts through a pseudo-terminal in the CLI tests; a run of 
 
 ## faillock doesn't stop the PIN
 
-Since 2026-10-18 every input the `check` line doesn't accept goes through the stock `password-auth` stack, so with authselect's `with-faillock` on (it is off on stock Fedora) a wrong PIN counts towards faillock's lockout like a wrong password, as it should. Two gaps remain, both only with faillock on. While faillock has the account locked, a right PIN still unlocks, since the `check` line runs before the substack that holds faillock. And a right password still unpauses the PIN, since the housekeeping runs after the substack whatever it answered, and asks `unix_chkpwd`, which knows nothing of faillock.
+Since 2026-10-18 every input the `check` line doesn't accept goes through the stock `password-auth` stack, so with authselect's `with-faillock` on (it is off on stock Fedora) a wrong PIN counts towards faillock's lockout like a wrong password, as it should. One gap remains, only with faillock on: while faillock has the account locked, a right PIN still unlocks, since the `check` line runs before the substack that holds faillock. The other gap, a right password unpausing the PIN while faillock has the account locked, is gone since the housekeeping moved to `pam_setcred` (docs/current-setcred.md): the stock stack fails, so the lock screen never calls `pam_setcred`. Reasoned, not yet tested with faillock on.
 
-The fix, deferred: have the pinchecker refuse both the PIN and the housekeeping while faillock has the account locked, asking faillock the way `pam_faillock preauth` does.
+The fix, deferred: have the pinchecker refuse the PIN while faillock has the account locked, asking faillock the way `pam_faillock preauth` does.
 
 ## integrate-into-pam.sh edits any PAM file with the one stock line
 

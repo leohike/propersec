@@ -6,14 +6,13 @@ use std::path::Path;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
-use properpin_core::{Error, Log, Secret, UnpauseBy, exit};
-use properpin_sys::{Account, config_settings, current_euid, current_uid};
+use properpin_core::{Error, Secret, exit};
+use properpin_sys::{Account, current_euid, current_uid};
 
-use crate::args::INSTALLED_CONFIG;
 use crate::pam::DefaultSigchld;
 use crate::{Args, Mode};
 
-/// Far longer than the pinchecker ever takes (a hash, or `unix_chkpwd`, a lock it waits at most a
+/// Far longer than the pinchecker ever takes (a hash, a lock it waits at most a
 /// second for, and the wait before a correct PIN's answer, at most a second). After this it is
 /// killed and the PIN refused, so the lock screen never hangs on it.
 const HELPER_TIMEOUT: Duration = Duration::from_secs(10);
@@ -29,8 +28,9 @@ pub trait Transaction {
     fn typed(&self) -> Result<Secret, Error>;
 }
 
-/// `Ok(true)` unlocks (for `check`) or did the housekeeping (for `housekeeping`). Everything else refuses.
+/// `check`: `Ok(true)` unlocks. Everything else refuses.
 pub fn run(transaction: &impl Transaction, args: &Args) -> Result<bool, Error> {
+    debug_assert_eq!(args.mode, Mode::Check);
     // Asked for before anything can refuse, so the lines after this one find it whatever happens
     // here (see the bad PAM line in `pam_sm_authenticate`).
     let typed = transaction.typed()?;
@@ -40,12 +40,12 @@ pub fn run(transaction: &impl Transaction, args: &Args) -> Result<bool, Error> {
     answer(args, code)
 }
 
-/// After the stack succeeded (`pam_sm_setcred` on the `housekeeping` line): ask the pinchecker to
+/// After a password unlock (`pam_sm_setcred` on the `housekeeping` line): ask the pinchecker to
 /// unpause the PIN, sending it nothing. `Ok(true)` when it did.
-pub fn run_unlocked(transaction: &impl Transaction, args: &Args) -> Result<bool, Error> {
+pub fn run_housekeeping(transaction: &impl Transaction, args: &Args) -> Result<bool, Error> {
     debug_assert_eq!(args.mode, Mode::Housekeeping);
     calling_account(transaction)?;
-    let code = ask_pinchecker(&args.pinchecker, "unlocked", &Secret::new(Vec::new()), args.test_panic)?;
+    let code = ask_pinchecker(&args.pinchecker, args.mode.request(), &Secret::new(Vec::new()), args.test_panic)?;
     answer(args, code)
 }
 
@@ -55,22 +55,6 @@ fn answer(args: &Args, code: u8) -> Result<bool, Error> {
         exit::NO => Ok(false),
         other => Err(Error::System(format!("{} answered {other}; its log says why", args.pinchecker.display()))),
     }
-}
-
-/// The config's `pin_unpause_by`, the one setting the module reads itself, since it decides which
-/// of the module's own calls do the housekeeping. Read by the pinchecker's rules: owned by root,
-/// and writable by nobody else; a `settings=` config of the tests may also be the user's. A config
-/// the module can't use means password-check, today's behaviour, and the reason is logged; the
-/// pinchecker refuses the PIN for the same config anyway.
-pub fn unpause_by(args: &Args, log: &dyn Log) -> UnpauseBy {
-    let (path, owners) = match &args.settings {
-        Some(path) => (path.as_path(), vec![0, current_uid()]),
-        None => (Path::new(INSTALLED_CONFIG), vec![0]),
-    };
-    config_settings(path, &owners).map(|settings| settings.pin_unpause_by).unwrap_or_else(|error| {
-        log.log(&format!("pin_unpause_by taken as {}: {error}", UnpauseBy::PasswordCheck));
-        UnpauseBy::PasswordCheck
-    })
 }
 
 /// The user being unlocked, who must be both the user this process runs as and the user PAM is

@@ -5,22 +5,18 @@
 //! counts can be readable by that group alone and stay out of reach of everything the user runs. The group has no members: running the pinchecker is the
 //! only way to get it. The pinchecker keeps its caller's user id, so the caller can't change the pinchecker,
 //! and each user's counts file is that user's own. The PAM module and the CLI start it, write what
-//! was typed to its stdin, and read its exit code (`properpin_core::exit`); only `status` prints
-//! anything.
+//! was typed to its stdin for `check`, and read its exit code (`properpin_core::exit`); only
+//! `status` prints anything.
 //!
 //! ```text
 //! properpin-pinchecker check         stdin: what was typed. Exit 0 if it is the PIN and the PIN is
 //!                                    enabled, no sooner than min_milliseconds_before_pin_unlock
 //!                                    after the start
-//! properpin-pinchecker housekeeping  stdin: what was typed at the lock screen, after the stock
-//!                                    password stack, right or wrong. Checked as the password through
-//!                                    unix_chkpwd; if right, the failures of the last moments are
-//!                                    forgiven and the consecutive count starts over, which unpauses
-//!                                    the PIN. Only when pin_unpause_by is password-check or both
-//! properpin-pinchecker unlocked      stdin: nothing. The lock screen was just unlocked through the
-//!                                    stock password stack (the module's pam_sm_setcred): the same
-//!                                    housekeeping, with no password checked. Only when
-//!                                    pin_unpause_by is setcred or both; otherwise nothing changes
+//! properpin-pinchecker housekeeping  stdin: nothing. The lock screen was just unlocked with the
+//!                                    password, as the module's pam_sm_setcred tells it: the
+//!                                    failures of the last moments are forgiven and the consecutive
+//!                                    count starts over, which unpauses the PIN. No password is
+//!                                    read or checked
 //! properpin-pinchecker status        prints the caller's PIN settings, and whether the PIN is
 //!                                    enabled, paused, disabled or refused, and why
 //! ```
@@ -43,12 +39,10 @@ use std::io::Read;
 use std::path::PathBuf;
 use std::time::Duration;
 
-pub use properpin_core::PasswordCheck;
 use properpin_core::{
     Clock, Error, Hasher, Judged, Log, MAX_INPUT_BYTES, Secret, Settings, Store, exit, housekeeping_after_password_unlock,
     try_unlock_with_pin,
 };
-pub use properpin_sys::UnixChkpwd;
 use properpin_sys::{Account, UserFiles, local_time};
 
 /// What the caller asks for.
@@ -56,7 +50,6 @@ use properpin_sys::{Account, UserFiles, local_time};
 pub enum Request {
     Check,
     Housekeeping,
-    Unlocked,
     Status,
 }
 
@@ -65,7 +58,6 @@ impl Request {
         match word {
             "check" => Some(Self::Check),
             "housekeeping" => Some(Self::Housekeeping),
-            "unlocked" => Some(Self::Unlocked),
             "status" => Some(Self::Status),
             _ => None,
         }
@@ -73,7 +65,7 @@ impl Request {
 
     /// Whether it reads something typed from stdin.
     pub fn reads_input(self) -> bool {
-        matches!(self, Self::Check | Self::Housekeeping)
+        self == Self::Check
     }
 }
 
@@ -130,22 +122,21 @@ impl Reply {
 }
 
 /// Everything from outside that one request needs.
-pub struct Context<'a, H, C, P, L: ?Sized> {
+pub struct Context<'a, H, C, L: ?Sized> {
     pub places: &'a Places,
     pub hasher: &'a H,
     pub clock: &'a C,
-    pub password: &'a P,
     pub log: &'a L,
 }
 
-/// Answer one request from `caller`. `typed` is what came on stdin, for `check` and `housekeeping`.
+/// Answer one request from `caller`. `typed` is what came on stdin, for `check`.
 /// Every outcome is logged here, and every error is a refusal. `status` is asked by a person, so
 /// it also prints why.
-pub fn serve<H: Hasher, C: Clock, P: PasswordCheck, L: Log + ?Sized>(
+pub fn serve<H: Hasher, C: Clock, L: Log + ?Sized>(
     request: Request,
     caller: &Account,
     typed: &Secret,
-    context: &Context<'_, H, C, P, L>,
+    context: &Context<'_, H, C, L>,
 ) -> Reply {
     let broken = |what: &str, error: Error| {
         let line = format!("{}: {what}: {error}", caller.name);
@@ -159,25 +150,24 @@ pub fn serve<H: Hasher, C: Clock, P: PasswordCheck, L: Log + ?Sized>(
     };
     let result = match request {
         Request::Check => check_pin(&files, caller, typed, context),
-        Request::Housekeeping => housekeeping(&files, caller, typed, context),
-        Request::Unlocked => unlocked(&files, caller, context),
+        Request::Housekeeping => housekeeping(&files, caller, context),
         Request::Status => status(&files, context.hasher, context.clock).map(|output| Reply { output, ..Reply::code(exit::YES) }),
     };
     result.unwrap_or_else(|error| {
         let what = match request {
             Request::Check => "PIN refused",
-            Request::Housekeeping | Request::Unlocked => "housekeeping failed",
+            Request::Housekeeping => "housekeeping failed",
             Request::Status => "status failed",
         };
         broken(what, error)
     })
 }
 
-fn check_pin<H: Hasher, C: Clock, P, L: Log + ?Sized>(
+fn check_pin<H: Hasher, C: Clock, L: Log + ?Sized>(
     files: &UserFiles,
     caller: &Account,
     typed: &Secret,
-    context: &Context<'_, H, C, P, L>,
+    context: &Context<'_, H, C, L>,
 ) -> Result<Reply, Error> {
     let outcome = try_unlock_with_pin(files, context.hasher, context.clock, typed.as_bytes())?;
     log_judged(&outcome.judged, caller, context.log);
@@ -200,68 +190,25 @@ fn log_judged<L: Log + ?Sized>(judged: &Judged, caller: &Account, log: &L) {
     }
 }
 
-/// After the lock screen's password stack, but only for the right password. The PAM line runs
-/// this after a wrong one too, since the stock stack doesn't stop before it, and `housekeeping` is
-/// open to everything the user runs anyway: without this check any program could unpause the PIN,
-/// start its consecutive count over and forgive the budget's failures as often as it liked.
-/// `unix_chkpwd` checks it, as pam_unix in the stock stack just did.
-fn housekeeping<H, C: Clock, P: PasswordCheck, L: Log + ?Sized>(
-    files: &UserFiles,
-    caller: &Account,
-    typed: &Secret,
-    context: &Context<'_, H, C, P, L>,
-) -> Result<Reply, Error> {
+/// After the lock screen was unlocked with the password, as the module's `pam_sm_setcred` tells it:
+/// forgive the recent failures and unpause the PIN, with no password checked. libpam calls that
+/// line only after the stock stack took the password, never after a PIN unlock or a failure.
+/// Anything the user runs can ask for it too, which docs/chaos/security-target.md accepts: code
+/// running as the user can unlock the session and keylog the PIN anyway.
+fn housekeeping<H, C: Clock, L: Log + ?Sized>(files: &UserFiles, caller: &Account, context: &Context<'_, H, C, L>) -> Result<Reply, Error> {
     let settings = files.settings()?;
     if settings.pin_hash.is_empty() {
         context.log.log(&format!("{}: no PIN is set, so there is nothing to do", caller.name));
         return Ok(Reply::code(exit::NO));
     }
-    if typed.as_bytes().is_empty() || !context.password.matches(&caller.name, typed)? {
-        context.log.log(&format!("{}: wrong password, nothing changed", caller.name));
-        return Ok(Reply::code(exit::NO));
-    }
-    unpause(files, caller, "password correct", context)
-}
-
-/// After the lock screen's password stack succeeded, as the module's `pam_sm_setcred` tells it: the
-/// housekeeping, without checking any password. Open to everything the user runs, which could
-/// call it at will; docs/current-setcred.md says why that is acceptable. With `pin_unpause_by`
-/// left at password-check it changes nothing, so the default keeps today's guarantee that only
-/// the right password unpauses the PIN.
-fn unlocked<H, C: Clock, P, L: Log + ?Sized>(
-    files: &UserFiles,
-    caller: &Account,
-    context: &Context<'_, H, C, P, L>,
-) -> Result<Reply, Error> {
-    let settings = files.settings()?;
-    if settings.pin_hash.is_empty() {
-        context.log.log(&format!("{}: no PIN is set, so there is nothing to do", caller.name));
-        return Ok(Reply::code(exit::NO));
-    }
-    if !settings.pin_unpause_by.by_setcred() {
-        context
-            .log
-            .log(&format!("{}: unlock reported, but pin_unpause_by is {}, so nothing changed", caller.name, settings.pin_unpause_by));
-        return Ok(Reply::code(exit::NO));
-    }
-    unpause(files, caller, "unlocked through the password stack (setcred)", context)
-}
-
-/// Forgive the recent failures and unpause the PIN; `why` starts the log line.
-fn unpause<H, C: Clock, P, L: Log + ?Sized>(
-    files: &UserFiles,
-    caller: &Account,
-    why: &str,
-    context: &Context<'_, H, C, P, L>,
-) -> Result<Reply, Error> {
     let judged = housekeeping_after_password_unlock(files, context.clock)?;
     log_judged(&judged, caller, context.log);
     match judged.disabled {
         Some(limit) => context.log.log(&format!(
-            "{}: {why}, but the PIN stays disabled after {limit}; sudo properpin enable or set turns it back on",
+            "{}: unlocked with the password, but the PIN stays disabled after {limit}; sudo properpin enable or set turns it back on",
             caller.name
         )),
-        None => context.log.log(&format!("{}: {why}, PIN enabled", caller.name)),
+        None => context.log.log(&format!("{}: unlocked with the password, PIN enabled", caller.name)),
     }
     Ok(Reply::code(exit::YES))
 }
@@ -407,7 +354,7 @@ mod tests {
         }
 
         fn reply_logged(&self, clock: &impl Clock, caller: &Account, request: Request, typed: &str, log: &Lines) -> Reply {
-            let context = Context { places: &self.places, hasher: &Yescrypt, clock, password: &Password, log };
+            let context = Context { places: &self.places, hasher: &Yescrypt, clock, log };
             serve(request, caller, &Secret::new(typed.as_bytes().to_vec()), &context)
         }
 
@@ -442,15 +389,6 @@ mod tests {
         }
     }
 
-    /// Accepts `PASSWORD` for alice, the way `unix_chkpwd` would.
-    struct Password;
-
-    impl PasswordCheck for Password {
-        fn matches(&self, user: &str, password: &Secret) -> Result<bool, Error> {
-            Ok(user == "alice" && password.as_bytes() == PASSWORD.as_bytes())
-        }
-    }
-
     #[test]
     fn the_whole_cycle() {
         let sandbox = sandbox();
@@ -463,8 +401,8 @@ mod tests {
         assert_eq!((code, log.as_str()), (exit::NO, "alice: not the PIN, consecutive failure 3 of 3; PIN paused, password required"));
         let (code, _, log) = sandbox.ask(Request::Check, PIN);
         assert_eq!((code, log.as_str()), (exit::NO, "alice: PIN paused after 3 consecutive failures, password required"));
-        let (code, _, log) = sandbox.ask(Request::Housekeeping, PASSWORD);
-        assert_eq!((code, log.as_str()), (exit::YES, "alice: password correct, PIN enabled"));
+        let (code, _, log) = sandbox.ask(Request::Housekeeping, "");
+        assert_eq!((code, log.as_str()), (exit::YES, "alice: unlocked with the password, PIN enabled"));
         assert_eq!(sandbox.ask(Request::Check, PIN).0, exit::YES);
     }
 
@@ -476,7 +414,7 @@ mod tests {
         assert_eq!(sandbox.reply(Request::Check, PIN).not_before, Duration::from_millis(75));
         sandbox.write_config("min_milliseconds_before_pin_unlock = 500\n");
         assert_eq!(sandbox.reply(Request::Check, PIN), Reply { not_before: Duration::from_millis(500), ..Reply::code(exit::YES) });
-        for (request, typed) in [(Request::Check, "1111"), (Request::Housekeeping, PASSWORD), (Request::Status, "")] {
+        for (request, typed) in [(Request::Check, "1111"), (Request::Housekeeping, ""), (Request::Status, "")] {
             assert_eq!(sandbox.reply(request, typed).not_before, Duration::ZERO, "{request:?} {typed:?}");
         }
     }
@@ -489,26 +427,12 @@ mod tests {
     }
 
     #[test]
-    fn a_wrong_password_changes_nothing() {
-        let sandbox = sandbox();
-        for wrong in ["1111", "2222", "3333"] {
-            sandbox.ask(Request::Check, wrong);
-        }
-        for wrong in ["", "wrong", "correct horse battery stapl"] {
-            let (code, _, log) = sandbox.ask(Request::Housekeeping, wrong);
-            assert_eq!(code, exit::NO, "{wrong:?}");
-            assert!(log.contains("wrong password, nothing changed"), "{log}");
-        }
-        assert_eq!(sandbox.ask(Request::Check, PIN).0, exit::NO, "a rejected password must not unpause the PIN");
-    }
-
-    #[test]
     fn without_a_pin_there_is_nothing_to_do() {
         let sandbox = sandbox();
         fs::remove_file(sandbox.places.etc.join("users/alice")).unwrap();
         let budget = sandbox.places.budget_dir.join(format!("{}.budget", sandbox.caller.uid));
         let before = fs::read(&budget).unwrap();
-        let (code, _, log) = sandbox.ask(Request::Housekeeping, PASSWORD);
+        let (code, _, log) = sandbox.ask(Request::Housekeeping, "");
         assert_eq!((code, log.as_str()), (exit::NO, "alice: no PIN is set, so there is nothing to do"));
         assert_eq!(fs::read(&budget).unwrap(), before, "nothing written");
         assert_eq!(fs::read_dir(&sandbox.places.budget_dir).unwrap().count(), 2, "nothing created");
@@ -536,7 +460,7 @@ mod tests {
 
         let sandbox = self::sandbox();
         fs::set_permissions(&sandbox.places.budget_dir, Permissions::from_mode(0o755)).unwrap();
-        let (code, _, log) = sandbox.ask(Request::Housekeeping, PASSWORD);
+        let (code, _, log) = sandbox.ask(Request::Housekeeping, "");
         assert_eq!(code, exit::BROKEN);
         assert!(log.contains("mode 0755, not 1770"), "{log}");
     }
@@ -651,8 +575,8 @@ policy
         assert_eq!(code, exit::NO);
         assert!(log.contains("PIN disabled after 4 suspicious failures within 24 hours; sudo properpin enable or set"), "{log}");
         assert!(log.contains("alice: PIN disabled after 4 suspicious failures within 24 hours, password required"), "{log}");
-        let (code, _, log) = sandbox.ask_with(&Later { ahead: 300 }, alice, Request::Housekeeping, PASSWORD);
-        assert_eq!((code, log.contains("password correct, but the PIN stays disabled after")), (exit::YES, true), "{log}");
+        let (code, _, log) = sandbox.ask_with(&Later { ahead: 300 }, alice, Request::Housekeeping, "");
+        assert_eq!((code, log.contains("unlocked with the password, but the PIN stays disabled after")), (exit::YES, true), "{log}");
         let output = sandbox.ask_with(&Later { ahead: 300 }, alice, Request::Status, "").1;
         assert!(
             output.contains("PIN                   disabled since ")
@@ -668,7 +592,7 @@ policy
         sandbox.ask(Request::Check, PIN);
         sandbox.ask(Request::Check, "correct horse battery stapl");
         sandbox.ask(Request::Check, PASSWORD);
-        sandbox.ask(Request::Housekeeping, PASSWORD);
+        sandbox.ask(Request::Housekeeping, "");
         let output = sandbox.ask_with(&Later { ahead: 3600 }, &sandbox.caller, Request::Status, "").1;
         assert!(output.contains("    0/60   since this PIN was set\n    0      waiting to be forgiven\n"), "{output}");
     }
@@ -697,7 +621,7 @@ policy
     fn requests_are_exact_words() {
         assert_eq!(Request::parse("check"), Some(Request::Check));
         assert_eq!(Request::parse("housekeeping"), Some(Request::Housekeeping));
-        for word in ["Check", "check ", "", "--check", "set", "start-accepting-pin"] {
+        for word in ["Check", "check ", "", "--check", "set", "start-accepting-pin", "unlocked"] {
             assert_eq!(Request::parse(word), None, "{word:?}");
         }
     }

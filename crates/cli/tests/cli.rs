@@ -22,10 +22,8 @@ impl Sandbox {
         fs::create_dir(root.join("var")).unwrap();
         // Set explicitly: the umask would strip the group's write bit from a mkdir mode.
         fs::set_permissions(root.join("var"), Permissions::from_mode(0o1770)).unwrap();
-        let chkpwd = format!("#!/bin/bash\nIFS= read -r -d '' password\n[[ $password == '{PASSWORD}' ]]\n");
-        script(&root.join("unix_chkpwd"), &chkpwd);
         let pinchecker = format!(
-            "#!/bin/sh\nexec {} \"$@\" --dev-etc {root}/etc --dev-budget {root}/var --dev-chkpwd {root}/unix_chkpwd --dev-log {root}/log\n",
+            "#!/bin/sh\nexec {} \"$@\" --dev-etc {root}/etc --dev-budget {root}/var --dev-log {root}/log\n",
             built_pinchecker().display(),
             root = root.display()
         );
@@ -49,16 +47,12 @@ impl Sandbox {
             .assert()
     }
 
-    /// What the lock screen's housekeeping line does after a correct password. It must succeed.
+    /// What the lock screen's housekeeping line does after a password unlock. It must succeed.
     fn housekeeping(&self) {
         let status = std::process::Command::new(self.0.path().join("pinchecker"))
             .arg("housekeeping")
-            .stdin(std::process::Stdio::piped())
-            .spawn()
-            .and_then(|mut child| {
-                std::io::Write::write_all(&mut child.stdin.take().unwrap(), PASSWORD.as_bytes())?;
-                child.wait()
-            })
+            .stdin(std::process::Stdio::null())
+            .status()
             .unwrap();
         assert!(status.success(), "the housekeeping after the password failed");
     }

@@ -1,7 +1,6 @@
 //! The real `properpin-pinchecker` binary, run as a subprocess without setgid, so its `--dev-*` options
-//! point it at a sandbox owned by whoever runs the tests. `unix_chkpwd` is replaced by a script
-//! that accepts one password. What needs real setgid (the dev options refused, other users kept
-//! out) is in the container test.
+//! point it at a sandbox owned by whoever runs the tests. What needs real setgid (the dev options
+//! refused, other users kept out) is in the container test.
 
 use std::fs::{self, Permissions};
 use std::os::unix::fs::PermissionsExt;
@@ -13,7 +12,6 @@ use properpin_sys::{Account, UserFiles, Yescrypt, current_egid, current_uid};
 
 const PINCHECKER: &str = env!("CARGO_BIN_EXE_properpin-pinchecker");
 const PIN: &str = "4859";
-const PASSWORD: &str = "correct horse battery staple";
 
 struct Sandbox {
     dir: tempfile::TempDir,
@@ -41,10 +39,6 @@ impl Sandbox {
         let uid = current_uid();
         let files = UserFiles::new(sandbox.path("etc"), uid, &user, uid).unwrap();
         files.with_budget(sandbox.path("var"), uid, current_egid()).start_budget(&Budget::default()).unwrap();
-        let chkpwd = sandbox.path("unix_chkpwd");
-        let script = format!("#!/bin/bash\nIFS= read -r -d '' password\n[[ $1 == \"$(id -un)\" && $password == '{PASSWORD}' ]]\n");
-        fs::write(&chkpwd, script).unwrap();
-        fs::set_permissions(&chkpwd, Permissions::from_mode(0o755)).unwrap();
         sandbox
     }
 
@@ -54,7 +48,7 @@ impl Sandbox {
 
     fn dev_args(&self) -> Vec<String> {
         let mut args = Vec::new();
-        for (option, path) in [("--dev-etc", "etc"), ("--dev-budget", "var"), ("--dev-chkpwd", "unix_chkpwd"), ("--dev-log", "log")] {
+        for (option, path) in [("--dev-etc", "etc"), ("--dev-budget", "var"), ("--dev-log", "log")] {
             args.extend([option.to_owned(), self.path(path).display().to_string()]);
         }
         args
@@ -75,7 +69,7 @@ impl Sandbox {
     }
 
     fn housekeeping(&self) {
-        assert_eq!(self.run(&["housekeeping"], PASSWORD.as_bytes()).code, Some(exit::YES.into()));
+        assert_eq!(self.run(&["housekeeping"], b"").code, Some(exit::YES.into()));
     }
 
     fn log(&self) -> String {
@@ -120,51 +114,27 @@ fn the_whole_cycle_through_the_binary() {
     assert_eq!(sandbox.check(PIN), YES);
 }
 
+/// `housekeeping` takes no password and reads nothing: whatever is on stdin, it unpauses the PIN.
+/// Anything the user runs can ask for it, which docs/chaos/security-target.md accepts.
 #[test]
-fn a_wrong_password_never_unpauses_the_pin() {
+fn housekeeping_reads_nothing_and_unpauses() {
     let sandbox = Sandbox::new();
     for wrong in ["1111", "2222", "3333"] {
         sandbox.check(wrong);
     }
-    assert_eq!(sandbox.run(&["housekeeping"], b"not the password").code, NO);
     assert_eq!(sandbox.check(PIN), NO);
-    assert!(sandbox.log().contains("wrong password, nothing changed"), "{}", sandbox.log());
+    assert_eq!(sandbox.run(&["housekeeping"], b"anything at all").code, YES, "{}", sandbox.log());
+    assert_eq!(sandbox.check(PIN), YES);
+    assert!(sandbox.log().contains("unlocked with the password, PIN enabled"), "{}", sandbox.log());
 }
 
-/// `unlocked` takes no password, so with `pin_unpause_by` left at its default it must change nothing:
-/// otherwise anything the user runs could unpause the PIN.
+/// The option of the versions that checked the password through `unix_chkpwd` is gone.
 #[test]
-fn unlocked_changes_nothing_by_default() {
+fn dev_chkpwd_is_refused() {
     let sandbox = Sandbox::new();
-    for wrong in ["1111", "2222", "3333"] {
-        sandbox.check(wrong);
-    }
-    assert_eq!(sandbox.run(&["unlocked"], b"").code, NO);
-    assert_eq!(sandbox.check(PIN), NO);
-    assert!(sandbox.log().contains("unlock reported, but pin_unpause_by is password-check, so nothing changed"), "{}", sandbox.log());
-}
-
-/// With `pin_unpause_by` at setcred or both, `unlocked` unpauses the PIN without checking any
-/// password: a `unix_chkpwd` that leaves a mark when run is never run.
-#[test]
-fn unlocked_unpauses_without_a_password_when_the_config_says_so() {
-    for mode in ["setcred", "both"] {
-        let sandbox = Sandbox::new();
-        let config = sandbox.path("etc/config");
-        fs::write(&config, format!("pin_unpause_by = {mode}\n")).unwrap();
-        fs::set_permissions(&config, Permissions::from_mode(0o644)).unwrap();
-        let mark = sandbox.path("chkpwd-ran");
-        fs::write(sandbox.path("unix_chkpwd"), format!("#!/bin/sh\ntouch {}\nexit 1\n", mark.display())).unwrap();
-        for wrong in ["1111", "2222", "3333"] {
-            sandbox.check(wrong);
-        }
-        assert_eq!(sandbox.check(PIN), NO, "{mode}");
-        // Whatever is on stdin is never read.
-        assert_eq!(sandbox.run(&["unlocked"], b"anything").code, YES, "{mode}: {}", sandbox.log());
-        assert_eq!(sandbox.check(PIN), YES, "{mode}");
-        assert!(sandbox.log().contains("unlocked through the password stack (setcred), PIN enabled"), "{mode}: {}", sandbox.log());
-        assert!(!mark.exists(), "{mode}: unix_chkpwd ran");
-    }
+    let mut command = sandbox.command(&["housekeeping"]);
+    command.args(["--dev-chkpwd", "/usr/sbin/unix_chkpwd"]);
+    assert_eq!(run(command, b"").code, USAGE);
 }
 
 #[test]
@@ -245,17 +215,6 @@ fn files_it_cannot_trust_are_refused() {
     command.args(["--dev-owner", &(current_uid() + 1).to_string()]);
     assert_eq!(run(command, PIN.as_bytes()).code, Some(exit::BROKEN.into()));
     assert!(sandbox.log().contains("owned by uid"), "{}", sandbox.log());
-}
-
-#[test]
-fn the_password_checker_must_exist() {
-    let sandbox = Sandbox::new();
-    fs::remove_file(sandbox.path("unix_chkpwd")).unwrap();
-    for wrong in ["1111", "2222", "3333"] {
-        sandbox.check(wrong);
-    }
-    assert_eq!(sandbox.run(&["housekeeping"], PASSWORD.as_bytes()).code, Some(exit::BROKEN.into()));
-    assert_eq!(sandbox.check(PIN), NO);
 }
 
 #[test]

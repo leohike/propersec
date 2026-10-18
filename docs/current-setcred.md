@@ -1,18 +1,14 @@
 # Housekeeping through pam_setcred
 
-Written on 2026-10-18, from a conversation about how to stop the housekeeping from handling the password. Claims are marked "verified" (in this repo's analysis docs or code) or "reasoned" (thought through, not tested). Built the same day as an addition next to the password check, behind a setting, as the section on what is built now describes; the password check is still the default and nothing of it is removed.
+Written on 2026-10-18, from a conversation about how to stop the housekeeping from handling the password. Claims are marked "verified" (in this repo's analysis docs or code) or "reasoned" (thought through, not tested). Built the same day, first next to the password check behind a setting, then, once tested on a real lock screen, as the only way: the password check is gone. The sections below the next one are the idea as first written, kept for the reasoning.
 
 ## What is built now
 
-`pin_unpause_by` in `/etc/properpin/config` takes `password-check` (the default, today's behaviour), `setcred` or `both`. The module reads this one setting itself (`crates/pam/src/run.rs`, `unpause_by`), by the pinchecker's rules for the config, and takes a config it can't use as `password-check`, logging why; tests point it at their own config with a new `settings=` word on the PAM line.
+The housekeeping line's `pam_sm_authenticate` answers `PAM_IGNORE` at once and never reads `PAM_AUTHTOK`. Its `pam_sm_setcred` asks the pinchecker for `housekeeping`, which now reads nothing on stdin and runs `housekeeping_after_password_unlock`, logging `unlocked with the password, PIN enabled`. Any flag counts. `unix_chkpwd`, the `PasswordCheck` trait, `crates/sys/src/chkpwd.rs`, `--dev-chkpwd` and the stand-in `unix_chkpwd` scripts in the tests are gone. The PAM lines are unchanged, so nobody's `/etc/pam.d/kde` needs editing.
 
-- **`password-check`:** the housekeeping line works as before. Its `pam_sm_setcred` only logs `pam_setcred(<flag>) after a password unlock; pin_unpause_by is password-check`, so the journal shows the setcred path firing next to the password check.
-- **`setcred`:** the housekeeping line's `pam_sm_authenticate` answers `PAM_IGNORE` at once and never reads `PAM_AUTHTOK`. Its `pam_sm_setcred` logs the same line and asks the pinchecker for a new request, `unlocked`, which takes no input and runs the same `housekeeping_after_password_unlock`. Any flag counts.
-- **`both`:** each path does the housekeeping, the password check first, for comparing them.
+On the way there, from commit `6c9b21d` to the tag `both-setcred-and-password`, a setting `pin_unpause_by` (`password-check`, `setcred` or `both`) chose between the two ways, with a recipe to install each; the tests and the VM runs below used it. It is gone too, and a config that still holds it is refused like any unknown setting: the PIN is refused until the line is removed (`properpin doctor` names it).
 
-The pinchecker's `unlocked` changes nothing unless the config says `setcred` or `both`, so at the default anything the user runs still can't unpause the PIN without the password. `unix_chkpwd`, `PasswordCheck` and `--dev-chkpwd` all stay. The PAM lines are unchanged; only the comment in `packaging/kde-auth.pam` is new.
-
-One change to the `check` line was needed, described more fully under how libpam picks the lines: its `pam_sm_setcred` now answers `PAM_SUCCESS` instead of `PAM_IGNORE`. kscreenlocker ignores what `pam_setcred` answers.
+One change to the `check` line was needed, described more fully under how libpam picks the lines: its `pam_sm_setcred` answers `PAM_SUCCESS` instead of `PAM_IGNORE`. kscreenlocker ignores what `pam_setcred` answers.
 
 Tested on 2026-10-18: `crates/pam/tests/stack.rs` (the three paths in each mode, and a bad value), `crates/pinchecker/tests/pinchecker.rs` (`unlocked` in each mode, with a `unix_chkpwd` that must not run), and four new scenarios in `crates/systest` that `just podman` ran on a stock Fedora 44 through the real `kde` stack and `pam_unix`: all 45 scenarios passed. Faillock is not covered yet.
 

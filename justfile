@@ -1,10 +1,8 @@
 # properpin -- a PIN for the KDE lock screen, within limits. Every recipe works in target/, a
 # temporary directory, or a podman container, and never touches this machine's /etc or /run, except
 # install, check and uninstall, which run packaging/install.sh on this machine, integrate-into-pam
-# and remove-from-pam, which run packaging/integrate-into-pam.sh, the three install-* recipes, which
-# run all of install, integrate-into-pam and packaging/set-pin-unpause-by.sh, and logs, which only
-# reads, all through sudo. Only integrate-into-pam, remove-from-pam and the install-* recipes ever
-# touch /etc/pam.d.
+# and remove-from-pam, which run packaging/integrate-into-pam.sh, and logs, which only reads, all
+# through sudo. Only integrate-into-pam and remove-from-pam ever touch /etc/pam.d.
 
 # List the recipes
 [private]
@@ -27,24 +25,6 @@ install: _not-root release
     sudo packaging/install.sh install
     sudo packaging/install.sh check
 
-# Build and install as install does, put properpin's lines into /etc/pam.d/kde (integrate-into-pam: asks first, replaces an older version's, does nothing when they are in already), set pin_unpause_by = password-check in /etc/properpin/config, then check everything: only the pinchecker's own password check unpauses the PIN, the default. The config keeps the setting through later plain installs
-install-password-check: (_install-with "password-check")
-
-# Build and install, put properpin's lines into /etc/pam.d/kde (asking first), set pin_unpause_by = setcred, then check everything: only pam_setcred after a successful unlock unpauses the PIN, and the password is never read. The config keeps the setting through later plain installs
-install-setcred: (_install-with "setcred")
-
-# Build and install, put properpin's lines into /etc/pam.d/kde (asking first), set pin_unpause_by = both, then check everything: the password check and pam_setcred each unpause the PIN, to compare them in the logs. The config keeps the setting through later plain installs
-install-both: (_install-with "both")
-
-# install, integrate-into-pam and the setting, with install.sh check last: until the lines are in, it fails on an older version's
-[private]
-_install-with mode: _not-root release
-    @echo "installing properpin $(git describe --always --dirty), with pin_unpause_by = {{ mode }}"
-    sudo packaging/install.sh install
-    sudo packaging/integrate-into-pam.sh add
-    sudo packaging/set-pin-unpause-by.sh {{ mode }}
-    sudo packaging/install.sh check
-
 # Print, for pasting into a bug report or a chat, the journal lines of properpin, of every PAM module on the lock screen's kde service and of kscreenlocker since SINCE (default: 30 minutes ago, any journalctl --since works), then what is installed and how: the checkout, /etc/pam.d/kde, the config, doctor and status. Only prints; writes nothing anywhere. Never shows a PIN or a password, which nothing logs; it does show your user name and the times you unlocked
 logs since="30 min ago": _not-root
     #!/usr/bin/env bash
@@ -61,7 +41,7 @@ logs since="30 min ago": _not-root
     section "integrate-into-pam check"
     packaging/integrate-into-pam.sh check
     section "/etc/properpin/config"
-    sudo cat /etc/properpin/config 2>/dev/null || echo "(no config: every setting at its default, pin_unpause_by = password-check)"
+    sudo cat /etc/properpin/config 2>/dev/null || echo "(no config: every setting at its default)"
     section "properpin doctor"
     sudo /usr/local/bin/properpin doctor 2>&1
     section "properpin status"
@@ -114,12 +94,11 @@ demo:
     root=$(mktemp -d)
     trap 'rm -rf "$root"' EXIT
     mkdir "$root/var" && chmod 1770 "$root/var"
-    # Stands in for unix_chkpwd, and for /etc/shadow: the password is "correct horse battery staple".
-    printf '#!/bin/bash\nIFS= read -r -d "" p\n[[ $p == "correct horse battery staple" ]]\n' >"$root/unix_chkpwd"
+    # Stands in for /etc/shadow, which set compares the PIN with: the password is "correct horse battery staple".
     printf '%s:%s:20000:0:99999:7:::\n' "$(id -un)" "$(printf 'correct horse battery staple' | mkpasswd -s -m yescrypt 2>/dev/null || echo '!')" >"$root/shadow"
-    printf '#!/bin/sh\nexec %s "$@" --dev-etc %s --dev-budget %s --dev-chkpwd %s --dev-log %s\n' \
-        "$bin/properpin-pinchecker" "$root/etc" "$root/var" "$root/unix_chkpwd" "$root/log" >"$root/pinchecker"
-    chmod +x "$root/unix_chkpwd" "$root/pinchecker"
+    printf '#!/bin/sh\nexec %s "$@" --dev-etc %s --dev-budget %s --dev-log %s\n' \
+        "$bin/properpin-pinchecker" "$root/etc" "$root/var" "$root/log" >"$root/pinchecker"
+    chmod +x "$root/pinchecker"
     properpin() { "$bin/properpin" --etc "$root/etc" --budget "$root/var" --shadow "$root/shadow" --pinchecker "$root/pinchecker" --owner "$(id -u)" --group "$(id -g)" "$@"; }
     step() { printf '\n\033[1m%s\033[0m\n' "$*"; }
     said() { tail -n 1 "$root/log"; }
@@ -129,8 +108,8 @@ demo:
     lock_screen cat4859
     for wrong in 1111 2222 3333; do lock_screen "$wrong"; done
     lock_screen cat4859
-    step "lock screen: the correct password, so the housekeeping line runs"
-    echo -n "correct horse battery staple" | "$root/pinchecker" housekeeping; said
+    step "lock screen: the correct password, so pam_setcred runs the housekeeping line"
+    "$root/pinchecker" housekeeping </dev/null; said
     lock_screen cat4859
     step "properpin status"; properpin status
 

@@ -10,11 +10,8 @@
 //!               as the password.
 //! housekeeping  After a password unlock: forgive the failures of the last moments as the user's
 //!               own, the password itself among them, and start the consecutive count over, which
-//!               unpauses the PIN. pin_unpause_by in the config says how the module knows:
-//!               password-check (the default): pam_sm_authenticate, after the stock stack whatever
-//!               it answered, when the pinchecker finds the password right; setcred:
-//!               pam_sm_setcred, which libpam calls on this line only after the stock stack
-//!               succeeded, with no password read; both: each of the two.
+//!               unpauses the PIN. Done in pam_sm_setcred, which libpam calls on this line only
+//!               after the stock stack took the password; no password is read.
 //! ```
 //!
 //! It decides nothing itself. The hashes and the counts belong to the `properpin` group, out of
@@ -25,7 +22,6 @@
 //!
 //! ```text
 //! pinchecker=PATH  the pinchecker, instead of /usr/local/libexec/properpin/properpin-pinchecker (tests)
-//! settings=PATH    the config to read pin_unpause_by from, instead of /etc/properpin/config (tests)
 //! log=FILE         append the module's own log lines here instead of syslog (tests)
 //! test_panic       panic on purpose while SIGCHLD is changed, to prove a panic becomes PAM_IGNORE
 //!                  and puts SIGCHLD back (tests)

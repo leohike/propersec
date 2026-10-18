@@ -3,7 +3,7 @@
 
 use std::fmt;
 
-use crate::{Budget, Error, Judged, MAX_PIN_BYTES, Refusal, Secret, Settings};
+use crate::{Budget, Error, Judged, MAX_PIN_BYTES, Refusal, Settings};
 
 /// Where one user's settings and budget live, and the rules for trusting them.
 pub trait Store {
@@ -30,11 +30,6 @@ pub trait Clock {
 /// Checks a typed PIN against the stored hash.
 pub trait Hasher {
     fn verify(&self, pin: &str, hash: &str) -> Result<bool, Error>;
-}
-
-/// Checks the account password, the way pam_unix does: through `unix_chkpwd` once installed.
-pub trait PasswordCheck {
-    fn matches(&self, user: &str, password: &Secret) -> Result<bool, Error>;
 }
 
 /// One line per event. Never pass a PIN, a password, or anything derived from one.

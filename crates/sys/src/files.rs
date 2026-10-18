@@ -369,10 +369,8 @@ fn flock(mut file: File, path: &Path) -> Result<Flock<File>, Error> {
     }
 }
 
-/// The config at `path` on top of the defaults, trusted when owned by one of `owners`, by the rules
-/// the pinchecker applies to it. No config there means the defaults. The PAM module reads it this way
-/// for `pin_unpause_by`, the one setting it acts on itself.
-pub fn config_settings(path: &Path, owners: &[u32]) -> Result<Settings, Error> {
+/// The config at `path` on top of the defaults, trusted when owned by one of `owners`.
+fn config_settings(path: &Path, owners: &[u32]) -> Result<Settings, Error> {
     let text = read_trusted(path, owners, Readers::Everyone)?.unwrap_or_default();
     let source = path.display().to_string();
     let mut settings = Settings::default();
