@@ -27,20 +27,23 @@ install: _not-root release
     sudo packaging/install.sh install
     sudo packaging/install.sh check
 
-# Install, then integrate-into-pam (which asks first, and does nothing when the lines are in already), then pin_unpause_by = password-check in /etc/properpin/config: only the pinchecker's own password check unpauses the PIN, the default. The config keeps the setting through later plain installs
-install-password-check: install integrate-into-pam (_pin-unpause-by "password-check")
+# Build and install as install does, put properpin's lines into /etc/pam.d/kde (integrate-into-pam: asks first, replaces an older version's, does nothing when they are in already), set pin_unpause_by = password-check in /etc/properpin/config, then check everything: only the pinchecker's own password check unpauses the PIN, the default. The config keeps the setting through later plain installs
+install-password-check: (_install-with "password-check")
 
-# Install, then integrate-into-pam (which asks first, and does nothing when the lines are in already), then pin_unpause_by = setcred: only pam_setcred after a successful unlock unpauses the PIN, and the password is never read. The config keeps the setting through later plain installs
-install-setcred: install integrate-into-pam (_pin-unpause-by "setcred")
+# Build and install, put properpin's lines into /etc/pam.d/kde (asking first), set pin_unpause_by = setcred, then check everything: only pam_setcred after a successful unlock unpauses the PIN, and the password is never read. The config keeps the setting through later plain installs
+install-setcred: (_install-with "setcred")
 
-# Install, then integrate-into-pam (which asks first, and does nothing when the lines are in already), then pin_unpause_by = both: the password check and pam_setcred each unpause the PIN, to compare them in the logs. The config keeps the setting through later plain installs
-install-both: install integrate-into-pam (_pin-unpause-by "both")
+# Build and install, put properpin's lines into /etc/pam.d/kde (asking first), set pin_unpause_by = both, then check everything: the password check and pam_setcred each unpause the PIN, to compare them in the logs. The config keeps the setting through later plain installs
+install-both: (_install-with "both")
 
-# Set pin_unpause_by in /etc/properpin/config, keeping every other setting, then show what doctor finds
+# install, integrate-into-pam and the setting, with install.sh check last: until the lines are in, it fails on an older version's
 [private]
-_pin-unpause-by mode: _not-root
+_install-with mode: _not-root release
+    @echo "installing properpin $(git describe --always --dirty), with pin_unpause_by = {{ mode }}"
+    sudo packaging/install.sh install
+    sudo packaging/integrate-into-pam.sh add
     sudo packaging/set-pin-unpause-by.sh {{ mode }}
-    sudo /usr/local/bin/properpin doctor
+    sudo packaging/install.sh check
 
 # Print, for pasting into a bug report or a chat, the journal lines of properpin, of every PAM module on the lock screen's kde service and of kscreenlocker since SINCE (default: 30 minutes ago, any journalctl --since works), then what is installed and how: the checkout, /etc/pam.d/kde, the config, doctor and status. Only prints; writes nothing anywhere. Never shows a PIN or a password, which nothing logs; it does show your user name and the times you unlocked
 logs since="30 min ago": _not-root
