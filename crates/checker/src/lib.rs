@@ -5,7 +5,7 @@
 //! counts can be readable by that group alone and stay out of reach of everything the user runs. The group has no members: running the PIN checker is the
 //! only way to get it. The PIN checker keeps its caller's user id, so the caller can't change the PIN checker,
 //! and each user's counts file is that user's own. The PAM module and the CLI start it, write what
-//! was typed to its stdin for `check`, and read its exit code (`screenlock_pin_core::exit`); only
+//! was typed to its stdin for `check`, and read its exit code (`screenlock_pin_core::Answer`); only
 //! `status` prints anything.
 //!
 //! ```text
@@ -36,61 +36,14 @@
 #![forbid(unsafe_code)]
 
 use std::io::Read;
-use std::path::PathBuf;
 use std::time::Duration;
 
+use screenlock_pin_core::protocol::{ENABLE_OR_SET, SEE_DOCTOR};
 use screenlock_pin_core::{
-    Clock, Error, Hasher, Judged, Log, MAX_INPUT_BYTES, Secret, Settings, Store, exit, try_unlock_with_pin,
+    Answer, Clock, Error, Hasher, Judged, Log, MAX_INPUT_BYTES, Request, Secret, Settings, Store, try_unlock_with_pin,
     unpause_pin_after_password_unlock,
 };
-use screenlock_pin_sys::{Account, UserFiles, local_time};
-
-/// What the caller asks for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Request {
-    Check,
-    Unpause,
-    Status,
-}
-
-impl Request {
-    pub fn parse(word: &str) -> Option<Self> {
-        match word {
-            "check" => Some(Self::Check),
-            "unpause" => Some(Self::Unpause),
-            "status" => Some(Self::Status),
-            _ => None,
-        }
-    }
-
-    /// Whether it reads something typed from stdin.
-    pub fn reads_input(self) -> bool {
-        self == Self::Check
-    }
-}
-
-/// Where the files are, and who must own them.
-#[derive(Debug, Clone)]
-pub struct Places {
-    /// `/etc/screenlock-pin` once installed.
-    pub etc: PathBuf,
-    /// Who must own the files under `etc`: root once installed.
-    pub etc_owner: u32,
-    /// `/var/lib/screenlock-pin` once installed: every user's budget, in one directory on disk.
-    pub budget_dir: PathBuf,
-    /// Who must own `budget_dir`: root once installed.
-    pub budget_owner: u32,
-    /// The group `budget_dir` must have: the one the PIN checker runs with, so a PIN checker installed
-    /// without its setgid bit runs with the caller's group and refuses.
-    pub budget_group: u32,
-}
-
-impl Places {
-    fn files(&self, caller: &Account) -> Result<UserFiles, Error> {
-        let files = UserFiles::new(&self.etc, self.etc_owner, &caller.name, caller.uid)?;
-        Ok(files.with_budget(&self.budget_dir, self.budget_owner, self.budget_group))
-    }
-}
+use screenlock_pin_sys::{Account, AllUsers, UserFiles, local_time};
 
 /// Whether the `--dev-*` options may be used: only when the PIN checker runs with no more rights than
 /// its caller. Two independent signs must agree: the kernel didn't flag the start as elevated
@@ -100,11 +53,11 @@ pub fn dev_options_allowed(at_secure: bool, uid: u32, euid: u32, gid: u32, egid:
     !at_secure && uid == euid && gid == egid
 }
 
-/// What the PIN checker answers: an exit code from `screenlock_pin_core::exit`, for `status` some text,
-/// and for a correct PIN how soon it may answer.
+/// What the PIN checker answers: its exit code, for `status` some text, and for a correct PIN how
+/// soon it may answer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Reply {
-    pub code: u8,
+    pub answer: Answer,
     pub output: String,
     /// How long after the PIN checker started the answer may come at the earliest:
     /// `min_milliseconds_before_pin_unlock` for a correct PIN, and nothing for anything else, which
@@ -116,14 +69,16 @@ pub struct Reply {
 }
 
 impl Reply {
-    fn code(code: u8) -> Self {
-        Self { code, output: String::new(), not_before: Duration::ZERO }
+    fn plain(answer: Answer) -> Self {
+        Self { answer, output: String::new(), not_before: Duration::ZERO }
     }
 }
 
 /// Everything from outside that one request needs.
 pub struct Context<'a, H, C, L: ?Sized> {
-    pub places: &'a Places,
+    /// Where the files are, and who must own them. The budget directory's group is the one the PIN
+    /// checker runs with, so a PIN checker installed without its setgid bit refuses.
+    pub places: &'a AllUsers,
     pub hasher: &'a H,
     pub clock: &'a C,
     pub log: &'a L,
@@ -142,25 +97,18 @@ pub fn serve<H: Hasher, C: Clock, L: Log + ?Sized>(
         let line = format!("{}: {what}: {error}", caller.name);
         context.log.log(&line);
         let output = if request == Request::Status { line + "\n" } else { String::new() };
-        Reply { output, ..Reply::code(exit::BROKEN) }
+        Reply { output, ..Reply::plain(Answer::Broken) }
     };
-    let files = match context.places.files(caller) {
+    let files = match context.places.user(&caller.name, caller.uid) {
         Ok(files) => files,
         Err(error) => return broken("refused", error),
     };
     let result = match request {
         Request::Check => check_pin(&files, caller, typed, context),
         Request::Unpause => unpause_pin(&files, caller, context),
-        Request::Status => status(&files, context.hasher, context.clock).map(|output| Reply { output, ..Reply::code(exit::YES) }),
+        Request::Status => status(&files, context.hasher, context.clock).map(|output| Reply { output, ..Reply::plain(Answer::Yes) }),
     };
-    result.unwrap_or_else(|error| {
-        let what = match request {
-            Request::Check => "PIN refused",
-            Request::Unpause => "unpausing the PIN failed",
-            Request::Status => "status failed",
-        };
-        broken(what, error)
-    })
+    result.unwrap_or_else(|error| broken(request.failed(), error))
 }
 
 fn check_pin<H: Hasher, C: Clock, L: Log + ?Sized>(
@@ -173,7 +121,7 @@ fn check_pin<H: Hasher, C: Clock, L: Log + ?Sized>(
     log_judged(&outcome.judged, caller, context.log);
     context.log.log(&format!("{}: {}", caller.name, outcome.verdict));
     if !outcome.verdict.unlocks() {
-        return Ok(Reply::code(exit::NO));
+        return Ok(Reply::plain(Answer::No));
     }
     // The attempt read the same config a moment ago, so this hardly fails; if it does, the PIN was
     // right all the same, so the default is waited out.
@@ -181,7 +129,7 @@ fn check_pin<H: Hasher, C: Clock, L: Log + ?Sized>(
         context.log.log(&format!("{}: waiting the default before the PIN unlocks: {error}", caller.name));
         Settings::default().min_milliseconds_before_pin_unlock
     });
-    Ok(Reply { not_before: Duration::from_millis(minimum), ..Reply::code(exit::YES) })
+    Ok(Reply { not_before: Duration::from_millis(minimum), ..Reply::plain(Answer::Yes) })
 }
 
 fn log_judged<L: Log + ?Sized>(judged: &Judged, caller: &Account, log: &L) {
@@ -196,40 +144,38 @@ fn log_judged<L: Log + ?Sized>(judged: &Judged, caller: &Account, log: &L) {
 /// Anything the user runs can ask for it too, which docs/chaos/security-target.md accepts: code
 /// running as the user can unlock the session and keylog the PIN anyway.
 fn unpause_pin<H, C: Clock, L: Log + ?Sized>(files: &UserFiles, caller: &Account, context: &Context<'_, H, C, L>) -> Result<Reply, Error> {
-    let settings = files.settings()?;
-    if settings.pin_hash.is_empty() {
+    if files.settings()?.pin_hash.is_none() {
         context.log.log(&format!("{}: no PIN is set, so there is nothing to do", caller.name));
-        return Ok(Reply::code(exit::NO));
+        return Ok(Reply::plain(Answer::No));
     }
     let judged = unpause_pin_after_password_unlock(files, context.clock)?;
     log_judged(&judged, caller, context.log);
-    match judged.disabled {
-        Some(limit) => context.log.log(&format!(
-            "{}: unlocked with the password, but the PIN stays disabled after {limit}; sudo screenlock-pin enable or set turns it back on",
-            caller.name
-        )),
-        None => context.log.log(&format!("{}: unlocked with the password, PIN enabled", caller.name)),
-    }
-    Ok(Reply::code(exit::YES))
+    let outcome = match judged.disabled {
+        Some(limit) => format!("but the PIN stays disabled after {limit}; {ENABLE_OR_SET}"),
+        None => "PIN enabled".to_owned(),
+    };
+    context.log.log(&format!("{}: unlocked with the password, {outcome}", caller.name));
+    Ok(Reply::plain(Answer::Yes))
 }
 
 /// What is set, which rules apply, and whether the PIN is enabled, paused or disabled right now,
 /// and since when, or refused whatever is typed, and why: every file an attempt reads, checked the
 /// way it checks them.
 fn status(files: &UserFiles, hasher: &impl Hasher, clock: &impl Clock) -> Result<String, Error> {
-    const FIX: &str = "sudo screenlock-pin doctor says how to fix it";
     let line = |label: &str, value: &str| format!("{label:<22}{value}\n");
     let since = |at: u64| format!("since {}", local_time(at));
     let mut out = line("user", files.user());
     let settings = match files.settings() {
-        Ok(settings) if settings.pin_hash.is_empty() => return Ok(out + &line("PIN", "none set") + &line("hash", "unset")),
         Ok(settings) => settings,
-        Err(error) => return Ok(out + &line("PIN", &format!("refused whatever is typed: {error}; {FIX}"))),
+        Err(error) => return Ok(out + &line("PIN", &format!("refused whatever is typed: {error}; {SEE_DOCTOR}"))),
+    };
+    let Some(pin_hash) = &settings.pin_hash else {
+        return Ok(out + &line("PIN", "none set") + &line("hash", "unset"));
     };
     let rules = format!("{}, yescrypt cost {}", settings.pin_rules(), settings.hash_cost);
     let path = files.user_file().display().to_string();
-    if let Err(error) = hasher.verify("", &settings.pin_hash).and_then(|_| files.check_budget()) {
-        out += &line("PIN", &format!("refused whatever is typed: {error}; {FIX}"));
+    if let Err(error) = hasher.verify("", pin_hash.as_str()).and_then(|_| files.check_budget()) {
+        out += &line("PIN", &format!("refused whatever is typed: {error}; {SEE_DOCTOR}"));
         return Ok(out + &line("hash", &format!("set, in {path}")) + &line("rules for a new PIN", &rules));
     }
     // Judged as the next attempt would, without saving: status changes nothing.
@@ -237,7 +183,7 @@ fn status(files: &UserFiles, hasher: &impl Hasher, clock: &impl Clock) -> Result
     let judged = budget.judge(clock.now()?, &settings);
     let state = match (judged.disabled, budget.disabled) {
         (Some(limit), Some(disabled)) => {
-            format!("disabled {}, after {limit}; sudo screenlock-pin enable or set turns it back on", since(disabled.at))
+            format!("disabled {}, after {limit}; {ENABLE_OR_SET}", since(disabled.at))
         }
         _ if budget.paused(&settings) => format!(
             "paused {}, after {} consecutive failures; unlocking with the password resumes it",
@@ -302,51 +248,50 @@ mod tests {
 
     struct Sandbox {
         _dir: tempfile::TempDir,
-        places: Places,
+        places: AllUsers,
         caller: Account,
     }
 
     fn sandbox() -> Sandbox {
         let dir = tempfile::tempdir().unwrap();
         let uid = current_uid();
-        let places = Places {
-            etc: dir.path().join("etc"),
-            etc_owner: uid,
-            budget_dir: dir.path().join("var"),
-            budget_owner: uid,
-            budget_group: current_egid(),
-        };
-        fs::create_dir(&places.budget_dir).unwrap();
-        fs::set_permissions(&places.budget_dir, Permissions::from_mode(0o1770)).unwrap();
+        let var = dir.path().join("var");
+        fs::create_dir(&var).unwrap();
+        fs::set_permissions(&var, Permissions::from_mode(0o1770)).unwrap();
+        let places = AllUsers::new(dir.path().join("etc"), uid, var, uid, current_egid());
         // alice is whoever runs the tests: her budget must be her own, and it is the test's.
         let caller = Account { name: "alice".into(), uid, gid: current_egid() };
         let sandbox = Sandbox { _dir: dir, places, caller };
         sandbox.write_user_file(&format!("hash = {}\n", Yescrypt.hash(PIN, 4).unwrap()));
         // The budget and lock file screenlock-pin set creates.
-        sandbox.places.files(&sandbox.caller).unwrap().start_budget(&screenlock_pin_core::Budget::fresh(SET_AT)).unwrap();
+        sandbox.files().start_budget(&screenlock_pin_core::Budget::fresh(SET_AT)).unwrap();
         sandbox
     }
 
     impl Sandbox {
+        fn files(&self) -> UserFiles {
+            self.places.user(&self.caller.name, self.caller.uid).unwrap()
+        }
+
         fn write_user_file(&self, text: &str) {
-            let path = self.places.etc.join("users").join(&self.caller.name);
+            let path = self.files().user_file();
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             fs::write(&path, text).unwrap();
             fs::set_permissions(&path, Permissions::from_mode(0o640)).unwrap();
         }
 
-        fn ask(&self, request: Request, typed: &str) -> (u8, String, String) {
+        fn ask(&self, request: Request, typed: &str) -> (Answer, String, String) {
             self.ask_as(&self.caller, request, typed)
         }
 
-        fn ask_as(&self, caller: &Account, request: Request, typed: &str) -> (u8, String, String) {
+        fn ask_as(&self, caller: &Account, request: Request, typed: &str) -> (Answer, String, String) {
             self.ask_with(&SystemClock, caller, request, typed)
         }
 
-        fn ask_with(&self, clock: &impl Clock, caller: &Account, request: Request, typed: &str) -> (u8, String, String) {
+        fn ask_with(&self, clock: &impl Clock, caller: &Account, request: Request, typed: &str) -> (Answer, String, String) {
             let log = Lines::default();
             let reply = self.reply_logged(clock, caller, request, typed, &log);
-            (reply.code, reply.output, log.0.into_inner().join("\n"))
+            (reply.answer, reply.output, log.0.into_inner().join("\n"))
         }
 
         fn reply(&self, request: Request, typed: &str) -> Reply {
@@ -359,13 +304,17 @@ mod tests {
         }
 
         fn write_config(&self, text: &str) {
-            let path = self.places.etc.join("config");
+            let path = self.places.config();
             fs::write(&path, text).unwrap();
             fs::set_permissions(&path, Permissions::from_mode(0o644)).unwrap();
         }
 
         fn budget_file(&self) -> std::path::PathBuf {
-            self.places.budget_dir.join(format!("{}.budget", self.caller.uid))
+            self.files().budget_file()
+        }
+
+        fn budget_dir(&self) -> std::path::PathBuf {
+            self.budget_file().parent().unwrap().to_owned()
         }
     }
 
@@ -393,17 +342,17 @@ mod tests {
     fn the_whole_cycle() {
         let sandbox = sandbox();
         let (code, _, log) = sandbox.ask(Request::Check, PIN);
-        assert_eq!((code, log.as_str()), (exit::YES, "alice: unlocked with the PIN"));
+        assert_eq!((code, log.as_str()), (Answer::Yes, "alice: unlocked with the PIN"));
         for wrong in ["1111", "2222"] {
-            assert_eq!(sandbox.ask(Request::Check, wrong).0, exit::NO);
+            assert_eq!(sandbox.ask(Request::Check, wrong).0, Answer::No);
         }
         let (code, _, log) = sandbox.ask(Request::Check, "3333");
-        assert_eq!((code, log.as_str()), (exit::NO, "alice: not the PIN, consecutive failure 3 of 3; PIN paused, password required"));
+        assert_eq!((code, log.as_str()), (Answer::No, "alice: not the PIN, consecutive failure 3 of 3; PIN paused, password required"));
         let (code, _, log) = sandbox.ask(Request::Check, PIN);
-        assert_eq!((code, log.as_str()), (exit::NO, "alice: PIN paused after 3 consecutive failures, password required"));
+        assert_eq!((code, log.as_str()), (Answer::No, "alice: PIN paused after 3 consecutive failures, password required"));
         let (code, _, log) = sandbox.ask(Request::Unpause, "");
-        assert_eq!((code, log.as_str()), (exit::YES, "alice: unlocked with the password, PIN enabled"));
-        assert_eq!(sandbox.ask(Request::Check, PIN).0, exit::YES);
+        assert_eq!((code, log.as_str()), (Answer::Yes, "alice: unlocked with the password, PIN enabled"));
+        assert_eq!(sandbox.ask(Request::Check, PIN).0, Answer::Yes);
     }
 
     /// A correct PIN answers no sooner than the config's minimum after the start, 75 ms by default;
@@ -413,7 +362,7 @@ mod tests {
         let sandbox = sandbox();
         assert_eq!(sandbox.reply(Request::Check, PIN).not_before, Duration::from_millis(75));
         sandbox.write_config("min_milliseconds_before_pin_unlock = 500\n");
-        assert_eq!(sandbox.reply(Request::Check, PIN), Reply { not_before: Duration::from_millis(500), ..Reply::code(exit::YES) });
+        assert_eq!(sandbox.reply(Request::Check, PIN), Reply { not_before: Duration::from_millis(500), ..Reply::plain(Answer::Yes) });
         for (request, typed) in [(Request::Check, "1111"), (Request::Unpause, ""), (Request::Status, "")] {
             assert_eq!(sandbox.reply(request, typed).not_before, Duration::ZERO, "{request:?} {typed:?}");
         }
@@ -429,13 +378,13 @@ mod tests {
     #[test]
     fn without_a_pin_there_is_nothing_to_do() {
         let sandbox = sandbox();
-        fs::remove_file(sandbox.places.etc.join("users/alice")).unwrap();
-        let budget = sandbox.places.budget_dir.join(format!("{}.budget", sandbox.caller.uid));
+        fs::remove_file(sandbox.files().user_file()).unwrap();
+        let budget = sandbox.budget_file();
         let before = fs::read(&budget).unwrap();
         let (code, _, log) = sandbox.ask(Request::Unpause, "");
-        assert_eq!((code, log.as_str()), (exit::NO, "alice: no PIN is set, so there is nothing to do"));
+        assert_eq!((code, log.as_str()), (Answer::No, "alice: no PIN is set, so there is nothing to do"));
         assert_eq!(fs::read(&budget).unwrap(), before, "nothing written");
-        assert_eq!(fs::read_dir(&sandbox.places.budget_dir).unwrap().count(), 2, "nothing created");
+        assert_eq!(fs::read_dir(sandbox.budget_dir()).unwrap().count(), 2, "nothing created");
     }
 
     #[test]
@@ -443,25 +392,25 @@ mod tests {
         let sandbox = sandbox();
         let bob = Account { name: "bob".into(), uid: sandbox.caller.uid + 1, gid: sandbox.caller.gid };
         let (code, _, log) = sandbox.ask_as(&bob, Request::Check, PIN);
-        assert_eq!((code, log.as_str()), (exit::NO, "bob: no PIN is set, refused"));
+        assert_eq!((code, log.as_str()), (Answer::No, "bob: no PIN is set, refused"));
         for wrong in ["1111", "2222", "3333"] {
             sandbox.ask_as(&bob, Request::Check, wrong);
         }
-        assert_eq!(sandbox.ask(Request::Check, PIN).0, exit::YES, "bob's attempts touched alice's counts");
+        assert_eq!(sandbox.ask(Request::Check, PIN).0, Answer::Yes, "bob's attempts touched alice's counts");
     }
 
     #[test]
     fn broken_files_refuse() {
         let sandbox = sandbox();
-        fs::set_permissions(sandbox.places.etc.join("users/alice"), Permissions::from_mode(0o644)).unwrap();
+        fs::set_permissions(sandbox.files().user_file(), Permissions::from_mode(0o644)).unwrap();
         let (code, _, log) = sandbox.ask(Request::Check, PIN);
-        assert_eq!(code, exit::BROKEN);
+        assert_eq!(code, Answer::Broken);
         assert!(log.contains("alice: PIN refused:") && log.contains("readable by others"), "{log}");
 
         let sandbox = self::sandbox();
-        fs::set_permissions(&sandbox.places.budget_dir, Permissions::from_mode(0o755)).unwrap();
+        fs::set_permissions(sandbox.budget_dir(), Permissions::from_mode(0o755)).unwrap();
         let (code, _, log) = sandbox.ask(Request::Unpause, "");
-        assert_eq!(code, exit::BROKEN);
+        assert_eq!(code, Answer::Broken);
         assert!(log.contains("mode 0755, not 1770"), "{log}");
     }
 
@@ -485,7 +434,7 @@ mod tests {
         let sandbox = sandbox();
         let sneaky = Account { name: "../alice".into(), ..sandbox.caller.clone() };
         let (code, _, log) = sandbox.ask_as(&sneaky, Request::Check, PIN);
-        assert_eq!(code, exit::BROKEN);
+        assert_eq!(code, Answer::Broken);
         assert!(log.contains("not a usable user name"), "{log}");
     }
 
@@ -493,8 +442,8 @@ mod tests {
     fn status_reports_settings_and_counts() {
         let sandbox = sandbox();
         let (code, output, _) = sandbox.ask(Request::Status, "");
-        assert_eq!(code, exit::YES);
-        let path = sandbox.places.etc.join("users/alice");
+        assert_eq!(code, Answer::Yes);
+        let path = sandbox.files().user_file();
         let set_at = local_time(SET_AT);
         let expected = format!(
             "user                  alice
@@ -521,7 +470,7 @@ policy
         // Recorded by the third failure.
         assert!(output.contains("PIN                   paused since 20"), "{output}");
         assert!(output.contains(", after 3 consecutive failures; unlocking with the password resumes it"), "{output}");
-        fs::remove_file(sandbox.places.etc.join("users/alice")).unwrap();
+        fs::remove_file(sandbox.files().user_file()).unwrap();
         assert!(sandbox.ask(Request::Status, "").1.contains("none set"));
     }
 
@@ -532,12 +481,12 @@ policy
         let sandbox = sandbox();
         fs::remove_file(sandbox.budget_file()).unwrap();
         let (code, output, _) = sandbox.ask(Request::Status, "");
-        assert_eq!(code, exit::YES);
+        assert_eq!(code, Answer::Yes);
         assert!(output.contains("PIN                   refused whatever is typed: "), "{output}");
         assert!(output.contains(".budget: missing; sudo screenlock-pin doctor says how to fix it"), "{output}");
         sandbox.write_user_file("hash = not a hash\n");
         assert!(sandbox.ask(Request::Status, "").1.contains("not a yescrypt hash; sudo screenlock-pin doctor"));
-        fs::set_permissions(sandbox.places.etc.join("users/alice"), Permissions::from_mode(0o644)).unwrap();
+        fs::set_permissions(sandbox.files().user_file(), Permissions::from_mode(0o644)).unwrap();
         let output = sandbox.ask(Request::Status, "").1;
         assert!(
             output.contains("PIN                   refused whatever is typed: ")
@@ -546,7 +495,7 @@ policy
         );
         let sneaky = Account { name: "../alice".into(), ..sandbox.caller.clone() };
         let (code, output, _) = sandbox.ask_as(&sneaky, Request::Status, "");
-        assert_eq!(code, exit::BROKEN);
+        assert_eq!(code, Answer::Broken);
         assert!(output.contains("not a usable user name"), "{output}");
     }
 
@@ -564,7 +513,7 @@ policy
         }
         // Two minutes on, the correct PIN comes too late to forgive them.
         let (code, _, log) = sandbox.ask_with(&Later { ahead: 120 }, alice, Request::Check, PIN);
-        assert_eq!(code, exit::YES);
+        assert_eq!(code, Answer::Yes);
         assert!(log.contains("3 failure(s) not followed by an unlock in time, now suspicious: 3 within 24 hours"), "{log}");
         let output = sandbox.ask_with(&Later { ahead: 120 }, alice, Request::Status, "").1;
         assert!(output.contains("    3/10   within 24 hours\n    3/25   within 7 days\n    3/60   since this PIN was set\n"), "{output}");
@@ -572,11 +521,11 @@ policy
         sandbox.write_config("max_suspicious_24h = 4\n");
         sandbox.ask_with(&Later { ahead: 120 }, alice, Request::Check, "3333");
         let (code, _, log) = sandbox.ask_with(&Later { ahead: 300 }, alice, Request::Check, PIN);
-        assert_eq!(code, exit::NO);
+        assert_eq!(code, Answer::No);
         assert!(log.contains("PIN disabled after 4 suspicious failures within 24 hours; sudo screenlock-pin enable or set"), "{log}");
         assert!(log.contains("alice: PIN disabled after 4 suspicious failures within 24 hours, password required"), "{log}");
         let (code, _, log) = sandbox.ask_with(&Later { ahead: 300 }, alice, Request::Unpause, "");
-        assert_eq!((code, log.contains("unlocked with the password, but the PIN stays disabled after")), (exit::YES, true), "{log}");
+        assert_eq!((code, log.contains("unlocked with the password, but the PIN stays disabled after")), (Answer::Yes, true), "{log}");
         let output = sandbox.ask_with(&Later { ahead: 300 }, alice, Request::Status, "").1;
         assert!(
             output.contains("PIN                   disabled since ")
@@ -603,7 +552,7 @@ policy
         fs::write(sandbox.budget_file(), "garbage\n").unwrap();
         fs::set_permissions(sandbox.budget_file(), Permissions::from_mode(0o600)).unwrap();
         let (code, _, log) = sandbox.ask(Request::Check, PIN);
-        assert_eq!(code, exit::BROKEN);
+        assert_eq!(code, Answer::Broken);
         assert!(log.contains("not a valid budget"), "{log}");
     }
 
@@ -615,14 +564,5 @@ policy
         let typed = read_input(&mut &long[..]).unwrap();
         assert_eq!(typed.as_bytes().len(), MAX_INPUT_BYTES + 1);
         assert_eq!(screenlock_pin_core::input_that_could_be_a_pin(typed.as_bytes()), None);
-    }
-
-    #[test]
-    fn requests_are_exact_words() {
-        assert_eq!(Request::parse("check"), Some(Request::Check));
-        assert_eq!(Request::parse("unpause"), Some(Request::Unpause));
-        for word in ["Check", "check ", "", "--check", "set", "start-accepting-pin", "unlocked"] {
-            assert_eq!(Request::parse(word), None, "{word:?}");
-        }
     }
 }

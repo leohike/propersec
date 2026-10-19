@@ -38,7 +38,9 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
 use pamharness::PamClient;
-use screenlock_pin_core::{Budget, Clock, Settings, exit};
+use screenlock_pin_core::protocol::{INSTALLED_BUDGET_DIR, INSTALLED_ETC, INSTALLED_PIN_CHECKER};
+// Named for what it is here, an exit code; `Answer` is a worker's answer to one attempt.
+use screenlock_pin_core::{Answer as Exit, Budget, Clock, Settings};
 use screenlock_pin_sys::{Account, SystemClock, Yescrypt, group_by_name};
 
 mod uninstall;
@@ -51,11 +53,12 @@ const PIN: &str = "cat4859";
 const KDE: &str = "/etc/pam.d/kde";
 /// screenlock-pin's own PAM file, which `kde` names once `integrate-into-pam.sh add` has run.
 const AUTH: &str = "/etc/pam.d/screenlock-auth";
-const PIN_CHECKER: &str = "/usr/local/libexec/screenlock-pin/screenlock-pin-checker";
+const PIN_CHECKER: &str = INSTALLED_PIN_CHECKER;
 const MODULE: &str = "/usr/local/lib64/security/pam_screenlock_pin.so";
 /// The group the PIN checker runs with, created by install.sh.
 const PIN_CHECKER_GROUP: &str = "screenlock-pin";
-const BUDGET_DIR: &str = "/var/lib/screenlock-pin";
+const BUDGET_DIR: &str = INSTALLED_BUDGET_DIR;
+const ETC: &str = INSTALLED_ETC;
 /// Where scenarios that play the attacker keep their files; emptied between scenarios.
 const SCRATCH: &str = "/tmp/screenlock-pin-scratch";
 const SYSLOG: &str = "/dev/log";
@@ -384,12 +387,12 @@ fn the_user_cannot_reach_the_files(world: &World) -> Outcome {
 fn another_user_gets_nothing(world: &World) -> Outcome {
     for args in [&["check"][..], &["check", USER], &["status", USER]] {
         let output = world.as_user("bob", &[PIN_CHECKER].iter().chain(args).copied().collect::<Vec<_>>(), PIN.as_bytes())?;
-        if output.status.code() == Some(exit::YES.into()) && args[0] == "check" {
+        if output.status.code() == Some(Exit::Yes.code().into()) && args[0] == "check" {
             return Err(format!("bob's {args:?} said yes"));
         }
     }
     let bob = world.as_user("bob", &[PIN_CHECKER, "check"], b"1111")?;
-    expect_code(&bob, exit::NO, "bob's wrong PIN")?;
+    expect_code(&bob, Exit::No, "bob's wrong PIN")?;
     let log = world.syslog.take();
     if !log.contains("bob: no PIN is set, refused") {
         return Err(format!("the PIN checker didn't answer for bob:\n{log}"));
@@ -417,9 +420,9 @@ fn dev_options_are_refused_under_setgid(world: &World) -> Outcome {
     }
     let dev = ["--dev-etc", &format!("{SCRATCH}/etc"), "--dev-budget", &format!("{SCRATCH}/var"), "--dev-owner", &user.uid.to_string()];
     let started = world.as_user(USER, &[&[PIN_CHECKER, "unpause"][..], &dev].concat(), b"anything")?;
-    expect_code(&started, exit::USAGE, "unpause with --dev options under setgid")?;
+    expect_code(&started, Exit::Usage, "unpause with --dev options under setgid")?;
     let check = world.as_user(USER, &[&[PIN_CHECKER, "check"][..], &dev].concat(), b"0000")?;
-    expect_code(&check, exit::USAGE, "check with --dev options under setgid")?;
+    expect_code(&check, Exit::Usage, "check with --dev options under setgid")?;
     let log = world.syslog.take();
     if !log.contains("refused: --dev options while running with elevated rights") {
         return Err(format!("the refusal wasn't logged:\n{log}"));
@@ -436,9 +439,9 @@ fn a_poisoned_start_changes_nothing(world: &World) -> Outcome {
     fs::create_dir_all(SCRATCH).map_err(message)?;
     fs::write(format!("{SCRATCH}/evil.so"), "not a library").map_err(message)?;
     let right = world.as_user(USER, &["sh", "-c", &script], PIN.as_bytes())?;
-    expect_code(&right, exit::YES, "the right PIN with a poisoned start")?;
+    expect_code(&right, Exit::Yes, "the right PIN with a poisoned start")?;
     let wrong = world.as_user(USER, &["sh", "-c", &script], b"1111")?;
-    expect_code(&wrong, exit::NO, "a wrong PIN with a poisoned start")?;
+    expect_code(&wrong, Exit::No, "a wrong PIN with a poisoned start")?;
     let log = world.syslog.take();
     if !log.contains("not the PIN, consecutive failure 1 of 3") {
         return Err(format!("the wrong PIN wasn't counted:\n{log}"));
@@ -455,7 +458,7 @@ fn unpausing_needs_no_password(world: &World) -> Outcome {
     }
     world.pin_refused(PIN, "PIN paused after 3 consecutive failures")?;
     let done = world.as_user(USER, &[PIN_CHECKER, "unpause"], b"")?;
-    expect_code(&done, exit::YES, "unpause asked for directly")?;
+    expect_code(&done, Exit::Yes, "unpause asked for directly")?;
     world.pin_unlocks()
 }
 
@@ -499,7 +502,7 @@ fn status_shows_your_own_pin(world: &World) -> Outcome {
     }
     // The PIN checker itself refuses root too, whoever calls it.
     let pin_checker = Command::new(PIN_CHECKER).arg("status").stdin(Stdio::null()).output().map_err(message)?;
-    expect_code(&pin_checker, exit::USAGE, "the PIN checker run by root")
+    expect_code(&pin_checker, Exit::Usage, "the PIN checker run by root")
 }
 
 /// bob with the PIN checker's group stands in for bob having exploited a bug in the PIN checker: whatever he
@@ -1070,16 +1073,16 @@ impl World {
         if !doctor.contains(&format!("no problems; a PIN is set for {USER}")) {
             return Err(format!("screenlock-pin doctor after set:\n{doctor}"));
         }
-        let pin_file = fs::read(format!("/etc/screenlock-pin/users/{USER}")).map_err(message)?;
+        let pin_file = fs::read(format!("{ETC}/users/{USER}")).map_err(message)?;
         Ok(Self { user, pin_checker_gid, syslog, stock_kde, integrated_kde, pin_file })
     }
 
     fn user_file(&self) -> PathBuf {
-        PathBuf::from(format!("/etc/screenlock-pin/users/{USER}"))
+        PathBuf::from(format!("{ETC}/users/{USER}"))
     }
 
     fn config(&self) -> PathBuf {
-        PathBuf::from("/etc/screenlock-pin/config")
+        Path::new(ETC).join("config")
     }
 
     fn budget_file(&self) -> PathBuf {
@@ -1387,12 +1390,12 @@ fn expect(holds: bool, what: &str, attempt: &Attempt) -> Outcome {
     if holds { Ok(()) } else { Err(format!("{what}: {attempt:?}")) }
 }
 
-fn expect_code(output: &std::process::Output, code: u8, what: &str) -> Outcome {
-    if output.status.code() == Some(code.into()) {
+fn expect_code(output: &std::process::Output, answer: Exit, what: &str) -> Outcome {
+    if output.status.code() == Some(answer.code().into()) {
         return Ok(());
     }
     Err(format!(
-        "{what}: exit {:?}, not {code}\n{}{}",
+        "{what}: exit {:?}, not {answer:?}\n{}{}",
         output.status.code(),
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)

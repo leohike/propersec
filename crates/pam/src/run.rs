@@ -6,7 +6,7 @@ use std::path::Path;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
-use screenlock_pin_core::{Error, Secret, exit};
+use screenlock_pin_core::{Answer, Error, Request, Secret};
 use screenlock_pin_sys::{Account, current_euid, current_uid};
 
 use crate::pam::DefaultSigchld;
@@ -50,10 +50,10 @@ pub fn run_unpause(transaction: &impl Transaction, args: &Args) -> Result<bool, 
 }
 
 fn answer(args: &Args, code: u8) -> Result<bool, Error> {
-    match code {
-        exit::YES => Ok(true),
-        exit::NO => Ok(false),
-        other => Err(Error::System(format!("{} answered {other}; its log says why", args.pin_checker.display()))),
+    match Answer::try_from(code) {
+        Ok(Answer::Yes) => Ok(true),
+        Ok(Answer::No) => Ok(false),
+        _ => Err(Error::System(format!("{} answered {code}; its log says why", args.pin_checker.display()))),
     }
 }
 
@@ -78,7 +78,7 @@ fn calling_account(transaction: &impl Transaction) -> Result<Account, Error> {
 /// SIGCHLD action while the PIN checker runs (so a host that ignores or reaps children can't take its
 /// exit status away), and the read end of the pipe kept open here until the write is done.
 /// `test_panic` panics while SIGCHLD is changed, to prove the panic puts it back.
-fn ask_pin_checker(pin_checker: &Path, request: &str, typed: &Secret, test_panic: bool) -> Result<u8, Error> {
+fn ask_pin_checker(pin_checker: &Path, request: Request, typed: &Secret, test_panic: bool) -> Result<u8, Error> {
     let fail = |what: &str, error: std::io::Error| Error::System(format!("{}: {what}: {error}", pin_checker.display()));
     // std's pipes are close-on-exec: they reach the PIN checker as its stdin and nothing else.
     let (reader, mut writer) = std::io::pipe().map_err(|error| fail("pipe", error))?;
@@ -88,7 +88,7 @@ fn ask_pin_checker(pin_checker: &Path, request: &str, typed: &Secret, test_panic
         panic!("test_panic: a panic must become PAM_IGNORE and put SIGCHLD back");
     }
     let mut child = Command::new(pin_checker)
-        .arg(request)
+        .arg(request.as_str())
         .env_clear()
         .current_dir("/")
         .stdin(child_end)

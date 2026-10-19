@@ -65,10 +65,7 @@ pub unsafe extern "C" fn pam_sm_authenticate(pamh: *mut PamHandle, _flags: c_int
             return PAM_IGNORE;
         }
         let file_log = args.log.clone().map(FileLog);
-        let log: &dyn Log = match &file_log {
-            Some(file) => file,
-            None => &pam,
-        };
+        let log = module_log(&file_log, &pam);
         if !run_and_log(&pam, &args, log, run) {
             return PAM_IGNORE;
         }
@@ -107,24 +104,24 @@ pub unsafe extern "C" fn pam_sm_setcred(pamh: *mut PamHandle, _flags: c_int, arg
             return PAM_SUCCESS;
         }
         let file_log = args.log.clone().map(FileLog);
-        let log: &dyn Log = match &file_log {
-            Some(file) => file,
-            None => &pam,
-        };
-        run_and_log(&pam, &args, log, run_unpause);
+        run_and_log(&pam, &args, module_log(&file_log, &pam), run_unpause);
         PAM_IGNORE
     }))
     .unwrap_or(PAM_IGNORE)
 }
 
+/// Where the module logs: the PAM line's `log=` file, or else `pam_syslog`.
+fn module_log<'a>(file: &'a Option<FileLog>, pam: &'a Pam) -> &'a dyn Log {
+    match file {
+        Some(file) => file,
+        None => pam,
+    }
+}
+
 /// The PIN checker logs every answer itself; the module logs only what went wrong on its side.
 fn run_and_log(pam: &Pam, args: &Args, log: &dyn Log, run: fn(&Pam, &Args) -> Result<bool, Error>) -> bool {
     run(pam, args).unwrap_or_else(|error| {
-        let what = match args.mode {
-            Mode::Check => "PIN refused",
-            Mode::AfterPasswordAuth => "unpausing the PIN failed",
-        };
-        log.log(&format!("{what}: {error}"));
+        log.log(&format!("{}: {error}", args.mode.request().failed()));
         false
     })
 }

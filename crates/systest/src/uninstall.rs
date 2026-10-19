@@ -30,9 +30,9 @@ const DEAD_AFTER: Duration = Duration::from_secs(30);
 /// The module waits ten seconds for a PIN checker before killing it.
 const PIN_CHECKER_TIMEOUT: Duration = Duration::from_secs(10);
 /// Kept by uninstall on purpose, with the PINs and the budgets.
-const KEPT: [&str; 2] = ["/etc/screenlock-pin", "/var/lib/screenlock-pin"];
+const KEPT: [&str; 2] = [ETC, BUDGET_DIR];
 /// Where anything of screenlock-pin's could be; recorded before and after.
-const WATCHED: [&str; 5] = ["/usr/local", "/etc/sysusers.d", "/etc/tmpfiles.d", "/etc/screenlock-pin", BUDGET_DIR];
+const WATCHED: [&str; 5] = ["/usr/local", "/etc/sysusers.d", "/etc/tmpfiles.d", ETC, BUDGET_DIR];
 
 /// What a broken screenlock-pin does to the lock screen.
 #[derive(Debug, Clone, Copy)]

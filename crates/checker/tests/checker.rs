@@ -7,8 +7,8 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use screenlock_pin_core::{Budget, MAX_INPUT_BYTES, exit};
-use screenlock_pin_sys::{Account, UserFiles, Yescrypt, current_egid, current_uid};
+use screenlock_pin_core::{Answer, Budget, MAX_INPUT_BYTES};
+use screenlock_pin_sys::{Account, AllUsers, Yescrypt, current_egid, current_uid};
 
 const PIN_CHECKER: &str = env!("CARGO_BIN_EXE_screenlock-pin-checker");
 const PIN: &str = "4859";
@@ -37,8 +37,8 @@ impl Sandbox {
         fs::set_permissions(&user_file, Permissions::from_mode(0o640)).unwrap();
         // The budget and lock file screenlock-pin set creates.
         let uid = current_uid();
-        let files = UserFiles::new(sandbox.path("etc"), uid, &user, uid).unwrap();
-        files.with_budget(sandbox.path("var"), uid, current_egid()).start_budget(&Budget::default()).unwrap();
+        let all = AllUsers::new(sandbox.path("etc"), uid, sandbox.path("var"), uid, current_egid());
+        all.user(&user, uid).unwrap().start_budget(&Budget::default()).unwrap();
         sandbox
     }
 
@@ -69,7 +69,7 @@ impl Sandbox {
     }
 
     fn unpause(&self) {
-        assert_eq!(self.run(&["unpause"], b"").code, Some(exit::YES.into()));
+        assert_eq!(self.run(&["unpause"], b"").code, YES);
     }
 
     fn log(&self) -> String {
@@ -92,9 +92,10 @@ fn run(mut command: Command, stdin: &[u8]) -> Run {
     Run { code: output.status.code(), stdout: String::from_utf8_lossy(&output.stdout).into_owned() }
 }
 
-const YES: Option<i32> = Some(exit::YES as i32);
-const NO: Option<i32> = Some(exit::NO as i32);
-const USAGE: Option<i32> = Some(exit::USAGE as i32);
+const YES: Option<i32> = Some(Answer::Yes as i32);
+const NO: Option<i32> = Some(Answer::No as i32);
+const USAGE: Option<i32> = Some(Answer::Usage as i32);
+const BROKEN: Option<i32> = Some(Answer::Broken as i32);
 
 #[test]
 fn the_whole_cycle_through_the_binary() {
@@ -207,13 +208,13 @@ fn a_poisoned_start_changes_nothing() {
 fn files_it_cannot_trust_are_refused() {
     let sandbox = Sandbox::new();
     fs::set_permissions(sandbox.path("var"), Permissions::from_mode(0o755)).unwrap();
-    assert_eq!(sandbox.check(PIN), Some(exit::BROKEN.into()));
+    assert_eq!(sandbox.check(PIN), BROKEN);
     assert!(sandbox.log().contains("mode 0755, not 1770"), "{}", sandbox.log());
 
     let sandbox = Sandbox::new();
     let mut command = sandbox.command(&["check"]);
     command.args(["--dev-owner", &(current_uid() + 1).to_string()]);
-    assert_eq!(run(command, PIN.as_bytes()).code, Some(exit::BROKEN.into()));
+    assert_eq!(run(command, PIN.as_bytes()).code, BROKEN);
     assert!(sandbox.log().contains("owned by uid"), "{}", sandbox.log());
 }
 

@@ -112,9 +112,9 @@ pub fn try_unlock_with_pin(
         return plain(Verdict::Empty);
     }
     let settings = store.settings()?;
-    if settings.pin_hash.is_empty() {
+    let Some(pin_hash) = &settings.pin_hash else {
         return plain(Verdict::NoPinSet);
-    }
+    };
     let _lock = store.lock()?;
     let now = clock.now()?;
     let mut budget = store.load_budget()?;
@@ -142,19 +142,13 @@ pub fn try_unlock_with_pin(
     // attempt abandoned halfway (Plasma 6.8 cancels authenticators it switches away from) still
     // counts. A correct password forgives it moments later, through
     // [`unpause_pin_after_password_unlock`].
-    budget.record_failure(now);
-    if pin.is_ok() {
-        budget.consecutive = budget.consecutive.saturating_add(1);
-        if budget.paused(&settings) {
-            budget.since = now;
-        }
-    }
+    budget.count_attempt(now, pin.is_ok(), &settings);
     store.save_budget(&budget)?;
     let pin = match pin {
         Ok(pin) => pin,
         Err(verdict) => return Ok(UnlockAttemptOutcome { verdict, judged }),
     };
-    if !hasher.verify(pin, &settings.pin_hash)? {
+    if !hasher.verify(pin, pin_hash.as_str())? {
         return Ok(UnlockAttemptOutcome {
             verdict: Verdict::WrongPin { consecutive: budget.consecutive, max: settings.max_failures },
             judged,
@@ -162,9 +156,7 @@ pub fn try_unlock_with_pin(
     }
     // Not paused before this attempt, or it would have been refused, so a pause this attempt
     // counted is taken back with it.
-    budget.consecutive = 0;
-    budget.since = loaded.since;
-    budget.forgive(now, settings.forgive_before_correct_pin);
+    budget.pin_matched(now, loaded.since, &settings);
     store.save_budget(&budget)?;
     Ok(UnlockAttemptOutcome { verdict: Verdict::Unlock, judged })
 }
@@ -178,11 +170,7 @@ pub fn unpause_pin_after_password_unlock(store: &impl Store, clock: &impl Clock)
     let now = clock.now()?;
     let mut budget = store.load_budget()?;
     let judged = budget.judge(now, &settings);
-    budget.forgive(now, settings.forgive_before_correct_password);
-    if budget.paused(&settings) {
-        budget.since = now;
-    }
-    budget.consecutive = 0;
+    budget.password_unlocked(now, &settings);
     store.save_budget(&budget)?;
     Ok(judged)
 }
@@ -194,6 +182,7 @@ mod tests {
     use proptest::prelude::*;
 
     use super::*;
+    use crate::PinHash;
 
     const PIN: &str = "4859";
 
@@ -205,7 +194,7 @@ mod tests {
 
     impl MemoryStore {
         fn with_pin() -> Self {
-            let settings = Settings { pin_hash: format!("plain:{PIN}"), ..Settings::default() };
+            let settings = Settings { pin_hash: Some(PinHash::new(format!("plain:{PIN}"))), ..Settings::default() };
             Self { settings, budget: RefCell::default(), saves: Cell::new(0) }
         }
 

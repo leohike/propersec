@@ -14,7 +14,7 @@
 //! This crate decides and does nothing else: no files, no clock, no hashing, no PAM. Those come
 //! in through the [`Store`], [`Clock`], [`Hasher`] and [`Log`] traits, which `screenlock-pin-sys`
 //! implements for the real machine and the tests implement in memory. It also holds what the
-//! setgid PIN checker and its callers must agree on: the [`exit`] codes and [`MAX_INPUT_BYTES`].
+//! setgid PIN checker and its callers must agree on: the [`protocol`] and [`MAX_INPUT_BYTES`].
 
 // Stricter checks for shipped code (docs/chaos/plan-tools.md): every unsafe block explains why it is
 // sound, nothing indexes or slices without a bounds check, and no cast silently drops bits.
@@ -25,6 +25,7 @@ mod attempt;
 mod budget;
 mod error;
 pub mod kv;
+pub mod protocol;
 mod refusal;
 mod secret;
 mod settings;
@@ -35,9 +36,10 @@ pub use attempt::{
 };
 pub use budget::{Budget, Counts, DAY, Disabled, Judged, Limit, WEEK};
 pub use error::Error;
+pub use protocol::{Answer, Request};
 pub use refusal::Refusal;
 pub use secret::Secret;
-pub use settings::Settings;
+pub use settings::{Layer, PinHash, RULES, Settings};
 
 /// The longest PIN `set` accepts, in characters. Not a setting: a PIN is a secret short enough to
 /// type often, and this is only a sanity bound, said once when `set` asks for the PIN.
@@ -55,19 +57,6 @@ pub const HASH_PREFIX: &str = "$y$";
 
 /// The setting that holds the PIN hash, the only one a user's own file may have.
 pub const HASH_SETTING: &str = "hash";
-
-/// The setgid PIN checker's exit codes, which are all it answers: the PAM module and the CLI read them.
-pub mod exit {
-    /// `check`: the PIN unlocks. `unpause`: done. `status`: printed.
-    pub const YES: u8 = 0;
-    /// `check`: not unlocked. `unpause`: no PIN set. A clean "no", logged by the PIN checker.
-    pub const NO: u8 = 1;
-    /// Bad arguments, or a refused environment: run as root, a terminal on stdin, `--dev-*` options
-    /// under setgid.
-    pub const USAGE: u8 = 2;
-    /// Something is broken: a file, the clock, libxcrypt. Logged by the PIN checker.
-    pub const BROKEN: u8 = 3;
-}
 
 /// The most the PIN checker reads from stdin: libpam passes at most `PAM_MAX_RESP_SIZE` (512) bytes.
 pub const MAX_INPUT_BYTES: usize = 512;

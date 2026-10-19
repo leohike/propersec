@@ -1,3 +1,4 @@
+use std::fmt;
 use std::fs::{self, File, Metadata, OpenOptions, Permissions};
 use std::io::{ErrorKind, Read, Write};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt, fchown};
@@ -7,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use nix::fcntl::{Flock, FlockArg};
 use nix::libc::O_NOFOLLOW;
-use screenlock_pin_core::{Budget, Error, HASH_SETTING, MAX_FILE_BYTES, Settings, Store, kv};
+use screenlock_pin_core::{Budget, Error, HASH_SETTING, Layer, MAX_FILE_BYTES, Settings, Store, kv};
 
 use crate::system;
 
@@ -36,14 +37,13 @@ const LOCK_TIMEOUT: Duration = Duration::from_secs(1);
 /// user's run of the PIN checker can't read or replace another's. Both are created by root, at
 /// `screenlock-pin set` ([`UserFiles::start_budget`]), and given to the user; the PIN checker only opens
 /// them, so nobody's run ever creates a file there that another user's could find in their name.
-/// Whoever writes the budget, the user or root, gives it to the user. [`UserFiles::new`] gives the
-/// `etc` side, which `screenlock-pin set` and `remove` need; [`UserFiles::with_budget`] adds the
-/// budget.
+/// Whoever writes the budget, the user or root, gives it to the user. [`AllUsers::user`] gives one
+/// user's files.
 #[derive(Debug, Clone)]
 pub struct UserFiles {
     etc: PathBuf,
     etc_owner: u32,
-    budget: Option<SharedDir>,
+    budget: SharedDir,
     user: String,
     uid: u32,
 }
@@ -56,23 +56,26 @@ struct SharedDir {
     group: u32,
 }
 
-impl UserFiles {
-    pub fn new(etc: impl Into<PathBuf>, etc_owner: u32, user: &str, uid: u32) -> Result<Self, Error> {
-        usable_name(user)?;
-        Ok(Self { etc: etc.into(), etc_owner, budget: None, user: user.into(), uid })
+impl SharedDir {
+    /// The directory, refused unless it is exactly as installed: a directory, not a symlink, owned
+    /// by the owner and the PIN checker's group, mode 1770. Without the group's write bit the PIN
+    /// checker can't keep its files; without the sticky bit one user's run could delete or replace
+    /// another's files; any bit for others would let users in.
+    fn trusted(&self) -> Result<&Path, Error> {
+        let info = fs::symlink_metadata(&self.path).map_err(|error| system(self.path.display(), error))?;
+        Inspect::new(format!("budget directory {}", self.path.display()), &info).installed_dir(self.owner, self.group, 0o1770)?;
+        Ok(&self.path)
     }
+}
 
-    /// The same files, plus the budget in `dir`, which must belong to `owner` and `group`.
-    pub fn with_budget(self, dir: impl Into<PathBuf>, owner: u32, group: u32) -> Self {
-        Self { budget: Some(SharedDir { path: dir.into(), owner, group }), ..self }
+impl UserFiles {
+    fn new(etc: PathBuf, etc_owner: u32, budget: SharedDir, user: &str, uid: u32) -> Result<Self, Error> {
+        usable_name(user)?;
+        Ok(Self { etc, etc_owner, budget, user: user.into(), uid })
     }
 
     pub fn user(&self) -> &str {
         &self.user
-    }
-
-    pub fn etc_owner(&self) -> u32 {
-        self.etc_owner
     }
 
     pub fn config(&self) -> PathBuf {
@@ -83,32 +86,23 @@ impl UserFiles {
         self.etc.join("users").join(&self.user)
     }
 
-    pub fn lock_file(&self) -> Option<PathBuf> {
-        Some(self.budget.as_ref()?.path.join(format!("{}.lock", self.uid)))
+    pub fn lock_file(&self) -> PathBuf {
+        self.budget.path.join(format!("{}.lock", self.uid))
     }
 
-    pub fn budget_file(&self) -> Option<PathBuf> {
-        Some(self.budget.as_ref()?.path.join(format!("{}.budget", self.uid)))
+    pub fn budget_file(&self) -> PathBuf {
+        self.budget.path.join(format!("{}.budget", self.uid))
     }
 
     // --- the owner's side: settings and hash
 
-    /// The settings in `path`, if the owner owns it, nobody else can change it, and `readers` can
-    /// read it (see [`read_trusted`]).
-    fn read_pairs(&self, path: &Path, readers: Readers) -> Result<kv::Pairs, Error> {
-        let text = read_trusted(path, &[self.etc_owner], readers)?.unwrap_or_default();
-        kv::parse(&text, &path.display().to_string())
-    }
-
-    /// The PIN checker's group, the only one that may read the user's file. It comes with the
-    /// budget directory, which has the same group.
-    fn group(&self) -> Result<u32, Error> {
-        self.budget.as_ref().map(|budget| budget.group).ok_or_else(|| Error::System("no budget directory given".into()))
-    }
-
-    /// The pairs in the user's own file.
-    fn user_pairs(&self) -> Result<kv::Pairs, Error> {
-        self.read_pairs(&self.user_file(), Readers::Group(self.group()?))
+    /// `settings` with the file of `layer` applied on top: the config, readable by everyone, or
+    /// the user's own file, readable by the PIN checker's group alone.
+    fn apply_layer(&self, settings: &mut Settings, layer: Layer) -> Result<(), Error> {
+        match layer {
+            Layer::Config => apply_file(settings, &self.config(), self.etc_owner, Readers::Everyone, layer),
+            Layer::UserFile => apply_file(settings, &self.user_file(), self.etc_owner, Readers::Group(self.budget.group), layer),
+        }
     }
 
     /// The user's own file alone, its hash on top of the defaults, by the rules [`Store::settings`]
@@ -116,7 +110,7 @@ impl UserFiles {
     /// config.
     pub fn user_settings(&self) -> Result<Settings, Error> {
         let mut settings = Settings::default();
-        settings.apply(&self.user_pairs()?, &self.user_file().display().to_string(), true)?;
+        self.apply_layer(&mut settings, Layer::UserFile)?;
         Ok(settings)
     }
 
@@ -124,29 +118,20 @@ impl UserFiles {
     /// the PIN checker's group, mode 0640. Whatever the file held before is gone.
     pub fn save_pin(&self, hash: &str) -> Result<(), Error> {
         let path = self.user_file();
-        let group = self.group()?;
-        let pairs = [(HASH_SETTING.to_owned(), hash.to_owned())];
-        let dir = path.parent().expect("the user file is inside users/");
+        let dir = self.etc.join("users");
         // Made as install makes it, should it be missing: the owner's and the group's, mode 0750.
-        if fs::symlink_metadata(dir).is_err_and(|error| error.kind() == ErrorKind::NotFound) {
+        if fs::symlink_metadata(&dir).is_err_and(|error| error.kind() == ErrorKind::NotFound) {
             let create = || -> std::io::Result<()> {
-                fs::DirBuilder::new().recursive(true).mode(0o755).create(dir.parent().expect("users/ is inside etc"))?;
-                fs::DirBuilder::new().mode(0o750).create(dir)?;
-                std::os::unix::fs::chown(dir, Some(self.etc_owner), Some(group))?;
-                fs::set_permissions(dir, Permissions::from_mode(0o750))
+                fs::DirBuilder::new().recursive(true).mode(0o755).create(&self.etc)?;
+                fs::DirBuilder::new().mode(0o750).create(&dir)?;
+                std::os::unix::fs::chown(&dir, Some(self.etc_owner), Some(self.budget.group))?;
+                fs::set_permissions(&dir, Permissions::from_mode(0o750))
             };
             create().map_err(|error| system(dir.display(), error))?;
         }
-        let write = || -> std::io::Result<()> {
-            let mut file = tempfile::Builder::new().prefix(&format!(".{}.", self.user)).tempfile_in(dir)?;
-            fchown(file.as_file(), Some(self.etc_owner), Some(group))?;
-            file.as_file().set_permissions(Permissions::from_mode(0o640))?;
-            file.write_all(kv::format(&pairs).as_bytes())?;
-            file.as_file().sync_all()?;
-            file.persist(&path)?;
-            Ok(())
-        };
-        write().map_err(|error| system(path.display(), error))
+        let pairs = [(HASH_SETTING.to_owned(), hash.to_owned())];
+        let prefix = format!(".{}.", self.user);
+        write_atomically(&path, &prefix, self.etc_owner, self.budget.group, 0o640, kv::format(&pairs).as_bytes())
     }
 
     /// Delete the user's file, whatever stands there, and what a killed
@@ -160,9 +145,8 @@ impl UserFiles {
     /// the user's own goes, so does whatever stands in its place, and a new one is created for the
     /// user: root can delete anything here, so whatever got there, a fresh `set` repairs it.
     pub fn start_budget(&self, budget: &Budget) -> Result<(), Error> {
-        let dir = self.trusted_budget_dir()?;
-        let group = self.budget.as_ref().expect("checked by trusted_budget_dir").group;
-        let path = dir.join(format!("{}.lock", self.uid));
+        self.budget.trusted()?;
+        let path = self.lock_file();
         let file = match self.open_lock(&path) {
             Ok(file) => file,
             Err(_) => {
@@ -172,7 +156,7 @@ impl UserFiles {
                         _ => {}
                     }
                     let file = OpenOptions::new().write(true).create_new(true).mode(0o600).custom_flags(O_NOFOLLOW).open(&path)?;
-                    fchown(&file, Some(self.uid), Some(group))?;
+                    fchown(&file, Some(self.uid), Some(self.budget.group))?;
                     Ok(file)
                 };
                 create().map_err(|error| system(path.display(), error))?
@@ -186,8 +170,8 @@ impl UserFiles {
     /// both whoever owns them. Under the lock, when there is one of the user's to take: an attempt
     /// under way finishes first, and one waiting behind it then finds its lock file gone.
     pub fn remove_budget(&self) -> Result<bool, Error> {
-        let dir = self.trusted_budget_dir()?;
-        let path = dir.join(format!("{}.lock", self.uid));
+        let dir = self.budget.trusted()?;
+        let path = self.lock_file();
         let _lock = match self.open_lock(&path) {
             Ok(file) => Some(flock(file, &path)?),
             Err(_) => None,
@@ -199,23 +183,18 @@ impl UserFiles {
         };
         self.remove_leftovers(dir);
         remove(path)?;
-        remove(dir.join(format!("{}.budget", self.uid)))
+        remove(self.budget_file())
     }
 
     /// Every check an attempt makes on the lock file and the budget, without taking the lock or
     /// changing anything: `screenlock-pin doctor` and `status`.
     pub fn check_budget(&self) -> Result<(), Error> {
-        let dir = self.trusted_budget_dir()?;
-        self.open_lock(&dir.join(format!("{}.lock", self.uid)))?;
+        self.budget.trusted()?;
+        self.open_lock(&self.lock_file())?;
         self.load_budget().map(drop)
     }
 
     // --- the PIN checker's side: the budget
-
-    fn trusted_budget_dir(&self) -> Result<&Path, Error> {
-        let budget = self.budget.as_ref().ok_or_else(|| Error::System("no budget directory given".into()))?;
-        trusted_dir(budget, "budget directory")
-    }
 
     /// How the user's temporary budget files start: `.<uid>.`, followed by a random name.
     fn leftover_prefix(&self) -> String {
@@ -245,41 +224,13 @@ impl UserFiles {
         let file =
             OpenOptions::new().read(true).write(true).custom_flags(O_NOFOLLOW).open(path).map_err(|error| system(path.display(), error))?;
         let info = file.metadata().map_err(|error| system(path.display(), error))?;
-        let refuse = |why: String| Err(Error::System(format!("{}: {why}", path.display())));
-        if !info.is_file() {
-            return refuse("not a regular file".into());
-        }
-        if info.uid() != self.uid {
-            return refuse(format!("owned by uid {}, not {}", info.uid(), self.uid));
-        }
+        let lock = Inspect::new(path.display(), &info);
+        lock.regular()?;
+        lock.owner(self.uid)?;
         // Only root, which opens anything, gets this far with a file its owner can't open.
-        if info.mode() & 0o600 != 0o600 {
-            return refuse("not readable and writable by its owner".into());
-        }
+        lock.has(0o600, "not readable and writable by its owner")?;
         Ok(file)
     }
-}
-
-/// Refuse a shared directory that isn't exactly as installed: a directory, not a symlink, owned by
-/// the owner and the PIN checker's group, mode 1770. Without the group's write bit the PIN checker can't
-/// keep its files; without the sticky bit one user's run could delete or replace another's files;
-/// any bit for others would let users in.
-fn trusted_dir<'a>(dir: &'a SharedDir, what: &str) -> Result<&'a Path, Error> {
-    let info = fs::symlink_metadata(&dir.path).map_err(|error| system(dir.path.display(), error))?;
-    let refuse = |why: String| Err(Error::System(format!("{what} {}: {why}", dir.path.display())));
-    if !info.is_dir() {
-        return refuse("not a directory".into());
-    }
-    if info.uid() != dir.owner {
-        return refuse(format!("owned by uid {}, not {}", info.uid(), dir.owner));
-    }
-    if info.gid() != dir.group {
-        return refuse(format!("group {}, not {}", info.gid(), dir.group));
-    }
-    if info.mode() & 0o7777 != 0o1770 {
-        return refuse(format!("mode {:04o}, not 1770", info.mode() & 0o7777));
-    }
-    Ok(&dir.path)
 }
 
 impl Store for UserFiles {
@@ -287,9 +238,8 @@ impl Store for UserFiles {
 
     fn settings(&self) -> Result<Settings, Error> {
         let mut settings = Settings::default();
-        let config = self.config();
-        settings.apply(&self.read_pairs(&config, Readers::Everyone)?, &config.display().to_string(), false)?;
-        settings.apply(&self.user_pairs()?, &self.user_file().display().to_string(), true)?;
+        self.apply_layer(&mut settings, Layer::Config)?;
+        self.apply_layer(&mut settings, Layer::UserFile)?;
         Ok(settings)
     }
 
@@ -298,52 +248,36 @@ impl Store for UserFiles {
     /// fresh `set` repairs it. Opened without `O_CREAT`, which `fs.protected_regular` would refuse
     /// root in this sticky, group-writable directory, even for a file that exists.
     fn lock(&self) -> Result<Flock<File>, Error> {
-        let path = self.trusted_budget_dir()?.join(format!("{}.lock", self.uid));
-        let file = self.open_lock(&path)?;
-        flock(file, &path)
+        self.budget.trusted()?;
+        let path = self.lock_file();
+        flock(self.open_lock(&path)?, &path)
     }
 
     /// The budget must be the user's own and private; one that isn't is an error, never an empty
     /// budget.
     fn load_budget(&self) -> Result<Budget, Error> {
-        let path = self.trusted_budget_dir()?.join(format!("{}.budget", self.uid));
-        let refuse = |why: &str| Err(Error::System(format!("{}: {why}", path.display())));
+        self.budget.trusted()?;
+        let path = self.budget_file();
         let (info, text) = match read_regular_file(&path) {
-            Err(error) if error.kind() == ErrorKind::NotFound => return refuse("missing"),
+            Err(error) if error.kind() == ErrorKind::NotFound => return Err(Error::System(format!("{}: missing", path.display()))),
             result => result.map_err(|error| system(path.display(), error))?,
         };
-        if info.uid() != self.uid {
-            return refuse(&format!("owned by uid {}, not {}", info.uid(), self.uid));
-        }
-        if info.mode() & 0o077 != 0 {
-            return refuse("open to its group or others");
-        }
+        let budget = Inspect::new(path.display(), &info);
+        budget.owner(self.uid)?;
+        budget.lacks(0o077, "open to its group or others")?;
         // Only root, which reads anything, gets this far with a file its owner can't read.
-        if info.mode() & 0o400 == 0 {
-            return refuse("not readable by its owner");
-        }
-        Budget::parse(&text).map_or_else(|| refuse("not a valid budget"), Ok)
+        budget.has(0o400, "not readable by its owner")?;
+        Budget::parse(&text).ok_or_else(|| budget.refuse("not a valid budget"))
     }
 
     /// Written for the user and the PIN checker's group whoever writes it: the PIN checker, as the user, or
     /// `screenlock-pin set` and `enable`, as root, always under the lock. Synced, file and directory, since
     /// it must survive a power cut. A write killed halfway leaves its temporary file behind, so the
-    /// next one clears any of the user's first (see [`UserFiles::remove_leftovers`]).
+    /// next one clears any of the user's first (see `UserFiles::remove_leftovers`).
     fn save_budget(&self, budget: &Budget) -> Result<(), Error> {
-        let dir = self.trusted_budget_dir()?;
-        let group = self.budget.as_ref().expect("checked by trusted_budget_dir").group;
-        let path = dir.join(format!("{}.budget", self.uid));
+        let dir = self.budget.trusted()?;
         self.remove_leftovers(dir);
-        let write = || -> std::io::Result<()> {
-            let mut file = tempfile::Builder::new().prefix(&self.leftover_prefix()).tempfile_in(dir)?;
-            fchown(file.as_file(), Some(self.uid), Some(group))?;
-            file.as_file().set_permissions(Permissions::from_mode(0o600))?;
-            file.write_all(budget.format().as_bytes())?;
-            file.as_file().sync_all()?;
-            file.persist(&path)?;
-            File::open(dir)?.sync_all()
-        };
-        write().map_err(|error| system(path.display(), error))
+        write_atomically(&self.budget_file(), &self.leftover_prefix(), self.uid, self.budget.group, 0o600, budget.format().as_bytes())
     }
 }
 
@@ -369,17 +303,9 @@ fn flock(mut file: File, path: &Path) -> Result<Flock<File>, Error> {
     }
 }
 
-/// The config at `path` on top of the defaults, trusted when owned by one of `owners`.
-fn config_settings(path: &Path, owners: &[u32]) -> Result<Settings, Error> {
-    let text = read_trusted(path, owners, Readers::Everyone)?.unwrap_or_default();
-    let source = path.display().to_string();
-    let mut settings = Settings::default();
-    settings.apply(&kv::parse(&text, &source)?, &source, false)?;
-    Ok(settings)
-}
-
-/// Every user's files at once, for root: what `screenlock-pin doctor` looks at, and what `remove --all`
-/// and `restore-defaults` delete. [`AllUsers::user`] gives one user's [`UserFiles`].
+/// Every user's files at once: where they all are, and who must own them. One user's
+/// [`UserFiles`] come from [`AllUsers::user`]. Root also uses it whole: what `screenlock-pin doctor`
+/// looks at, and what `remove --all` and `restore-defaults` delete.
 #[derive(Debug, Clone)]
 pub struct AllUsers {
     etc: PathBuf,
@@ -396,8 +322,7 @@ impl AllUsers {
 
     /// The files of the user named `user`, whose uid is `uid`.
     pub fn user(&self, user: &str, uid: u32) -> Result<UserFiles, Error> {
-        let files = UserFiles::new(&self.etc, self.etc_owner, user, uid)?;
-        Ok(files.with_budget(&self.budget.path, self.budget.owner, self.budget.group))
+        UserFiles::new(self.etc.clone(), self.etc_owner, self.budget.clone(), user, uid)
     }
 
     pub fn config(&self) -> PathBuf {
@@ -410,12 +335,14 @@ impl AllUsers {
 
     /// The config alone, on top of the defaults, by the rules the PIN checker applies to it.
     pub fn config_settings(&self) -> Result<Settings, Error> {
-        config_settings(&self.config(), &[self.etc_owner])
+        let mut settings = Settings::default();
+        apply_file(&mut settings, &self.config(), self.etc_owner, Readers::Everyone, Layer::Config)?;
+        Ok(settings)
     }
 
     /// The budget directory, by the rules every attempt applies to it.
     pub fn check_budget_dir(&self) -> Result<(), Error> {
-        trusted_dir(&self.budget, "budget directory").map(drop)
+        self.budget.trusted().map(drop)
     }
 
     /// `<etc>/users` as install makes it: a directory owned by the owner and the PIN checker's group,
@@ -427,20 +354,7 @@ impl AllUsers {
             Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
             result => result.map_err(|error| system(path.display(), error))?,
         };
-        let refuse = |why: String| Err(Error::System(format!("{}: {why}", path.display())));
-        if !info.is_dir() {
-            return refuse("not a directory".into());
-        }
-        if info.uid() != self.etc_owner {
-            return refuse(format!("owned by uid {}, not {}", info.uid(), self.etc_owner));
-        }
-        if info.gid() != self.budget.group {
-            return refuse(format!("group {}, not {}", info.gid(), self.budget.group));
-        }
-        if info.mode() & 0o7777 != 0o750 {
-            return refuse(format!("mode {:04o}, not 0750", info.mode() & 0o7777));
-        }
-        Ok(())
+        Inspect::new(path.display(), &info).installed_dir(self.etc_owner, self.budget.group, 0o750)
     }
 
     /// The names of the users with a file in `<etc>/users`, sorted, without the temporary files
@@ -534,6 +448,23 @@ fn usable_name(user: &str) -> Result<(), Error> {
     Ok(())
 }
 
+/// Replace `path` with `bytes` all at once: a temporary file beside it, named `prefix` and random
+/// letters, given to `owner` and `group` with `mode`, written, synced and renamed over `path`, and
+/// the directory synced, so the new file survives a power cut.
+fn write_atomically(path: &Path, prefix: &str, owner: u32, group: u32, mode: u32, bytes: &[u8]) -> Result<(), Error> {
+    let dir = path.parent().ok_or_else(|| Error::System(format!("{}: no directory to write in", path.display())))?;
+    let write = || -> std::io::Result<()> {
+        let mut file = tempfile::Builder::new().prefix(prefix).tempfile_in(dir)?;
+        fchown(file.as_file(), Some(owner), Some(group))?;
+        file.as_file().set_permissions(Permissions::from_mode(mode))?;
+        file.write_all(bytes)?;
+        file.as_file().sync_all()?;
+        file.persist(path)?;
+        File::open(dir)?.sync_all()
+    };
+    write().map_err(|error| system(path.display(), error))
+}
+
 /// Who reads a trusted file, besides root.
 #[derive(Debug, Clone, Copy)]
 enum Readers {
@@ -544,30 +475,35 @@ enum Readers {
     Group(u32),
 }
 
-/// The text of `path`, provided it can be trusted: a regular file, not a symlink, owned by one of
-/// `owners`, that nobody else can change, and that `readers` can read: everyone, or the group
+/// `settings` with the file at `path` applied on top as `layer`, provided it can be trusted (see
+/// [`read_trusted`]). A missing file changes nothing.
+fn apply_file(settings: &mut Settings, path: &Path, owner: u32, readers: Readers, layer: Layer) -> Result<(), Error> {
+    let text = read_trusted(path, owner, readers)?.unwrap_or_default();
+    let source = path.display().to_string();
+    settings.apply(&kv::parse(&text, &source)?, &source, layer)
+}
+
+/// The text of `path`, provided it can be trusted: a regular file, not a symlink, owned by
+/// `owner`, that nobody else can change, and that `readers` can read: everyone, or the group
 /// alone, which must then be the PIN checker's. `None` when there is no such file.
-fn read_trusted(path: &Path, owners: &[u32], readers: Readers) -> Result<Option<String>, Error> {
+fn read_trusted(path: &Path, owner: u32, readers: Readers) -> Result<Option<String>, Error> {
     let (info, text) = match read_regular_file(path) {
         Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
         result => result.map_err(|error| system(path.display(), error))?,
     };
-    let refuse = |why: String| Err(Error::System(format!("{}: {why}", path.display())));
-    if !owners.contains(&info.uid()) {
-        let owners: Vec<String> = owners.iter().map(u32::to_string).collect();
-        return refuse(format!("owned by uid {}, not {}", info.uid(), owners.join(" or ")));
-    }
-    if info.mode() & 0o022 != 0 {
-        return refuse("writable by its group or by others".into());
-    }
+    let file = Inspect::new(path.display(), &info);
+    file.owner(owner)?;
+    file.lacks(0o022, "writable by its group or by others")?;
     // Only root, which reads anything, gets past the open with a file its readers can't read.
     match readers {
-        Readers::Everyone if info.mode() & 0o004 == 0 => refuse("not readable by others, and the PIN checker reads it as the user".into()),
-        Readers::Group(_) if info.mode() & 0o004 != 0 => refuse("readable by others".into()),
-        Readers::Group(group) if info.gid() != group => refuse(format!("group {}, not {group}", info.gid())),
-        Readers::Group(_) if info.mode() & 0o040 == 0 => refuse("not readable by its group".into()),
-        _ => Ok(Some(text)),
+        Readers::Everyone => file.has(0o004, "not readable by others, and the PIN checker reads it as the user")?,
+        Readers::Group(group) => {
+            file.lacks(0o004, "readable by others")?;
+            file.group(group)?;
+            file.has(0o040, "not readable by its group")?;
+        }
     }
+    Ok(Some(text))
 }
 
 /// The metadata and text of `path`, which must be a regular file and not a symlink. Both come from
@@ -584,6 +520,58 @@ fn read_regular_file(path: &Path) -> std::io::Result<(Metadata, String)> {
         return Err(std::io::Error::other(format!("longer than {MAX_FILE_BYTES} bytes")));
     }
     Ok((info, text))
+}
+
+/// One file's metadata, held to how it must be. Every refusal names the file, and says what is
+/// wrong, the same way.
+struct Inspect<'a> {
+    name: String,
+    info: &'a Metadata,
+}
+
+impl<'a> Inspect<'a> {
+    fn new(name: impl fmt::Display, info: &'a Metadata) -> Self {
+        Self { name: name.to_string(), info }
+    }
+
+    fn refuse(&self, why: impl fmt::Display) -> Error {
+        Error::System(format!("{}: {why}", self.name))
+    }
+
+    fn ensure(&self, holds: bool, why: impl FnOnce() -> String) -> Result<(), Error> {
+        if holds { Ok(()) } else { Err(self.refuse(why())) }
+    }
+
+    fn regular(&self) -> Result<(), Error> {
+        self.ensure(self.info.is_file(), || "not a regular file".into())
+    }
+
+    fn owner(&self, uid: u32) -> Result<(), Error> {
+        self.ensure(self.info.uid() == uid, || format!("owned by uid {}, not {uid}", self.info.uid()))
+    }
+
+    fn group(&self, gid: u32) -> Result<(), Error> {
+        self.ensure(self.info.gid() == gid, || format!("group {}, not {gid}", self.info.gid()))
+    }
+
+    /// Every one of `bits` is set.
+    fn has(&self, bits: u32, why: &str) -> Result<(), Error> {
+        self.ensure(self.info.mode() & bits == bits, || why.into())
+    }
+
+    /// None of `bits` is set.
+    fn lacks(&self, bits: u32, why: &str) -> Result<(), Error> {
+        self.ensure(self.info.mode() & bits == 0, || why.into())
+    }
+
+    /// A directory as install makes it: not a symlink, and exactly this owner, group and mode.
+    fn installed_dir(&self, owner: u32, group: u32, mode: u32) -> Result<(), Error> {
+        self.ensure(self.info.is_dir(), || "not a directory".into())?;
+        self.owner(owner)?;
+        self.group(group)?;
+        let found = self.info.mode() & 0o7777;
+        self.ensure(found == mode, || format!("mode {found:04o}, not {mode:04o}"))
+    }
 }
 
 #[cfg(test)]
@@ -605,9 +593,13 @@ mod tests {
         fs::create_dir(dir.path().join("var")).unwrap();
         // Set explicitly: the umask would strip the group's write bit from a mkdir mode.
         fs::set_permissions(dir.path().join("var"), Permissions::from_mode(0o1770)).unwrap();
-        let files =
-            UserFiles::new(dir.path().join("etc"), uid, "tester", uid).unwrap().with_budget(dir.path().join("var"), uid, current_egid());
+        let files = AllUsers::new(dir.path().join("etc"), uid, dir.path().join("var"), uid, current_egid()).user("tester", uid).unwrap();
         Scratch { _dir: dir, files }
+    }
+
+    /// The same files, with the budget directory at `path`, owned by `owner` and `group`.
+    fn with_budget(files: &UserFiles, path: impl Into<PathBuf>, owner: u32, group: u32) -> UserFiles {
+        UserFiles { budget: SharedDir { path: path.into(), owner, group }, ..files.clone() }
     }
 
     fn write(path: &Path, text: &str, mode: u32) {
@@ -622,7 +614,10 @@ mod tests {
         write(&files.config(), "max_failures = 5\nhash_cost = 6\n", 0o644);
         write(&files.user_file(), "hash = $y$j9T$abc$def\n", 0o640);
         let settings = files.settings().unwrap();
-        assert_eq!((settings.max_failures, settings.hash_cost, settings.pin_hash.as_str()), (5, 6, "$y$j9T$abc$def"));
+        assert_eq!(
+            (settings.max_failures, settings.hash_cost, settings.pin_hash.as_ref().map(|hash| hash.as_str())),
+            (5, 6, Some("$y$j9T$abc$def"))
+        );
         write(&files.user_file(), "hash = $y$j9T$abc$def\nmax_failures = 2\n", 0o640);
         assert!(matches!(files.settings(), Err(Error::OnlyTheHash { .. })));
         assert!(matches!(files.user_settings(), Err(Error::OnlyTheHash { .. })), "doctor's rules are the PIN checker's");
@@ -639,15 +634,11 @@ mod tests {
             assert!(error.contains(why), "{error}");
             assert_eq!(files.user_settings().unwrap_err().to_string(), error, "doctor's rules are the PIN checker's");
         }
-        let budget = files.budget.clone().unwrap();
-        let other_owner = UserFiles::new(files.etc.clone(), files.etc_owner + 1, "tester", files.uid).unwrap().with_budget(
-            &budget.path,
-            budget.owner,
-            budget.group,
-        );
+        let budget = files.budget.clone();
+        let other_owner = UserFiles::new(files.etc.clone(), files.etc_owner + 1, budget.clone(), "tester", files.uid).unwrap();
         write(&files.user_file(), "hash = $y$x\n", 0o640);
         assert!(other_owner.settings().unwrap_err().to_string().contains("owned by uid"));
-        let other_group = files.clone().with_budget(&budget.path, budget.owner, budget.group + 1);
+        let other_group = with_budget(files, &budget.path, budget.owner, budget.group + 1);
         let error = other_group.settings().unwrap_err().to_string();
         assert!(error.contains(&format!("group {}, not {}", budget.group, budget.group + 1)), "{error}");
         assert!(files.settings().is_ok(), "and the right group reads it");
@@ -673,7 +664,7 @@ mod tests {
         files.save_pin("$y$new").unwrap();
         let info = fs::metadata(files.etc.join("users")).unwrap();
         assert_eq!((info.mode() & 0o7777, info.gid()), (0o750, current_egid()));
-        let all = AllUsers::new(&files.etc, files.etc_owner, &files.budget.as_ref().unwrap().path, files.etc_owner, current_egid());
+        let all = AllUsers::new(&files.etc, files.etc_owner, &files.budget.path, files.etc_owner, current_egid());
         all.check_users_dir().unwrap();
         fs::set_permissions(files.etc.join("users"), Permissions::from_mode(0o755)).unwrap();
         assert!(all.check_users_dir().unwrap_err().to_string().contains("mode 0755, not 0750"));
@@ -694,7 +685,7 @@ mod tests {
     #[test]
     fn a_budget_dir_with_any_other_mode_is_refused() {
         let Scratch { files, .. } = &scratch();
-        let dir = files.budget_file().unwrap().parent().unwrap().to_path_buf();
+        let dir = files.budget_file().parent().unwrap().to_path_buf();
         for mode in [0o700, 0o770, 0o1777, 0o1775, 0o3770] {
             fs::set_permissions(&dir, Permissions::from_mode(mode)).unwrap();
             let error = files.lock().unwrap_err().to_string();
@@ -709,20 +700,20 @@ mod tests {
     #[test]
     fn a_budget_dir_with_another_owner_or_group_is_refused() {
         let Scratch { files, .. } = &scratch();
-        let budget = files.budget.clone().unwrap();
-        let theirs = files.clone().with_budget(&budget.path, budget.owner + 1, budget.group);
+        let budget = files.budget.clone();
+        let theirs = with_budget(files, &budget.path, budget.owner + 1, budget.group);
         assert!(theirs.lock().unwrap_err().to_string().contains("owned by uid"));
-        let theirs = files.clone().with_budget(&budget.path, budget.owner, budget.group + 1);
+        let theirs = with_budget(files, &budget.path, budget.owner, budget.group + 1);
         assert!(theirs.lock().unwrap_err().to_string().contains(&format!("group {}, not {}", budget.group, budget.group + 1)));
     }
 
     #[test]
     fn a_symlinked_budget_dir_is_refused() {
         let Scratch { files, _dir } = &scratch();
-        let budget = files.budget.clone().unwrap();
+        let budget = files.budget.clone();
         let link = _dir.path().join("link");
         symlink(&budget.path, &link).unwrap();
-        let linked = files.clone().with_budget(link, budget.owner, budget.group);
+        let linked = with_budget(files, link, budget.owner, budget.group);
         assert!(linked.lock().unwrap_err().to_string().contains("not a directory"));
     }
 
@@ -732,16 +723,12 @@ mod tests {
     #[test]
     fn a_missing_or_planted_lock_file_is_refused() {
         let Scratch { files, .. } = &scratch();
-        let budget = files.budget.clone().unwrap();
-        let victim = UserFiles::new(files.etc.clone(), files.etc_owner, "victim", files.uid + 1).unwrap().with_budget(
-            &budget.path,
-            budget.owner,
-            budget.group,
-        );
+        let budget = files.budget.clone();
+        let victim = UserFiles::new(files.etc.clone(), files.etc_owner, budget.clone(), "victim", files.uid + 1).unwrap();
         let error = victim.lock().unwrap_err().to_string();
         assert!(error.contains("No such file"), "{error}");
-        assert!(!victim.lock_file().unwrap().exists(), "and nothing was created");
-        write(&victim.lock_file().unwrap(), "", 0o600);
+        assert!(!victim.lock_file().exists(), "and nothing was created");
+        write(&victim.lock_file(), "", 0o600);
         let error = victim.lock().unwrap_err().to_string();
         assert!(error.contains(&format!("owned by uid {}, not {}", files.uid, files.uid + 1)), "{error}");
     }
@@ -750,21 +737,13 @@ mod tests {
     #[test]
     fn set_replaces_anything_in_place_of_the_lock_file() {
         let Scratch { files, _dir } = &scratch();
-        let lock = files.lock_file().unwrap();
+        let lock = files.lock_file();
         symlink(_dir.path().join("elsewhere"), &lock).unwrap();
         assert!(files.lock().is_err());
         files.start_budget(&Budget::default()).unwrap();
         assert!(fs::symlink_metadata(&lock).unwrap().is_file());
         assert_eq!(fs::metadata(&lock).unwrap().mode() & 0o7777, 0o600);
         assert!(files.lock().is_ok());
-    }
-
-    #[test]
-    fn without_a_budget_dir_there_is_no_lock_and_no_budget() {
-        let Scratch { files, .. } = &scratch();
-        let etc_only = UserFiles::new(files.etc.clone(), files.etc_owner, "tester", files.uid).unwrap();
-        assert!(etc_only.lock().is_err());
-        assert!(etc_only.load_budget().is_err());
     }
 
     #[test]
@@ -776,10 +755,10 @@ mod tests {
         let budget = Budget { consecutive: 2, pending: vec![1], suspicious: vec![2], total: 3, disabled: None, set: 4, since: 5 };
         files.save_budget(&budget).unwrap();
         assert_eq!(files.load_budget().unwrap(), budget);
-        assert_eq!(fs::metadata(files.budget_file().unwrap()).unwrap().mode() & 0o7777, 0o600);
-        assert_eq!(fs::metadata(files.lock_file().unwrap()).unwrap().mode() & 0o7777, 0o600);
+        assert_eq!(fs::metadata(files.budget_file()).unwrap().mode() & 0o7777, 0o600);
+        assert_eq!(fs::metadata(files.lock_file()).unwrap().mode() & 0o7777, 0o600);
         assert!(files.remove_budget().unwrap());
-        assert!(!files.lock_file().unwrap().exists(), "the lock file goes with the budget");
+        assert!(!files.lock_file().exists(), "the lock file goes with the budget");
         assert!(!files.remove_budget().unwrap());
         assert!(files.load_budget().is_err());
     }
@@ -787,27 +766,23 @@ mod tests {
     #[test]
     fn a_budget_that_cannot_be_trusted_is_an_error_not_an_empty_budget() {
         let Scratch { files, .. } = &scratch();
-        let path = files.budget_file().unwrap();
+        let path = files.budget_file();
         write(&path, "garbage\n", 0o600);
         assert!(files.load_budget().unwrap_err().to_string().contains("not a valid budget"));
         write(&path, &Budget::default().format(), 0o640);
         assert!(files.load_budget().unwrap_err().to_string().contains("open to its group or others"));
         // Planted in another user's name: the test's own file stands in for the planted one.
         write(&path, &Budget::default().format(), 0o600);
-        let budget = files.budget.clone().unwrap();
-        let victim = UserFiles::new(files.etc.clone(), files.etc_owner, "victim", files.uid + 1).unwrap().with_budget(
-            &budget.path,
-            budget.owner,
-            budget.group,
-        );
-        fs::rename(&path, victim.budget_file().unwrap()).unwrap();
+        let budget = files.budget.clone();
+        let victim = UserFiles::new(files.etc.clone(), files.etc_owner, budget.clone(), "victim", files.uid + 1).unwrap();
+        fs::rename(&path, victim.budget_file()).unwrap();
         assert!(victim.load_budget().unwrap_err().to_string().contains(&format!("owned by uid {}, not {}", files.uid, files.uid + 1)));
     }
 
     #[test]
     fn a_budget_past_the_size_limit_is_an_error_not_a_shorter_budget() {
         let Scratch { files, .. } = &scratch();
-        let path = files.budget_file().unwrap();
+        let path = files.budget_file();
         let budget = Budget::default().format();
         // Padded with a comment to exactly MAX_FILE_BYTES it is read; one byte more, and it is refused.
         let padded = |length: usize| format!("{budget}#{}\n", "x".repeat(length - budget.len() - 2));
@@ -820,7 +795,7 @@ mod tests {
     #[test]
     fn every_use_of_the_budget_directory_checks_it() {
         let Scratch { files, .. } = &scratch();
-        let dir = files.budget.clone().unwrap().path;
+        let dir = files.budget.clone().path;
         fs::set_permissions(&dir, Permissions::from_mode(0o777)).unwrap();
         assert!(files.load_budget().unwrap_err().to_string().contains("budget directory"));
         assert!(files.save_budget(&Budget::default()).is_err());
@@ -833,7 +808,7 @@ mod tests {
     fn a_killed_writes_leftover_goes_at_the_next_write() {
         let Scratch { files, .. } = &scratch();
         files.start_budget(&Budget::default()).unwrap();
-        let dir = files.budget_file().unwrap().parent().unwrap().to_path_buf();
+        let dir = files.budget_file().parent().unwrap().to_path_buf();
         let (mine, theirs) = (dir.join(format!(".{}.k1lled", files.uid)), dir.join(format!(".{}0.k1lled", files.uid)));
         for path in [&mine, &theirs] {
             write(path, "consecutive = 0\n", 0o600);
@@ -855,10 +830,10 @@ mod tests {
         files.start_budget(&Budget::default()).unwrap();
         let held = files.lock().unwrap();
         assert!(files.remove_budget().is_err());
-        assert!(files.budget_file().unwrap().exists() && files.lock_file().unwrap().exists(), "nothing removed");
+        assert!(files.budget_file().exists() && files.lock_file().exists(), "nothing removed");
         drop(held);
 
-        let path = files.lock_file().unwrap();
+        let path = files.lock_file();
         let waiting = files.open_lock(&path).unwrap();
         files.remove_budget().unwrap();
         files.start_budget(&Budget::default()).unwrap();
@@ -879,7 +854,7 @@ mod tests {
     }
 
     fn all_users(files: &UserFiles) -> AllUsers {
-        let budget = files.budget.clone().unwrap();
+        let budget = files.budget.clone();
         AllUsers::new(&files.etc, files.etc_owner, &budget.path, budget.owner, budget.group)
     }
 
@@ -920,7 +895,7 @@ mod tests {
         write(&files.etc.join("users/.tester.Ab3dE9"), "", 0o640);
         write(&files.config(), "max_failures = 2\n", 0o644);
         all.remove_everything_left().unwrap();
-        let budget_dir = files.budget.clone().unwrap().path;
+        let budget_dir = files.budget.clone().path;
         for dir in [files.etc.join("users"), budget_dir.clone()] {
             assert_eq!(fs::read_dir(&dir).unwrap().count(), 0, "{} isn't empty", dir.display());
         }

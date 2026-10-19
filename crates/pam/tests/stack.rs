@@ -29,7 +29,7 @@ use std::time::{Duration, Instant};
 use pamharness::host::{self, Sigchld};
 use pamharness::{Attempt, PamClient, PamSession};
 use screenlock_pin_core::Budget;
-use screenlock_pin_sys::{Account, UserFiles, Yescrypt, current_egid, current_uid};
+use screenlock_pin_sys::{Account, AllUsers, Yescrypt, current_egid, current_uid};
 
 const PIN: &str = "4859";
 const PASSWORD: &str = "correct horse battery staple";
@@ -72,8 +72,8 @@ impl Sandbox {
         fs::set_permissions(&user_file, Permissions::from_mode(0o640)).unwrap();
         // The budget and lock file screenlock-pin set creates.
         let uid = current_uid();
-        let files = UserFiles::new(sandbox.path("etc"), uid, &sandbox.user, uid).unwrap();
-        files.with_budget(sandbox.path("var"), uid, current_egid()).start_budget(&Budget::default()).unwrap();
+        let all = AllUsers::new(sandbox.path("etc"), uid, sandbox.path("var"), uid, current_egid());
+        all.user(&sandbox.user, uid).unwrap().start_budget(&Budget::default()).unwrap();
         sandbox.pin_checker("");
         // The two services sessions use, written once, so threads can open sessions at will.
         sandbox.stack_as("kde-right", Password::Right, "");

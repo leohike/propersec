@@ -30,9 +30,10 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Instant;
 
-use screenlock_pin_checker::{Context, Places, Request, dev_options_allowed, read_input, serve};
-use screenlock_pin_core::{Log, Secret, exit};
-use screenlock_pin_sys::{Account, FileLog, SystemClock, Yescrypt, current_egid, current_euid, current_gid, current_uid};
+use screenlock_pin_checker::{Context, dev_options_allowed, read_input, serve};
+use screenlock_pin_core::protocol::{INSTALLED_BUDGET_DIR, INSTALLED_ETC};
+use screenlock_pin_core::{Answer, Log, Request, Secret};
+use screenlock_pin_sys::{Account, AllUsers, FileLog, SystemClock, Yescrypt, current_egid, current_euid, current_gid, current_uid};
 
 mod secure;
 
@@ -44,15 +45,15 @@ fn main() -> ExitCode {
     std::panic::set_hook(Box::new(|_| std::process::abort()));
     secure::start_clean();
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
-    ExitCode::from(run(&args, started))
+    run(&args, started).into()
 }
 
-fn run(args: &[OsString], started: Instant) -> u8 {
+fn run(args: &[OsString], started: Instant) -> Answer {
     let options = match Options::parse(args) {
         Ok(options) => options,
         Err(why) => {
             secure::Syslog::open().log(&format!("refused: {why}"));
-            return exit::USAGE;
+            return Answer::Usage;
         }
     };
     let log: Box<dyn Log> = match &options.dev {
@@ -60,56 +61,48 @@ fn run(args: &[OsString], started: Instant) -> u8 {
         _ => Box::new(secure::Syslog::open()),
     };
     // status is asked by a person, who is told why; the other requests answer with the exit code.
-    let refuse = |why: &str, code: u8| {
+    let refuse = |why: &str, answer: Answer| {
         log.log(why);
         if options.request == Request::Status {
             let _ = writeln!(std::io::stdout(), "{why}");
         }
-        code
+        answer
     };
     let uid = current_uid();
     if options.dev.is_some() && !dev_options_allowed(secure::elevated(), uid, current_euid(), current_gid(), current_egid()) {
-        return refuse(&format!("uid {uid}: refused: --dev options while running with elevated rights"), exit::USAGE);
+        return refuse(&format!("uid {uid}: refused: --dev options while running with elevated rights"), Answer::Usage);
     }
     if uid == 0 {
-        return refuse("refused: root has no lock screen to unlock", exit::USAGE);
+        return refuse("refused: root has no lock screen to unlock", Answer::Usage);
     }
     let caller = match Account::by_uid(uid) {
         Ok(caller) => caller,
-        Err(error) => return refuse(&format!("uid {uid}: refused: {error}"), exit::BROKEN),
+        Err(error) => return refuse(&format!("uid {uid}: refused: {error}"), Answer::Broken),
     };
     let typed = if options.request.reads_input() {
         // Like unix_chkpwd: meant to be fed by a program through a pipe, not typed into by hand.
         // This discourages casual use; it protects nothing, since anyone can use a pipe.
         if std::io::stdin().is_terminal() {
             log.log(&format!("{}: refused: stdin is a terminal", caller.name));
-            return exit::USAGE;
+            return Answer::Usage;
         }
         match read_input(&mut std::io::stdin().lock()) {
             Ok(typed) => typed,
             Err(error) => {
                 log.log(&format!("{}: refused: reading stdin: {error}", caller.name));
-                return exit::BROKEN;
+                return Answer::Broken;
             }
         }
     } else {
         Secret::new(Vec::new())
     };
+    // The budget directory's group is the one this runs with: without the setgid bit, the caller's.
     let places = match &options.dev {
-        None => Places {
-            etc: "/etc/screenlock-pin".into(),
-            etc_owner: 0,
-            budget_dir: "/var/lib/screenlock-pin".into(),
-            budget_owner: 0,
-            budget_group: current_egid(),
-        },
-        Some(dev) => Places {
-            etc: dev.etc.clone(),
-            etc_owner: dev.owner.unwrap_or(uid),
-            budget_dir: dev.budget.clone(),
-            budget_owner: dev.owner.unwrap_or(uid),
-            budget_group: current_egid(),
-        },
+        None => AllUsers::new(INSTALLED_ETC, 0, INSTALLED_BUDGET_DIR, 0, current_egid()),
+        Some(dev) => {
+            let owner = dev.owner.unwrap_or(uid);
+            AllUsers::new(&dev.etc, owner, &dev.budget, owner, current_egid())
+        }
     };
     let context = Context { places: &places, hasher: &Yescrypt, clock: &SystemClock, log: log.as_ref() };
     let reply = serve(options.request, &caller, &typed, &context);
@@ -118,7 +111,7 @@ fn run(args: &[OsString], started: Instant) -> u8 {
     std::thread::sleep(reply.not_before.saturating_sub(started.elapsed()));
     // Nothing to do if stdout is gone: the exit code is the answer.
     let _ = std::io::stdout().write_all(reply.output.as_bytes());
-    reply.code
+    reply.answer
 }
 
 struct Options {
@@ -152,7 +145,7 @@ impl Options {
                     _ => return Err(format!("unknown option {word}")),
                 }
             } else if request.is_none() {
-                request = Some(Request::parse(word).ok_or(format!("unknown request {word:?}"))?);
+                request = Some(word.parse::<Request>()?);
             } else {
                 return Err(format!("unexpected argument {word:?}"));
             }

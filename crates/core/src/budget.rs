@@ -20,8 +20,9 @@
 
 use std::fmt;
 
-use crate::Settings;
 use crate::kv::digits;
+use crate::protocol::ENABLE_OR_SET;
+use crate::{Settings, kv};
 
 pub const DAY: u64 = 24 * 3600;
 pub const WEEK: u64 = 7 * DAY;
@@ -29,6 +30,8 @@ pub const WEEK: u64 = 7 * DAY;
 pub const MAX_PENDING: usize = 50;
 /// The most suspicious failures kept, more than any limit may ask for. The total keeps counting.
 pub const MAX_SUSPICIOUS: usize = 200;
+/// The keys of a budget file, in the order they are written.
+const KEYS: [&str; 7] = ["consecutive", "pending", "suspicious", "total", "disabled", "set", "since"];
 
 /// Which limit disabled the PIN, with the number it was set to at the time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,6 +39,26 @@ pub enum Limit {
     Day(u32),
     Week(u32),
     Total(u64),
+}
+
+impl Limit {
+    /// How a budget file names the limit, and its number.
+    fn kind(self) -> (&'static str, u64) {
+        match self {
+            Self::Day(count) => ("day", count.into()),
+            Self::Week(count) => ("week", count.into()),
+            Self::Total(count) => ("total", count),
+        }
+    }
+
+    fn from_kind(kind: &str, count: &str) -> Option<Self> {
+        match kind {
+            "day" => Some(Self::Day(digits(count)?)),
+            "week" => Some(Self::Week(digits(count)?)),
+            "total" => Some(Self::Total(digits(count)?)),
+            _ => None,
+        }
+    }
 }
 
 impl fmt::Display for Limit {
@@ -111,7 +134,7 @@ impl Judged {
             ));
         }
         if let (true, Some(limit)) = (self.disabled_now, self.disabled) {
-            notes.push(format!("PIN disabled after {limit}; sudo screenlock-pin enable or set turns it back on"));
+            notes.push(format!("PIN disabled after {limit}; {ENABLE_OR_SET}"));
         }
         notes
     }
@@ -167,6 +190,39 @@ impl Budget {
         before - self.pending.len()
     }
 
+    /// An input about to be checked: one more failure, waiting to be forgiven or judged, and, when it
+    /// `could_be_a_pin` and so is checked as one, one more consecutive failure. Paused by it, the
+    /// PIN is paused from `now`.
+    pub fn count_attempt(&mut self, now: u64, could_be_a_pin: bool, settings: &Settings) {
+        self.record_failure(now);
+        if could_be_a_pin {
+            self.consecutive = self.consecutive.saturating_add(1);
+            if self.paused(settings) {
+                self.since = now;
+            }
+        }
+    }
+
+    /// The attempt counted at `now` was the PIN: its consecutive failure is taken back, and with it
+    /// a pause it may have started, so `since` goes back to `since_before`. The failures just before
+    /// it were the user's typos, and are forgiven.
+    pub fn pin_matched(&mut self, now: u64, since_before: u64, settings: &Settings) {
+        self.consecutive = 0;
+        self.since = since_before;
+        self.forgive(now, settings.forgive_before_correct_pin);
+    }
+
+    /// A password unlock at `now`: the recent failures are forgiven as the user's own, and the
+    /// consecutive count starts over, which resumes a paused PIN from `now`. A disabled PIN stays
+    /// disabled.
+    pub fn password_unlocked(&mut self, now: u64, settings: &Settings) {
+        self.forgive(now, settings.forgive_before_correct_password);
+        if self.paused(settings) {
+            self.since = now;
+        }
+        self.consecutive = 0;
+    }
+
     /// Whether the PIN is paused: `max_failures` consecutive failures, until a password unlock.
     pub fn paused(&self, settings: &Settings) -> bool {
         self.consecutive >= settings.max_failures
@@ -194,9 +250,9 @@ impl Budget {
     /// The budget in `text`, or `None` unless it parses exactly. A damaged budget is an error for
     /// the caller: reading it as empty would hand out a fresh one.
     pub fn parse(text: &str) -> Option<Self> {
-        let pairs = crate::kv::parse(text, "budget").ok()?;
+        let pairs = kv::parse(text, "budget").ok()?;
         let get = |key: &str| pairs.iter().find(|(name, _)| name == key).map(|(_, value)| value.as_str());
-        if pairs.len() != 7 {
+        if pairs.len() != KEYS.len() {
             return None;
         }
         let (set, since) = (digits(get("set")?)?, digits(get("since")?)?);
@@ -204,15 +260,7 @@ impl Budget {
         let suspicious = times(get("suspicious")?, MAX_SUSPICIOUS)?;
         let disabled = match get("disabled")?.split(' ').collect::<Vec<_>>()[..] {
             ["no"] => None,
-            [kind, count, at] => {
-                let limit = match kind {
-                    "day" => Limit::Day(digits(count)?),
-                    "week" => Limit::Week(digits(count)?),
-                    "total" => Limit::Total(digits(count)?),
-                    _ => return None,
-                };
-                Some(Disabled { limit, at: digits(at)? })
-            }
+            [kind, count, at] => Some(Disabled { limit: Limit::from_kind(kind, count)?, at: digits(at)? }),
             _ => return None,
         };
         Some(Self { consecutive: digits(get("consecutive")?)?, pending, suspicious, total: digits(get("total")?)?, disabled, set, since })
@@ -225,19 +273,22 @@ impl Budget {
         };
         let disabled = match self.disabled {
             None => "no".to_owned(),
-            Some(Disabled { limit: Limit::Day(count), at }) => format!("day {count} {at}"),
-            Some(Disabled { limit: Limit::Week(count), at }) => format!("week {count} {at}"),
-            Some(Disabled { limit: Limit::Total(count), at }) => format!("total {count} {at}"),
+            Some(Disabled { limit, at }) => {
+                let (kind, count) = limit.kind();
+                format!("{kind} {count} {at}")
+            }
         };
-        format!(
-            "consecutive = {}\npending = {}\nsuspicious = {}\ntotal = {}\ndisabled = {disabled}\nset = {}\nsince = {}\n",
-            self.consecutive,
+        let values = [
+            self.consecutive.to_string(),
             list(&self.pending),
             list(&self.suspicious),
-            self.total,
-            self.set,
-            self.since
-        )
+            self.total.to_string(),
+            disabled,
+            self.set.to_string(),
+            self.since.to_string(),
+        ];
+        let pairs: kv::Pairs = KEYS.into_iter().map(str::to_owned).zip(values).collect();
+        kv::format(&pairs)
     }
 }
 

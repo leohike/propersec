@@ -43,7 +43,8 @@ use std::process::{Command, ExitCode, Stdio};
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Parser, Subcommand};
-use screenlock_pin_core::{Budget, Clock, Hasher, MAX_PIN_BYTES, Secret, Settings, Store, exit};
+use screenlock_pin_core::protocol::SEE_DOCTOR;
+use screenlock_pin_core::{Answer, Budget, Clock, Hasher, MAX_PIN_BYTES, Request, Secret, Settings, Store};
 use screenlock_pin_sys::{Account, AllUsers, SystemClock, UserFiles, Yescrypt, current_euid, current_uid, group_by_name, shadow_hash};
 
 mod doctor;
@@ -169,7 +170,7 @@ fn files(cli: &Cli, account: &Account) -> Result<UserFiles> {
 
 /// A file the PIN can't be used with, as `set` and `enable` meet it: doctor says what fixes it.
 fn see_doctor(error: screenlock_pin_core::Error) -> anyhow::Error {
-    anyhow!("{error}; sudo screenlock-pin doctor says how to fix it")
+    anyhow!("{error}; {SEE_DOCTOR}")
 }
 
 /// Whose PIN: the one named, else whoever called sudo or pkexec, else whoever runs this.
@@ -207,7 +208,9 @@ fn set(cli: &Cli, account: &Account, yes: bool) -> Result<()> {
             ),
         },
     }
-    if !settings.pin_hash.is_empty() && Yescrypt.verify(pin, &settings.pin_hash)? {
+    if let Some(old) = &settings.pin_hash
+        && Yescrypt.verify(pin, old.as_str())?
+    {
         let total = files.load_budget().map(|budget| budget.total).unwrap_or_default();
         confirm(
             &mut input,
@@ -232,7 +235,7 @@ fn enable(cli: &Cli, account: &Account, yes: bool) -> Result<()> {
     require_owner(cli.owner)?;
     let files = files(cli, account)?;
     let settings = files.settings().map_err(see_doctor)?;
-    if settings.pin_hash.is_empty() {
+    if settings.pin_hash.is_none() {
         bail!("no PIN is set for {}", account.name);
     }
     let judge = || -> Result<_> {
@@ -366,13 +369,13 @@ fn status(cli: &Cli) -> Result<bool> {
         bail!("status shows your own PIN; run it as yourself, without sudo");
     }
     let output = Command::new(&cli.pin_checker)
-        .arg("status")
+        .arg(Request::Status.as_str())
         .stdin(Stdio::null())
         .output()
         .with_context(|| format!("running {}", cli.pin_checker.display()))?;
     print!("{}", String::from_utf8_lossy(&output.stdout));
-    match output.status.code().and_then(|code| u8::try_from(code).ok()) {
-        Some(exit::YES) => Ok(true),
+    match output.status.code().and_then(|code| u8::try_from(code).ok()).map(Answer::try_from) {
+        Some(Ok(Answer::Yes)) => Ok(true),
         _ if output.stdout.is_empty() => bail!("{} failed ({}) without saying why", cli.pin_checker.display(), output.status),
         _ => bail!("{} failed ({})", cli.pin_checker.display(), output.status),
     }

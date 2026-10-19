@@ -1,14 +1,15 @@
 use std::path::PathBuf;
 
-/// Where `install.sh` puts the PIN checker, and where the module runs it from unless the PAM line
-/// says `pin_checker=`. Only root can write a PAM line, so only root can point it elsewhere.
-pub const INSTALLED_PIN_CHECKER: &str = "/usr/local/libexec/screenlock-pin/screenlock-pin-checker";
+use screenlock_pin_core::Request;
+use screenlock_pin_core::protocol::INSTALLED_PIN_CHECKER;
 
 /// What the module is asked to do: one PAM line's arguments.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Args {
     pub mode: Mode,
-    /// The setgid PIN checker that holds the hashes and the counts.
+    /// The setgid PIN checker that holds the hashes and the counts: the installed one unless the
+    /// PAM line says `pin_checker=`. Only root can write a PAM line, so only root can point it
+    /// elsewhere.
     pub pin_checker: PathBuf,
     pub log: Option<PathBuf>,
     pub test_panic: bool,
@@ -26,10 +27,10 @@ pub enum Mode {
 
 impl Mode {
     /// The PIN checker request for this mode.
-    pub fn request(self) -> &'static str {
+    pub fn request(self) -> Request {
         match self {
-            Self::Check => "check",
-            Self::AfterPasswordAuth => "unpause",
+            Self::Check => Request::Check,
+            Self::AfterPasswordAuth => Request::Unpause,
         }
     }
 }
@@ -45,7 +46,7 @@ impl Args {
                 None if word == "after-password-auth" => mode = Some(Mode::AfterPasswordAuth),
                 None if word == "test_panic" => test_panic = true,
                 Some(("pin_checker", path)) if path.starts_with('/') => pin_checker = Some(PathBuf::from(path)),
-                Some(("PIN checker", path)) => return Err(format!("pin_checker={path} is not an absolute path")),
+                Some(("pin_checker", path)) => return Err(format!("pin_checker={path} is not an absolute path")),
                 Some(("log", file)) => log = Some(PathBuf::from(file)),
                 _ => return Err(format!("unknown argument {word:?}")),
             }
@@ -71,6 +72,11 @@ mod tests {
     fn pin_checker_points_elsewhere() {
         let args = Args::parse("check pin_checker=/tmp/sandbox/pin-checker log=/tmp/sandbox/log".split(' ')).unwrap();
         assert_eq!((args.pin_checker, args.log), ("/tmp/sandbox/pin-checker".into(), Some("/tmp/sandbox/log".into())));
+    }
+
+    #[test]
+    fn a_relative_pin_checker_is_named_as_such() {
+        assert_eq!(Args::parse(["check", "pin_checker=pin-checker"]), Err("pin_checker=pin-checker is not an absolute path".into()));
     }
 
     #[test]

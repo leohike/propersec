@@ -4,6 +4,51 @@ use std::str::FromStr;
 use crate::kv::Pairs;
 use crate::{Error, HASH_SETTING, MAX_PIN_CHARS};
 
+/// A PIN's yescrypt hash, as a user's own file holds it. Kept out of debug output and logs.
+#[derive(Clone, PartialEq, Eq)]
+pub struct PinHash(String);
+
+impl PinHash {
+    pub fn new(hash: String) -> Self {
+        Self(hash)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for PinHash {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("PinHash(<hidden>)")
+    }
+}
+
+/// Which file a layer of settings comes from, which decides what it may hold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Layer {
+    /// The global config: every rule, never a hash, since one line would give every user the same
+    /// PIN.
+    Config,
+    /// A user's own file: the hash and nothing else, since the rules are one policy for the
+    /// machine.
+    UserFile,
+}
+
+/// The rules, every setting but the hash: what the config may hold.
+pub const RULES: [&str; 10] = [
+    "max_failures",
+    "min_pin_length",
+    "required_non_digits_count",
+    "hash_cost",
+    "forgive_before_correct_pin",
+    "forgive_before_correct_password",
+    "max_suspicious_24h",
+    "max_suspicious_7d",
+    "max_suspicious_total",
+    "min_milliseconds_before_pin_unlock",
+];
+
 /// Everything that decides one user's PIN: its hash, and the rules for it.
 ///
 /// Built in layers: these defaults, then the global config, the one place for every rule, then the
@@ -12,10 +57,10 @@ use crate::{Error, HASH_SETTING, MAX_PIN_CHARS};
 ///
 /// The unlock path uses the hash, `max_failures`, the budget's five and
 /// `min_milliseconds_before_pin_unlock`; `set` uses the three in between.
-#[derive(Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Settings {
-    /// Empty: no PIN is set. Otherwise the PIN's yescrypt hash.
-    pub pin_hash: String,
+    /// `None`: no PIN is set.
+    pub pin_hash: Option<PinHash>,
     /// Consecutive failures that pause the PIN until the next password unlock.
     pub max_failures: u32,
     /// Shortest PIN `set` accepts, in characters. The longest is [`MAX_PIN_CHARS`].
@@ -45,7 +90,7 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            pin_hash: String::new(),
+            pin_hash: None,
             max_failures: 3,
             min_pin_length: 4,
             required_non_digits_count: 3,
@@ -60,62 +105,41 @@ impl Default for Settings {
     }
 }
 
-// The hash stays out of debug output and logs.
-impl fmt::Debug for Settings {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Settings")
-            .field("pin_hash", &if self.pin_hash.is_empty() { "<none>" } else { "<set>" })
-            .field("max_failures", &self.max_failures)
-            .field("min_pin_length", &self.min_pin_length)
-            .field("required_non_digits_count", &self.required_non_digits_count)
-            .field("hash_cost", &self.hash_cost)
-            .field("forgive_before_correct_pin", &self.forgive_before_correct_pin)
-            .field("forgive_before_correct_password", &self.forgive_before_correct_password)
-            .field("max_suspicious_24h", &self.max_suspicious_24h)
-            .field("max_suspicious_7d", &self.max_suspicious_7d)
-            .field("max_suspicious_total", &self.max_suspicious_total)
-            .field("min_milliseconds_before_pin_unlock", &self.min_milliseconds_before_pin_unlock)
-            .finish()
-    }
-}
-
 impl Settings {
-    /// Take over each of `pairs`, checking every value against its range. `source` names the file,
-    /// for errors. A value outside its range is an error, never clamped: a typo must not quietly
-    /// allow 50 failures.
-    ///
-    /// A user's own file (`user_file`) holds the hash and nothing else: the rules are one policy
-    /// for the machine. Anywhere else the hash is refused, since one line would give every user the
-    /// same PIN.
-    pub fn apply(&mut self, pairs: &Pairs, source: &str, user_file: bool) -> Result<(), Error> {
+    /// Take over each of `pairs`, read from `source`, a file of `layer`'s kind. Every value is
+    /// checked against its range: a value outside it is an error, never clamped, since a typo must
+    /// not quietly allow 50 failures.
+    pub fn apply(&mut self, pairs: &Pairs, source: &str, layer: Layer) -> Result<(), Error> {
         for (key, raw) in pairs {
-            let key = key.as_str();
-            match key {
-                HASH_SETTING if user_file => self.pin_hash.clone_from(raw),
-                HASH_SETTING => return Err(Error::OutsideUserFile { file: source.into(), key: key.into() }),
-                _ if user_file => {
-                    // A real setting is in the wrong file; anything else, like a key a version with
-                    // a pepper left, is unknown wherever it is.
-                    let known = Settings::default().apply(&vec![(key.to_owned(), raw.clone())], source, false);
-                    return Err(match known {
-                        Err(Error::UnknownSetting { .. }) => Error::UnknownSetting { file: source.into(), key: key.into() },
-                        _ => Error::OnlyTheHash { file: source.into(), key: key.into() },
-                    });
-                }
-                "max_failures" => self.max_failures = in_range(source, key, raw, 1, 10)?,
-                "min_pin_length" => self.min_pin_length = in_range(source, key, raw, 1, MAX_PIN_CHARS)?,
-                "required_non_digits_count" => self.required_non_digits_count = in_range(source, key, raw, 0, MAX_PIN_CHARS)?,
-                "hash_cost" => self.hash_cost = in_range(source, key, raw, 1, 11)?,
-                "forgive_before_correct_pin" => self.forgive_before_correct_pin = in_range(source, key, raw, 0, 3600)?,
-                "forgive_before_correct_password" => self.forgive_before_correct_password = in_range(source, key, raw, 0, 3600)?,
-                // The budget keeps at most MAX_SUSPICIOUS suspicious failures, so no limit may need more.
-                "max_suspicious_24h" => self.max_suspicious_24h = in_range(source, key, raw, 1, 100)?,
-                "max_suspicious_7d" => self.max_suspicious_7d = in_range(source, key, raw, 1, 200)?,
-                "max_suspicious_total" => self.max_suspicious_total = in_range(source, key, raw, 1, 100_000)?,
-                // Under 50 ms breaks the PIN on kscreenlocker 6.8; allowed, for other lock screens.
-                "min_milliseconds_before_pin_unlock" => self.min_milliseconds_before_pin_unlock = in_range(source, key, raw, 0, 1000)?,
-                _ => return Err(Error::UnknownSetting { file: source.into(), key: key.into() }),
+            let (file, key) = (source.to_owned(), key.as_str());
+            match (layer, key) {
+                (Layer::UserFile, HASH_SETTING) => self.pin_hash = Some(PinHash::new(raw.clone())),
+                (Layer::Config, HASH_SETTING) => return Err(Error::OutsideUserFile { file, key: key.into() }),
+                (Layer::UserFile, _) if RULES.contains(&key) => return Err(Error::OnlyTheHash { file, key: key.into() }),
+                // Anything else, like a key a version with a pepper left, is unknown wherever it is.
+                (Layer::UserFile, _) => return Err(Error::UnknownSetting { file, key: key.into() }),
+                (Layer::Config, _) => self.set_rule(source, key, raw)?,
             }
+        }
+        Ok(())
+    }
+
+    /// Set the rule `key` from `raw`, which must be in its range.
+    fn set_rule(&mut self, source: &str, key: &str, raw: &str) -> Result<(), Error> {
+        match key {
+            "max_failures" => self.max_failures = in_range(source, key, raw, 1, 10)?,
+            "min_pin_length" => self.min_pin_length = in_range(source, key, raw, 1, MAX_PIN_CHARS)?,
+            "required_non_digits_count" => self.required_non_digits_count = in_range(source, key, raw, 0, MAX_PIN_CHARS)?,
+            "hash_cost" => self.hash_cost = in_range(source, key, raw, 1, 11)?,
+            "forgive_before_correct_pin" => self.forgive_before_correct_pin = in_range(source, key, raw, 0, 3600)?,
+            "forgive_before_correct_password" => self.forgive_before_correct_password = in_range(source, key, raw, 0, 3600)?,
+            // The budget keeps at most MAX_SUSPICIOUS suspicious failures, so no limit may need more.
+            "max_suspicious_24h" => self.max_suspicious_24h = in_range(source, key, raw, 1, 100)?,
+            "max_suspicious_7d" => self.max_suspicious_7d = in_range(source, key, raw, 1, 200)?,
+            "max_suspicious_total" => self.max_suspicious_total = in_range(source, key, raw, 1, 100_000)?,
+            // Under 50 ms breaks the PIN on kscreenlocker 6.8; allowed, for other lock screens.
+            "min_milliseconds_before_pin_unlock" => self.min_milliseconds_before_pin_unlock = in_range(source, key, raw, 0, 1000)?,
+            _ => return Err(Error::UnknownSetting { file: source.into(), key: key.into() }),
         }
         Ok(())
     }
@@ -172,10 +196,18 @@ mod tests {
     use super::*;
     use crate::kv;
 
-    fn apply(text: &str, may_set_hash: bool) -> Result<Settings, Error> {
+    fn apply(text: &str, user_file: bool) -> Result<Settings, Error> {
         let mut settings = Settings::default();
-        settings.apply(&kv::parse(text, "f")?, "f", may_set_hash)?;
+        let layer = if user_file { Layer::UserFile } else { Layer::Config };
+        settings.apply(&kv::parse(text, "f")?, "f", layer)?;
         Ok(settings)
+    }
+
+    #[test]
+    fn every_rule_is_known() {
+        for key in RULES {
+            assert!(!matches!(Settings::default().set_rule("f", key, "1"), Err(Error::UnknownSetting { .. })), "{key}");
+        }
     }
 
     #[test]
@@ -243,7 +275,8 @@ mod tests {
     #[test]
     fn only_the_user_file_may_hold_the_hash() {
         assert!(matches!(apply("hash = $y$j9T$abc$def", false), Err(Error::OutsideUserFile { .. })));
-        assert_eq!(apply("hash = $y$j9T$abc$def\n", true).unwrap().pin_hash, "$y$j9T$abc$def");
+        assert_eq!(apply("hash = $y$j9T$abc$def\n", true).unwrap().pin_hash, Some(PinHash::new("$y$j9T$abc$def".into())));
+        assert_eq!(apply("", true).unwrap().pin_hash, None);
     }
 
     #[test]
@@ -294,7 +327,7 @@ mod tests {
 
     #[test]
     fn debug_output_hides_the_hash() {
-        let settings = Settings { pin_hash: "$y$secret".into(), ..Settings::default() };
+        let settings = Settings { pin_hash: Some(PinHash::new("$y$secret".into())), ..Settings::default() };
         assert!(!format!("{settings:?}").contains("secret"));
     }
 }

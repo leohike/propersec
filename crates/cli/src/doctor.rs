@@ -64,18 +64,19 @@ pub fn examine(all: &AllUsers, hasher: &impl Hasher, clock: &impl Clock) -> Resu
         let new_pin = format!("sudo screenlock-pin remove --user {name}, then a new PIN with: sudo screenlock-pin set --user {name}");
         // A file that can't be read counts as a PIN: it is one, almost always.
         let settings = files.user_settings();
-        if settings.as_ref().is_ok_and(|settings| settings.pin_hash.is_empty()) {
-            continue;
-        }
-        found.pins.push(name.clone());
-        let settings = match settings {
-            Ok(settings) => settings,
+        let pin_hash = match settings {
+            Ok(settings) => match settings.pin_hash {
+                Some(pin_hash) => pin_hash,
+                None => continue,
+            },
             Err(error) => {
+                found.pins.push(name.clone());
                 problem(error.to_string(), &refused, new_pin);
                 continue;
             }
         };
-        if let Err(error) = hasher.verify("", &settings.pin_hash) {
+        found.pins.push(name.clone());
+        if let Err(error) = hasher.verify("", pin_hash.as_str()) {
             problem(format!("{}: {error}", path.display()), &refused, new_pin);
             continue;
         }

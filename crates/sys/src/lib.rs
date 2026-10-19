@@ -7,8 +7,7 @@
 //! - [`SystemClock`]: the wall clock, and [`local_time`] to show its times;
 //! - [`FileLog`]: log lines to a file, for tests and the PIN checker's `--dev-log`.
 //!
-//! Nothing here names `/etc` or `/var`: every location comes in through [`UserFiles::new`] and
-//! [`UserFiles::with_budget`].
+//! Nothing here names `/etc` or `/var`: every location comes in through [`AllUsers::new`].
 //! The only `unsafe` code is the libxcrypt FFI, in `crypt.rs`, and glibc's local time, in `clock.rs`.
 
 // Stricter checks for shipped code (docs/chaos/plan-tools.md): every unsafe block explains why it is
