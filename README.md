@@ -24,7 +24,9 @@ screenlock-pin doesn't protect from someone watching you type, malware running a
 
 Now: the lock screen only, KDE only, with extensive security analysis and testing, and no TPM functionality.
 
-Planned, probably as a separate product next to this one: a PIN usable and secure for `sudo`, with TPM support in a systemic way such that more complex code does not simply increase the attack surface (also, TPMs aren't infallible anyway and should not be relied upon completely).
+Not in screenlock-pin: the PIN for `sudo`. screenlock-pin is intentionally simple, and that simplicity doesn't give the security `sudo` needs; `docs/chaos/pin-for-sudo.md` has the reasoning.
+
+Planned, as a separate product in a repo of its own: a PIN usable and secure for `sudo`, with TPM support in a systemic way such that more complex code does not simply increase the attack surface (also, TPMs aren't infallible anyway and should not be relied upon completely).
 
 ## Status
 
