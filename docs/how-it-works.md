@@ -48,11 +48,11 @@ A reboot doesn't change any of this. A PIN paused before a reboot is still pause
 
 ## Forgiven and suspicious failures
 
-The pause only counts failures in a row, and the count starts over at every correct PIN. screenlock-pin also keeps a longer tally, called the **budget**, of failures over hours and days. The budget is kept on disk, so it survives reboots.
+The pause condition only counts failures in a row, and the count starts over at every correct PIN. On its own, that would let someone with regular access to the desk try two guesses every time the user stepped away, for as long as they liked. So screenlock-pin also keeps a longer tally, called the **budget**, of failures over hours and days. The budget is kept on disk, so it survives reboots.
 
-The user's ordinary typos never reach the budget, because they are **forgiven**. A correct PIN forgives the failures of the 45 seconds before it, and a password unlock forgives those of the 90 seconds before it. A user who mistypes the PIN and gets it right a moment later leaves nothing behind.
+The user's ordinary typos never reach the budget, because they are **forgiven**. A correct PIN forgives the failures of the 45 seconds before it, and a password unlock forgives those of the 90 seconds before it. A user who mistypes the PIN and gets it right a few seconds later is nothing suspicious.
 
-A failure that nothing forgave in time becomes a **suspicious failure**. These are attempts nobody followed up with the right PIN or password, for example someone trying a guess at the user's desk and walking away. A suspicious failure the user can't explain may mean someone was guessing their PIN.
+A failure that nothing forgave in time becomes a **suspicious failure**. The idea is that the user, who knows the PIN and the password, almost always follows a typo with one of them within seconds, while someone guessing can't, and leaves their wrong guesses unforgiven when they walk away from the desk. So the budget counts what looks like guessing, and a user who makes many typos but always gets it right in the end comes no closer to having the PIN disabled. A suspicious failure the user can't explain may mean someone was guessing their PIN.
 
 ## Disabled
 
