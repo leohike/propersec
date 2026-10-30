@@ -20,6 +20,8 @@ The same as for a lock screen in general. It protects your account/data from:
 
 screenlock-pin doesn't protect from someone watching you type, malware running as you, root on the running machine, anyone who can read machine's memory, or coercion (a strong account password doesn't protect from these either). screenlock-pin also assumes full-disk encryption.
 
+`docs/threat-model.md` has the full threat model, attacker by attacker, with what stops each one, the numbers, and what is still open.
+
 ## Scope
 
 Now: the lock screen only, KDE only, with extensive security analysis and testing, and no TPM functionality.
