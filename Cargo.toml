@@ -17,7 +17,7 @@ pamharness = { path = "crates/pamharness" }
 anyhow = "1.0.104"
 clap = { version = "4.6.7", features = ["derive"] }
 libc = "0.2"
-nix = { version = "0.31.3", features = ["fs", "time", "user"] }
+nix = { version = "0.32.0", features = ["fs", "time", "user"] }
 rpassword = "7.5.4"
 subtle = "2.6.1"
 tempfile = "3.27.0"
